@@ -16,8 +16,8 @@
 
 ## Function contracts
 
-- `readCapped(path, cap)`: allowlisted paths only (`INDEX/activeContext/decisions/architecture/style/issues` + `handoffs/**/*.md`); returns `{ text, truncated: boolean }`; unknown path → error; always strips secrets/`<private>`; appends truncation notice when capped.
-- `loadBrief()`: INDEX (≤30) + active slice; total ≤ ~80 lines or it truncates with notice; redacted.
+- `readCapped(path, cap)`: allowlisted paths only (`INDEX/activeContext/decisions/architecture/style/issues` + `handoffs/*.md` + `handoffs/archive/*.md`; archive recallable on demand, never auto-injected); returns `{ text, truncated: boolean }`; unknown path → error; always strips secrets/`<private>`; appends truncation notice when capped.
+- `loadBrief()`: INDEX (≤30) + active slice; auto-inject payload (INDEX attach + brief + hint) total ≤ ~80 lines or it truncates with notice; redacted. Excludes static root `AGENTS.md` directive (~10) + tool description (~3).
 - `matchIndex(event)`: exact symbol/file match against INDEX; returns 1-line hint or `undefined` — never content, never fuzzy.
 - `captureFailure(event, ledger)`: failures only, 20-line truncation, redacted, ledger-guarded (`ctx.storage`, content-ID check-before-write).
 - `snapshotHandoff(event, ledger)`: branch + `ctx.vcs.status()` + pending; content-hash-guarded (same hash as last snapshot for this session → no-op, else new immutable `handoffs/YYYY-MM-DD-HHmm.md`); newest wins.
