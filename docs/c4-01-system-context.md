@@ -11,10 +11,10 @@ Inside: the memory plugin (`.opencode/plugins/memory/`) plus the memory file sto
 | Actor / system | Relation to the plugin |
 |---|---|
 | Developer | Owns durable memory; approves promotion via `/memory-review`; reads/edits markdown directly in git |
-| OpenCode agent (V2) | Reads `INDEX.md`, calls `memory_recall`, follows the `AGENTS.md` memory protocol |
-| OpenCode V2 server/runtime | Loads the plugin (`plugins` key / `.opencode/plugins/` discovery); provides hooks, events, transforms, `ctx.storage`, `ctx.vcs` |
+| OpenCode agent (V2) | Reads `INDEX.md` (content via deduped `prompt` hook; protocol+links via `AGENTS.md` only), calls `memory_recall`, follows the `AGENTS.md` memory protocol |
+| OpenCode V2 server/runtime | Loads the plugin (`plugins` key / `.opencode/plugins/` discovery); provides hooks, events, transforms, `ctx.storage`, `ctx.vcs` (event names verified at P1 — see `c4-03-components.md` event-note) |
 | Local filesystem + git | Durable store and ultimate backbone: history, blame, undo/redo, restore |
-| GitHub issues | Manual source for `issues.md` lines (todo/doing/done). No API dependency |
+| GitHub issues | Manual source for `issues.md` lines (todo/doing/done), validated by `/memory-review`. No API dependency |
 
 ## Explicitly outside the boundary (non-goals)
 

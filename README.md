@@ -14,11 +14,11 @@ No transcripts, no embeddings/vector search, no cloud/server/API keys, no per-tu
 
 ```
 .opencode/
-├── AGENTS.md                  # hand-owned protocol + links (never auto-written)
-├── opencode.jsonc             # plugins: ["./plugins/memory"], agents: { memory-manager }
+├── AGENTS.md                  # hand-owned protocol + links only (never auto-written, never content)
+├── opencode.jsonc             # .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; repo-root → ["./.opencode/plugins/memory"]; plus agents: { memory-manager }
 ├── agents/memory-manager.md   # on-demand curator (edit: .opencode/memory/**, shell: deny)
 ├── plugins/memory/index.ts    # prompt/context/compaction hooks, memory_recall, /memory-review
-└── memory/                    # INDEX, activeContext, decisions, architecture, style, issues, handoffs/
+└── memory/                    # six files (INDEX, activeContext, decisions, architecture, style, issues) + handoffs/ root (snapshots) + handoffs/archive/ (retired lines)
 ```
 
 ## Try it without code (P0)
@@ -27,6 +27,6 @@ Create the six memory files by hand, add the protocol block to root `AGENTS.md`,
 
 ## Docs
 
-- `docs/c4-01-system-context.md` → `c4-06-code.md`: context, containers, components, interfaces, data model, code guide.
+- `docs/c4-01-system-context.md` → `c4-06-code.md`: C4 Context, Container, Component, Code, plus supplementary specs A (interfaces, `c4-04`) and B (data model, `c4-05`).
 - `docs/adr/0001–0005.md`: the five load-bearing decisions.
-- Root: `motivation.md`.
+- Root: `motivation.md` (normative overview + skeleton; file list, budgets, and hook contracts defer to `c4-05`/`c4-04` on conflict).

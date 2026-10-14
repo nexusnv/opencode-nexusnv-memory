@@ -41,20 +41,21 @@
 
 ```
 .opencode/
-├── AGENTS.md                  # hand-owned, tiny, durable (links memory; never auto-written)
-├── opencode.jsonc             # plugins: ["./plugins/memory"], agents: { memory-manager }, references
+├── AGENTS.md                  # hand-owned, tiny, durable (protocol + links; never auto-written, never content)
+├── opencode.jsonc             # location: .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; if repo-root opencode.jsonc → ["./.opencode/plugins/memory"]; plus agents: { memory-manager }, references
 ├── agents/
 │   └── memory-manager.md      # background subagent (on-demand only)
 ├── plugins/
 │   └── memory/
 │       └── index.ts           # Plugin.define: prompt/context/compaction hooks, tools, commands
-└── memory/
+└── memory/                    # six files + handoffs/ (normative list; see c4-05-data-model.md)
     ├── INDEX.md               # ≤30 lines: map to the other five files
-    ├── activeContext.md       # current slice: goal, pending, next
-    ├── decisions.md           # date | decision | why | rejected alternative (append-only)
-    ├── architecture.md        # contracts + sibling implementations + style lock
-    ├── style.md               # enforceable behavior rules (tech debt, contract-first, ripple)
-    └── handoffs/              # timestamped session snapshots (single-claim: newest wins)
+    ├── activeContext.md       # current slice: goal, pending, next, known-errors (append-until-60, then rotate; see §4.3-7)
+    ├── decisions.md           # date | decision | why | rejected alternative (append-only; §4.4, ADR-0005)
+    ├── architecture.md        # contracts + sibling implementations + style lock (review-gated rewrite, never auto-written)
+    ├── style.md               # enforceable behavior rules (review-gated rewrite, never auto-written)
+    ├── issues.md              # one line each: todo/doing/done + issue ref (manual + /memory-review-validated; see c4-04)
+    └── handoffs/              # session snapshots: handoffs/YYYY-MM-DD-HHmm.md (immutable, newest wins); handoffs/archive/ for retired durable lines (see §4.3-7, §4.4)
 ```
 
 ### 4.1 What is remembered (and what is not)
@@ -72,21 +73,21 @@
 
 - `INDEX.md` ≤ 30 lines; each memory file ≤ 60 lines; total auto-injected ≤ ~80 lines (~1.5k tokens).
 - Capture: failures only (truncated to 20 lines), session boundaries, explicit `remember` keyword. No per-turn LLM extraction.
-- Scratchpad (`activeContext.md`) is append-only during work; promotion to durable files happens only via `/memory-review` (human-approved) or the `memory-manager` subagent on demand.
-- AGENTS.md stays tiny: it states the protocol and *links* memory; it never contains memory itself. This directly answers the bloat fear: injection surface is bounded even as history grows.
+- Scratchpad (`activeContext.md`) is append-until-60 during work, then rotates: oldest Known-Errors block moves to `handoffs/archive/` with a notice, never into the prompt. Promotion to durable files happens only via `/memory-review` (human-approved) or the `memory-manager` subagent on demand.
+- AGENTS.md stays tiny: it states the protocol and *links* memory; it never contains memory content itself. The `prompt` hook is the sole injector of `INDEX.md` content (deduped — skip if already attached; see §4.3-1/4). This directly answers the bloat fear: injection surface is bounded even as history grows.
 
 ### 4.3 File lifecycle: scratchpad → durable → archived
 
 Three states. Only scratchpad is written automatically; durable requires human approval; archived is git history, never deleted.
 
-- **0. Init (once).** Plugin creates the directory + templates + commented config. `AGENTS.md` (hand-owned, never auto-written) links memory. Nothing injects beyond `INDEX.md` until content exists.
-- **1. Capture (automatic, zero-LLM).** `prompt` hook attaches `INDEX.md` to the current prompt only (retry-safe per V2 contract). Event stream (`ctx.event.subscribe`) appends *failed* shell/build/test output (truncated to 20 lines) to `activeContext.md` under Known Errors. Keyword ("remember X") and explicit `remember` calls take the same scratchpad path, flagged for review — never auto-promoted.
-- **2. Deduplication.** Every capture passes a persisted ledger (`ctx.storage`): check-before-write, persist attempt state, retry only inside a ~30s window. Restarts and session-end replays are no-ops. Direct fix for supermemory #106 (same batch re-POSTed → one fact stored 55×).
-- **3. Session end.** `session.idle` snapshot → `handoffs/YYYY-MM-DD-HHmm.md`: branch (via `ctx.vcs.status()`), open changes, completed vs. pending, next steps. Newest snapshot is the single source for "where did we leave off".
-- **4. Next session start.** `INDEX.md` (capped) loads at the top via the `AGENTS.md` chain; `context` hook pushes the active brief at the bottom (`event.system.push`). Anything deeper is lazy via `memory_recall` (one capped file per question).
-- **5. Promotion (only path to durable).** `/memory-review` command or `memory-manager` subagent (edit scoped to `.opencode/memory/**`, shell denied) proposes scratchpad → `decisions.md` / `architecture.md` / `style.md`. Human approves before write. No per-turn LLM extraction, no silent durable rewrites.
-- **6. Compaction survival.** `compaction` hook injects priors into the summary context and saves the produced summary as a handoff (`event.result` may record it directly). No custom threshold, no synthetic Continue, no model override (the #69/#85/#88 failure set). Pre-compaction state is already on disk, so a bad summary loses nothing durable.
-- **7. Aging.** Budgets enforced on every write (INDEX ≤30 lines, each file ≤60, auto-inject ≤~80 lines); overflow goes to `handoffs/`, never into the prompt. Phase-2 only: 30d TTL sweep or the recorded access-weighted decay ($W_m(t)$, $W_{\min}$) as an explicit command — off by default. `forget`/purge removes from active files; git retains history (restore = checkout).
+- **0. Init (once).** Plugin creates the directory + templates + commented config. `AGENTS.md` (hand-owned, never auto-written) carries protocol + links only, never file content. Nothing injects beyond `INDEX.md` until content exists.
+- **1. Capture (automatic, zero-LLM).** `prompt` hook is the sole injector of `INDEX.md` content: attach (capped) to the current prompt only, retry-safe per V2 contract, and skip if an `INDEX.md` attachment is already present (dedup guard — `AGENTS.md` never carries content, so no double injection). Event stream (`ctx.event.subscribe`; verify exact catalog names at P1 — see `c4-03-components.md` event-note) appends *failed* shell/build/test output (truncated to 20 lines, redacted) to `activeContext.md` under Known Errors. Keyword ("remember X") and explicit `remember` calls take the same scratchpad path, flagged for review — never auto-promoted.
+- **2. Deduplication.** Every capture passes a persisted ledger (`ctx.storage` — never an in-memory `Set` alone): check-before-write on content ID, persist attempt state, retry only inside a ~30s window. Restarts and session-end replays are no-ops. Direct fix for supermemory #106 (same batch re-POSTed → one fact stored 55×).
+- **3. Idle snapshots vs session end.** `session.idle` may fire N times per session; it is not session end. Handler is content-hash-guarded: compute hash of (branch + `ctx.vcs.status()` + pending); if unchanged since this session's last snapshot (hash stored in ledger), no-op; else write immutable `handoffs/YYYY-MM-DD-HHmm.md`: branch (via `ctx.vcs.status()`), open changes, completed vs. pending, next steps. Newest timestamped snapshot is the single source for "where did we leave off". "Idempotent per session" means same content → no new file.
+- **4. Next session start.** `prompt` hook attaches `INDEX.md` (capped, deduped) at the top; `context` hook pushes the active brief at the bottom (`event.system.push`). `AGENTS.md` contributes only the standing directive + links, never content. Anything deeper is lazy via `memory_recall` (one capped file per question).
+- **5. Promotion (only path to durable).** `/memory-review` command or `memory-manager` subagent (edit scoped to `.opencode/memory/**`, shell denied) proposes scratchpad → `decisions.md` / `architecture.md` / `style.md` / `issues.md` (scope-limited). Human approves before write. `issues.md` also accepts direct manual edits (one line per issue) but `/memory-review` validates format/caps/redaction. No per-turn LLM extraction, no silent durable rewrites.
+- **6. Compaction survival.** `compaction` hook injects priors into the summary context and saves the produced summary as a handoff. Shape-guard: if `event.system` exists, `push` priors (capped); always handle `event.result` (set it to record the summary yourself when supported, else save the produced summary as a handoff file). No custom threshold, no synthetic Continue, no model override (the #69/#85/#88 failure set). Pre-compaction state is already on disk, so a bad summary loses nothing durable.
+- **7. Aging.** Budgets enforced on every write (INDEX ≤30 lines, each file ≤60, auto-inject ≤~80 lines); content overflow (retired durable lines, rotated scratchpad blocks) goes to `handoffs/archive/`, never into the prompt. Session snapshots go to `handoffs/` root. Phase-2 only: 30d TTL sweep or the recorded access-weighted decay ($W_m(t)$, $W_{\min}$) as an explicit command — off by default; applies only to unreachable episodic notes, never to reachable decisions (ADR-0005). `forget`/purge removes from active files; git retains history (restore = checkout).
 - **8. Invalidation.** Edited global/upward `AGENTS.md` applies before the next model request (V2 guarantee). Edited *already-loaded nested* files do not — which is why auto-written memory lives in `.opencode/memory/`, never in nested `AGENTS.md` files.
 
 ### 4.4 Long-past memory: the causal chain (why `d`/`e`, not the old names)
@@ -103,7 +104,7 @@ Code shows the present (`d`, `e`). It cannot show *why not the old name*, or tha
 - Supersedes: 2024-01-18 (initial `On/Off` naming)
 ```
 
-Retention = **reachability from today**, not age. `d`/`e` entries are active (always retainable). `c` is retained as *causal* (one hop behind `d`/`e` via the supersede link — not injected by default, but followed on demand). `b` is retained only if still referenced, else compacted to one INDEX line. `a` leaves active files for `handoffs/archive/` (still in git, still greppable, never injected). Reachable decisions are structurally exempt from decay; age-based forgetting applies only to unreachable episodic notes. Lookup is exact-match grep on the symbol + link-walk (`d/e → c → b`), two capped reads then stop — no embeddings needed.
+Retention = **reachability from today**, not age. `d`/`e` entries are active (always retainable; "60 lines active" in `c4-05-data-model.md` means the injectable suffix — the last ≤60 lines — while the full append-only log plus git retains everything). `c` is retained as *causal* (one hop behind `d`/`e` via the supersede link — not injected by default, but followed on demand). `b` is retained only if still referenced, else compacted to one INDEX line. `a` leaves active files for `handoffs/archive/` (retired durable lines; still in git, still greppable, never injected). Session snapshots live at `handoffs/` root (`handoffs/YYYY-MM-DD-HHmm.md`, immutable, newest wins) — distinct from `handoffs/archive/`. Reachable decisions are structurally exempt from decay; age-based forgetting applies only to unreachable episodic notes. Lookup is exact-match grep on the symbol + link-walk (`d/e → c → b`), two capped reads then stop — no embeddings needed.
 
 ### 4.5 The tell-tale: how the agent knows to peek (without bloat)
 
@@ -124,12 +125,36 @@ Long-past content is never auto-injected. What is always injected is a pointer s
 
 ```ts
 // .opencode/plugins/memory/index.ts
+// Normative skeleton: allowlisted recall + persisted ledger + deduped INDEX + shape-guarded compaction.
+// Event names ("tool.execute.after", "session.idle") MUST be verified against the live
+// /v2/docs/build/plugins/ event catalog at P1; gate merge on `opencode plugin list` + runtime log proving
+// failure-capture and idle-snapshot fire. Fallback if absent: capture on prompt-hook file diff.
 import { Plugin } from "@opencode/plugin"
+
+const ALLOWED_RECALL = new Set([
+  "INDEX.md", "activeContext.md", "decisions.md",
+  "architecture.md", "style.md", "issues.md",
+])
+
+function isHandoffPath(file: string): boolean {
+  return file.startsWith("handoffs/") && file.endsWith(".md") && !file.includes("..")
+}
 
 export default Plugin.define({
   id: "memory",
   async setup(ctx) {
-    const seen = new Set<string>() // capture ledger (persist to ctx.storage for restart survival)
+    // Persisted ledger (ctx.storage) — never an in-memory Set alone (ADR-0004, supermemory #106).
+    const ledger = {
+      async has(id: string): Promise<boolean> {
+        const seen = ((await ctx.storage.get("ledger.seen")) as string[] | undefined) ?? []
+        return seen.includes(id)
+      },
+      async mark(id: string): Promise<void> {
+        const seen = ((await ctx.storage.get("ledger.seen")) as string[] | undefined) ?? []
+        if (!seen.includes(id)) await ctx.storage.set("ledger.seen", [...seen.slice(-500), id])
+        await ctx.storage.set(`ledger.attempt.${id}`, Date.now())
+      },
+    }
 
     await ctx.command.transform((editor) => {
       editor.add({
@@ -137,7 +162,7 @@ export default Plugin.define({
         description: "Promote scratchpad notes into durable memory (human-approved)",
         execute: async ({ sessionID, prompt, delivery }) => {
           await ctx.session.prompt({ sessionID, delivery,
-            text: `${prompt.text}\n\nRead .opencode/memory/INDEX.md and activeContext.md, propose promotions into decisions/architecture/style (capped), and ask for approval before writing.` })
+            text: `${prompt.text}\n\nRead .opencode/memory/INDEX.md and activeContext.md, propose promotions into decisions/architecture/style/issues (capped, redacted), and ask for approval before writing. Never write durable files without approval.` })
         },
       })
     })
@@ -147,13 +172,20 @@ export default Plugin.define({
         name: "memory_recall",
         description: "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone.",
         input: { type: "object", properties: { file: { type: "string" } }, required: ["file"], additionalProperties: false },
-        execute: async (input) => readCapped(`.opencode/memory/${(input as { file: string }).file}`),
+        execute: async (input) => {
+          const file = (input as { file: string }).file
+          if (!ALLOWED_RECALL.has(file) && !isHandoffPath(file)) throw new Error(`unknown memory file: ${file}`)
+          return readCapped(`.opencode/memory/${file}`) // readCapped enforces cap + truncation notice + secrets/<private> strip
+        },
       })
     })
 
     await ctx.session.hook("prompt", (event) => {
+      // Sole INDEX-content injector (AGENTS.md carries protocol+links only). Dedup guard prevents double injection.
       event.prompt.files ??= []
-      event.prompt.files.push({ uri: "file:///.opencode/memory/INDEX.md" })
+      const absIndex = `${ctx.project.root}/.opencode/memory/INDEX.md`
+      const already = event.prompt.files.some((f: { uri: string }) => f.uri.endsWith(".opencode/memory/INDEX.md"))
+      if (!already) event.prompt.files.push({ uri: `file://${absIndex}` })
     })
 
     await ctx.session.hook("context", (event) => {
@@ -162,16 +194,23 @@ export default Plugin.define({
       if (hint) event.system.push({ type: "text", text: hint }) // 1-line tell-tale, never content
     })
 
-    await ctx.session.hook("compaction", async (event) => {
-      event.system.push({ type: "text", text: loadPriors() })
-      // event.result may be set to record the summary yourself; otherwise save the produced summary as a handoff
+    await ctx.session.hook("compaction", async (event: { system?: { push: (m: unknown) => void }; result?: unknown }) => {
+      // Shape-guard: compaction payload differs across V2 versions — handle both.
+      const priors = loadPriors() // capped + redacted
+      if (event.system) event.system.push({ type: "text", text: priors })
+      if ("result" in event && event.result !== undefined) {
+        await saveHandoffFromResult(event.result) // record summary yourself when supported
+      }
+      // Else: the runtime-produced summary is saved as a handoff by the post-compaction path.
+      // Never change model/threshold/trigger here.
     })
 
     const controller = new AbortController()
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        if (event.type === "tool.execute.after" && isFailure(event)) captureFailure(event, seen)
-        if (event.type === "session.idle") snapshotHandoff(event, seen)
+        // P1 gate: confirm these strings in the live catalog; see c4-03 event-note.
+        if (event.type === "tool.execute.after" && isFailure(event)) await captureFailure(event, ledger)
+        if (event.type === "session.idle") await snapshotHandoff(event, ledger) // content-hash-guarded; same content → no-op
       }
     })()
     return () => controller.abort()
@@ -196,7 +235,7 @@ Durable `style.md` entries, quoted by the agent every session via the AGENTS.md 
 Mimicking biological memory — vector-based semantic recall, lossy associative summaries, organic forgetting — is the wrong paradigm for a coding harness. Human memory optimizes for survival and pattern-matching in ambiguity; software demands determinism, structural precision, and verifiable lineage. This plugin therefore bans all four biological failure modes by construction:
 
 - **Fuzzy semantics → exact symbols.** Compilers don't grade on "semantic closeness": one renamed flag or dropped import breaks the build. Retrieval here is exact-match grep on symbols/files plus `Supersedes` link-walking (§4.4) and `ctx.vcs` diffs — relationship pointers ("what calls this?", "what superseded this?"), never vibe similarity. This is why there are no embeddings: the adopted vector-failure analysis and the v1 re-embed/support burden already ruled them out; the determinism argument closes the case.
-- **Reconstructive drift → immutable entries.** Recalled-and-retold narratives hallucinate APIs and blend modules (context rot). Durable entries are append-only and verbatim: corrections are new entries with `Supersedes` links, never edits. Summaries exist only as disposable handoffs, never as memory.
+- **Reconstructive drift → immutable lineage where required.** Recalled-and-retold narratives hallucinate APIs and blend modules (context rot). `decisions.md` and `handoffs/` are append-only and verbatim: corrections are new entries with `Supersedes` links, never edits. `architecture.md` / `style.md` / `issues.md` are review-gated rewrites (human-approved via `/memory-review`, git blame preserves lineage). Summaries exist only as disposable handoffs, never as memory.
 - **Organic forgetting → explicit pruning.** A dropped migration quirk or edge-case rule is a production bug, not cognitive hygiene. Nothing durable fades by age; removal is an explicit human-approved promotion/compaction into `INDEX.md` one-liners or `handoffs/archive/`, with git retaining everything.
 - **Episodic timelines → engineering lineage.** Decisions cite verifiable artifacts: file paths, commit SHAs, issue numbers, contract names. Every entry carries `Touches` + `Supersedes`, so "why" is always traceable to a diff, not a recollected vibe.
 
@@ -205,7 +244,7 @@ Concretely: AST/symbol/dependency navigation where the harness offers it (`ctx.v
 ## 5. Roadmap (MVP-first)
 
 - **P0 — no code (1 day):** root `AGENTS.md` protocol + six memory files + manual `memory-manager` subagent. Acceptance: new session restores context from `INDEX.md` + `activeContext.md` without re-explaining.
-- **P1 — local plugin (2–4 days):** skeleton above, ledger-backed idempotent capture, budgets enforced, `/memory-review`, handoffs. Acceptance: zero LLM calls in default path; injection ≤ budget; no duplicates across restart; compaction preserves priors.
+- **P1 — local plugin (2–4 days):** skeleton above, ledger-backed idempotent capture, budgets enforced, `/memory-review`, handoffs. Acceptance: zero LLM calls in default path; injection ≤ budget; no duplicates across restart; compaction preserves priors; event names verified against live V2 catalog (runtime log); redaction blocks secrets fixtures.
 - **P2 — hardening (1–2 weeks):** `<private>` redaction + secrets blocklist, multi-project isolation check, permission UX, evals (recall success vs. tokens injected), docs. Optional only: SQLite FTS mirror, 30d TTL sweep, recorded access-weighted decay as an explicit command — never automatic.
 
 Cost: $0 default (no API, no server, no embeddings). Latency: file reads only.

@@ -8,8 +8,8 @@ Supermemory #106: a timed-out capture batch (guarded only by an in-memory set) w
 
 ## Decision
 
-- Capture is zero-LLM and failure-/boundary-only (failed shell/build/test truncated to 20 lines; idle snapshots; explicit `remember`). Every write passes a persisted ledger (`ctx.storage`): check-before-write, persisted attempts, retry only inside ~30s. Restarts and replays are no-ops.
-- Scratchpad (`activeContext.md`) is append-only during work. The sole path to durable files (`decisions.md`, `architecture.md`, `style.md`) is `/memory-review` (or the scoped `memory-manager` subagent): propose, human approves, then write.
+- Capture is zero-LLM and failure-/boundary-only (failed shell/build/test truncated to 20 lines and redacted; content-hash-guarded idle snapshots; explicit `remember`). Every write passes a persisted ledger (`ctx.storage`, never in-memory alone): check-before-write on content ID, persisted attempts, retry only inside ~30s. Restarts and replays are no-ops.
+- Scratchpad (`activeContext.md`) is append-until-60 during work (then rotate oldest Known-Errors block to `handoffs/archive/` with notice). The sole path to durable files (`decisions.md`, `architecture.md`, `style.md`) is `/memory-review` (or the scoped `memory-manager` subagent): propose, human approves, then write. `issues.md` accepts direct manual edits (one line per issue) and is validated — not overwritten — by `/memory-review` (format/cap/redaction check).
 
 ## Consequences
 

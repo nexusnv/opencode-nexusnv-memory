@@ -8,7 +8,7 @@ Supermemory's custom compaction reimplemented the trigger (80% threshold) and co
 
 ## Decision
 
-The plugin registers `ctx.session.hook("compaction")` solely to inject priors into the summary context and to record the resulting summary as a handoff (`event.result` optional). No custom threshold, no synthetic continuation, no model override. Pre-compaction state is already on disk from ledger-guarded capture, so a bad summary loses nothing durable.
+The plugin registers `ctx.session.hook("compaction")` solely to inject priors into the summary context and to record the resulting summary as a handoff. Shape-guarded: if `event.system` exists, push capped + redacted priors; always handle `event.result` (set it to record the summary when supported, else save the produced summary as a `handoffs/` file). No custom threshold, no synthetic continuation, no model override. Pre-compaction state is already on disk from ledger-guarded capture, so a bad summary loses nothing durable.
 
 ## Consequences
 

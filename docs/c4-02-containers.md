@@ -8,13 +8,13 @@
 |---|---|
 | OpenCode TUI/CLI | Developer surface; runs `/memory-review`, shows notices |
 | OpenCode V2 server + plugin runtime | Loads plugin from `plugins` array or `.opencode/plugins/` auto-discovery; exposes `session.hook`, `event.subscribe`, `tool`/`command` transforms, `storage`, `vcs` |
-| Memory file store | Six markdown files + `handoffs/` under `.opencode/memory/` (see `c4-05-data-model.md`) |
+| Memory file store | Six markdown files (`INDEX/activeContext/decisions/architecture/style/issues`) + `handoffs/` under `.opencode/memory/` (see `c4-05-data-model.md`; `handoffs/` root = session snapshots, `handoffs/archive/` = retired durable lines) |
 | Capture ledger | Durable JSON in `ctx.storage` (seen IDs, attempt timestamps) — restart-safe idempotency |
 | Git repository | History, blame, restore; branch/status source for handoff snapshots |
 
 ## Topology and data flow
 
-Single machine, zero network calls in the default path. Flow: prompt admission → INDEX attach (`prompt` hook) → work with failure-only capture (event stream → scratchpad) → brief + hint at bottom (`context` hook) → idle snapshot (`handoffs/`) → priors into summary (`compaction` hook) → human-approved promotion (`/memory-review`).
+Single machine, zero network calls in the default path. Flow: prompt admission → INDEX attach (`prompt` hook, sole content injector, deduped) → work with failure-only capture (event stream → scratchpad) → brief + hint at bottom (`context` hook; AGENTS.md carries protocol+links only, never content) → content-hash-guarded idle snapshot (`handoffs/YYYY-MM-DD-HHmm.md`; same content → no-op; newest wins) → priors into summary (`compaction` hook, shape-guarded) → human-approved promotion (`/memory-review`).
 
 ```mermaid
 flowchart LR
@@ -27,8 +27,8 @@ flowchart LR
 
 ## Cross-cutting concerns
 
-- **Budgets:** INDEX ≤30 lines, each file ≤60, auto-inject ≤~80 lines (~1.5k tokens). Overflow → `handoffs/`, never the prompt.
+- **Budgets:** INDEX ≤30 lines, each file ≤60, auto-inject ≤~80 lines (~1.5k tokens). Content overflow (retired lines, rotated scratchpad blocks) → `handoffs/archive/`; session snapshots → `handoffs/` root; never the prompt.
 - **Cost/latency:** $0 default; file reads only.
 - **Permissions:** `memory-manager` subagent edits scoped to `.opencode/memory/**`, shell denied; primary agents unchanged.
 - **Security:** secrets blocklist, `<private>` redaction, per-project isolation, size caps before inject.
-- **Config:** `plugins: ["./plugins/memory"]`, `agents: { memory-manager }`, `references: { memory }` (V2 config shapes; note: V2 `instructions` array is accepted but not resolved — memory rides `AGENTS.md`).
+- **Config:** `.opencode/opencode.jsonc` → `plugins: ["./plugins/memory"]`; repo-root `opencode.jsonc` → `plugins: ["./.opencode/plugins/memory"]`; plus `agents: { memory-manager }`, `references: { memory }` (V2 config shapes; note: V2 `instructions` array is accepted but not resolved — memory rides `AGENTS.md` + `prompt` hook, never `instructions`).

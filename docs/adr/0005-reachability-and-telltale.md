@@ -8,8 +8,8 @@ Long-past "why" (e.g. enum naming from project inception) is invisible in curren
 
 ## Decision
 
-- **Retention = reachability, not age.** `decisions.md` entries carry `status`, `touches[]`, `supersedes[]`. Active entries stay; causal entries (e.g. `c` behind live `d`/`e`) are retained one hop behind the present; unreferenced entries compact to one INDEX line; removed entries leave active files for `handoffs/archive/` but persist in git. Reachable decisions are exempt from decay; age-based forgetting applies only to unreachable episodic notes.
-- **Lineage is append-only.** Corrections are new entries with `Supersedes` links, never edits — no reconstructive drift; summaries are disposable handoffs, never memory (§4.8).
+- **Retention = reachability, not age.** `decisions.md` entries carry `status`, `touches[]`, `supersedes[]`. Active entries stay ("60 lines active" = injectable suffix; full log + git retains everything); causal entries (e.g. `c` behind live `d`/`e`) are retained one hop behind the present; unreferenced entries compact to one INDEX line; removed entries leave active files for `handoffs/archive/` (session snapshots stay at `handoffs/` root) but persist in git. Reachable decisions are exempt from decay; age-based forgetting applies only to unreachable episodic notes.
+- **Lineage is append-only where required.** `decisions.md` and `handoffs/` are append-only/immutable: corrections are new entries with `Supersedes` links, never edits — no reconstructive drift; summaries are disposable handoffs, never memory (§4.8). `architecture.md` / `style.md` / `issues.md` are review-gated rewrites with git blame as lineage.
 - **Retrieval is a tell-tale, not an injection.** Standing directive (~10 lines, always on) + `memory_recall` description as retrieval policy + one deterministic hint line on exact INDEX match only. Full text enters context solely when the model peeks (one capped read, then stop).
 
 ## Consequences
