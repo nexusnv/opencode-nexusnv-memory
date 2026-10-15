@@ -120,7 +120,11 @@ function splitKnownErrors(allLines: string[]): {
       if (current) errorBlocks.push(current);
       current = [line];
     } else if (current) {
-      if (SECTION_HEADING.test(line.trim())) {
+      // Column-0 `##` only: captured detail bodies are stored 2-space
+      // indented (`  ${line}`), so a trimmed test would let tool output
+      // containing `## Next` terminate the block early and launder the
+      // remainder into the trusted context slice unsanitized (H-1).
+      if (SECTION_HEADING.test(line)) {
         errorBlocks.push(current);
         current = undefined;
         break;
@@ -267,6 +271,11 @@ export async function loadPriors(
       tail = "";
     }
     const lines: string[] = ["[memory] compaction priors"];
+    // H-2: activeContext + decisions tail are untrusted data (hand-edits,
+    // social-engineered approvals, rememberAsserted lines). Label them as
+    // data-only like loadBrief does — the compaction summarizer must not
+    // treat priors as trusted instructions.
+    lines.push(UNTRUSTED_LABEL);
     if (active.trim().length > 0) {
       lines.push("## active context");
       lines.push(...active.split("\n").filter((l) => l.trim().length > 0));
@@ -277,7 +286,7 @@ export async function loadPriors(
     }
     const pointer = await newestHandoffLine(root);
     if (pointer !== undefined) lines.push(pointer);
-    if (lines.length === 1) return "";
+    if (lines.length <= 2) return "";
     return redact(
       truncateLinesWithNotice(lines, cap * 2 + 5).join("\n"),
     );

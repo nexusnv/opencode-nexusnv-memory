@@ -44,12 +44,19 @@ function visibleLines(text: string): string[] {
   return out;
 }
 
-/** Directive fact(s) from one visible line, or `undefined` when no match. */
+/** Directive fact(s) from one visible line, or `undefined` when no match.
+ * Detection runs on the inline-code-stripped line (so `` `remember: x` ``
+ * does not trigger), but the fact is extracted from the original line so
+ * ``remember: `foo` bar`` keeps `` `foo` `` instead of dropping it (L-5). */
 function directiveFact(line: string): string | undefined {
   const stripped = line.replace(INLINE_CODE, "");
+  const onStripped =
+    stripped.match(REMEMBER_COLON)?.[1]?.trim() !== undefined ||
+    stripped.match(REMEMBER_THAT)?.[1]?.trim() !== undefined;
+  if (!onStripped) return undefined;
   return (
-    stripped.match(REMEMBER_COLON)?.[1]?.trim() ||
-    stripped.match(REMEMBER_THAT)?.[1]?.trim() ||
+    line.match(REMEMBER_COLON)?.[1]?.trim() ||
+    line.match(REMEMBER_THAT)?.[1]?.trim() ||
     undefined
   );
 }
@@ -113,9 +120,20 @@ function extractPromptText(input: unknown): string | undefined {
 
 /** In-process single-flight for user-asserted facts (same pattern as the
  * ledger `inflight` map): concurrent admissions of one fact converge on a
- * single append. The persisted `hasSeen` check remains the cross-restart
- * dedupe; this set only closes the same-process check-then-act race. */
+ * single append. Keyed by projectID + contentID (M-3): same fact text in two
+ * projects must append to both roots. The persisted `hasSeen` check remains
+ * the cross-restart dedupe; this set only closes the same-process
+ * check-then-act race. */
 const assertedInflight = new Set<string>();
+
+function assertedFlightKey(projectID: string, contentID: string): string {
+  return `${projectID}\0${contentID}`;
+}
+
+/** Test seam: drop asserted single-flight state between isolated suites. */
+export function resetAssertedSingleFlightForTests(): void {
+  assertedInflight.clear();
+}
 
 /**
  * Append a `source:user` directive to `decisions.md` (the prompt-hook fast
@@ -140,8 +158,9 @@ export async function rememberAsserted(
 
     // Same-process single-flight first: concurrent admissions of one fact
     // converge here without touching storage.
-    if (assertedInflight.has(contentID)) return false;
-    assertedInflight.add(contentID);
+    const flightKey = assertedFlightKey(deps.projectID, contentID);
+    if (assertedInflight.has(flightKey)) return false;
+    assertedInflight.add(flightKey);
     try {
       if (await hasSeen(deps.storage, deps.projectID, contentID)) return false;
 
@@ -164,7 +183,7 @@ export async function rememberAsserted(
       await markSeen(deps.storage, deps.projectID, contentID, deps.now);
       return true;
     } finally {
-      if (assertedInflight.has(contentID)) assertedInflight.delete(contentID);
+      assertedInflight.delete(assertedFlightKey(deps.projectID, contentID));
     }
   } catch (error) {
     try {

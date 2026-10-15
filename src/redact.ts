@@ -8,7 +8,7 @@
  *    `test/fixtures/secrets.txt`).
  */
 
-const PRIVATE_TAG = /<\s*(\/?)\s*private\s*>/gi;
+const PRIVATE_TAG = /<\s*(\/?)\s*private(?:\s+[^>]*)?\s*>/gi;
 
 const REDACTED = "[redacted]";
 
@@ -83,13 +83,16 @@ const BLOCKLIST: readonly Pattern[] = [
   // Slack tokens.
   { re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: REDACTED },
   // Bearer tokens: keep the scheme so the header shape stays visible.
+  // Scheme is case-insensitive per RFC 7235 (M-1: `bearer`/`BEARER` in logs).
   {
-    re: /\bBearer\s+[A-Za-z0-9\-._~+/=]{20,}\b/g,
+    re: /\bBearer\s+[A-Za-z0-9\-._~+/=]{20,}\b/gi,
     replacement: "Bearer [redacted]",
   },
   // URL credentials (e.g. DATABASE_URL=postgres://user:pass@host/...).
+  // Empty user allowed (`redis://:pass@host`); password runs to the last `@`
+  // before `/`/whitespace so `user:p@ss@host` redacts `p@ss` (M-1).
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s/]+)(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\s]*:)([^\s/]+)(@)/g,
     replacement: "$1[redacted]$3",
   },
   // AWS secret access key with label.
@@ -102,9 +105,12 @@ const BLOCKLIST: readonly Pattern[] = [
   // through their closing quote (so values containing spaces are fully
   // covered); quoted alternatives consume backslash escapes first, so an
   // escaped quote cannot end the match early and leak the remainder.
-  // Unterminated quotes match to end of line (fail-closed).
+  // Unterminated quotes match to end of line (fail-closed). Key coverage is
+  // intentionally broad (M-1: OPENAI_KEY/GITHUB_KEY/AUTH/ENCRYPTION_KEY via
+  // the generic KEY/AUTH/CREDENTIAL match — over-redaction like MONKEY= is
+  // accepted over a leak).
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
+    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];

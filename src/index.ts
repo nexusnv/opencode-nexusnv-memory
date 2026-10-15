@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   captureFailure,
   dispatchEvent,
@@ -133,16 +134,20 @@ export default Plugin.define({
           const projectID = projectIDOf(ctx);
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
           event.prompt.files ??= [];
+          // L-5: require the file:// scheme so an https://evil/… URL ending
+          // in the same suffix cannot suppress the legit attach.
           const already = event.prompt.files.some(
             (f) =>
               typeof f?.uri === "string" &&
+              f.uri.startsWith("file://") &&
               f.uri.endsWith(".opencode/memory/INDEX.md"),
           );
           if (!already) {
             const abs = join(memoryRoot, "INDEX.md");
             // Over-cap/missing/unreadable INDEX is not attached (no truncation).
             if (await indexWithinCap(abs, options.indexLines)) {
-              event.prompt.files.push({ uri: `file://${abs}` });
+              // L-5: encode spaces/#/etc. via file URL encoding.
+              event.prompt.files.push({ uri: pathToFileURL(abs).href });
             }
           }
           // One bounded side effect: user-asserted remember → decisions.md.

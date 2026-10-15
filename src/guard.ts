@@ -32,7 +32,7 @@ const AGENT_DIRECTED =
   /(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+instructions?\b|you\s+are\s+now\b|new\s+system\s+prompt\b|disregard\s+the\s+above\b|overrides?\s+(your|previous|prior)\b/i;
 
 const IMPERATIVE_LINE =
-  /^\s*(run|execute|do|install|delete|remove|fetch|curl|wget|eval|exec|overwrite|replace|commit|push|send|ignore|disregard|forget|remember\s+to|make\s+sure\s+to)\b/im;
+  /^\s*(run|execute|install|delete|remove|fetch|curl|wget|eval|exec|overwrite|replace|commit|push|send|ignore|disregard|forget|remember\s+to|make\s+sure\s+to)\b/im;
 const IMPERATIVE_OBLIGATION = /\byou\s+(must|should|need\s+to)\b/i;
 
 const URL_FETCH =
@@ -66,23 +66,28 @@ export const BRIEF_SUMMARY_CHARS = 120;
 
 /**
  * Collapse a stored entry to its one message-derived summary line: first
- * line, whitespace collapsed, capped at 120 chars, `source:` tag preserved.
- * The recall-only body is dropped, not truncated into the brief. Pure,
- * synchronous, never throws.
+ * line, whitespace collapsed, capped at 120 chars, canonical `source:tool`
+ * tag appended. The recall-only body is dropped, not truncated into the
+ * brief. Any attacker-supplied `source:*` token in the summary is stripped
+ * first (M-2) so a `source:user`/`source:snapshot` smuggled via
+ * error.message/cmd cannot survive into the brief. Pure, synchronous,
+ * never throws.
  */
 export function sanitizeForBrief(entry: unknown): string {
   try {
     if (typeof entry !== "string") return "";
     const first = (entry.split("\n")[0] ?? "").replace(/\s+/g, " ").trim();
     if (first.length === 0) return "";
-    // Keep a complete `source:` tag when one fits; otherwise reserve room
-    // so the appended tag is never sliced mid-token.
-    const tag = first.match(/source:\S+/);
-    if (tag && (tag.index ?? 0) + tag[0].length <= BRIEF_SUMMARY_CHARS) {
-      return first.slice(0, BRIEF_SUMMARY_CHARS);
-    }
+    // Strip every `source:` token, then append the canonical tag. The
+    // stored error blocks are always tool-derived, so `source:tool` is
+    // correct by construction.
+    const cleaned = first
+      .replace(/source:\S+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
     const fallback = " source:tool";
-    return `${first.slice(0, BRIEF_SUMMARY_CHARS - fallback.length)}${fallback}`;
+    if (cleaned.length === 0) return "source:tool";
+    return `${cleaned.slice(0, BRIEF_SUMMARY_CHARS - fallback.length)}${fallback}`;
   } catch {
     return "";
   }

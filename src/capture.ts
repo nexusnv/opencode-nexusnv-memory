@@ -52,13 +52,31 @@ const inflight = new Map<string, Promise<boolean>>();
 /** In-process single-flight for in-progress failure captures by content ID:
  * concurrent `execute.after` events for one failure converge on a single
  * append instead of each passing the `hasSeen` check and duplicating the
- * entry (with a double `pending` increment). The persisted ledger remains
- * the cross-restart dedupe. */
+ * entry (with a double `pending` increment). Keyed by projectID + contentID
+ * (M-3): two projects hashing the same generic failure must not dedupe each
+ * other. The persisted ledger remains the cross-restart dedupe. */
 const captureInflight = new Set<string>();
+
+function captureFlightKey(projectID: string, contentID: string): string {
+  return `${projectID}\0${contentID}`;
+}
+
+/** In-process single-flight for compaction captures by event ID (M-4):
+ * `session.compaction.ended` is durable and `subscribe` may redeliver it;
+ * concurrent redeliveries during `writeHandoffUnique` IO must converge on
+ * one handoff instead of minting `-01` siblings. Keyed by projectID + event
+ * ID like the failure path. */
+const compactionInflight = new Set<string>();
+
+function compactionFlightKey(projectID: string, eventID: string): string {
+  return `${projectID}\0${eventID}`;
+}
 
 /** Test seam: drop single-flight state between isolated suites. */
 export function resetLedgerSingleFlightForTests(): void {
   inflight.clear();
+  captureInflight.clear();
+  compactionInflight.clear();
 }
 
 function requireNonEmpty(name: string, value: string): string {
@@ -589,10 +607,11 @@ export async function captureFailure(
     if (await hasSeen(storage, projectID, contentID)) {
       return { reason: "duplicate", contentID };
     }
-    if (captureInflight.has(contentID)) {
+    const flightKey = captureFlightKey(projectID, contentID);
+    if (captureInflight.has(flightKey)) {
       return { reason: "duplicate", contentID };
     }
-    captureInflight.add(contentID);
+    captureInflight.add(flightKey);
     try {
       if (!(await shouldRetry(storage, projectID, contentID, options?.now))) {
         return { reason: "retry-later", contentID };
@@ -668,7 +687,7 @@ export async function captureFailure(
     }
     return { reason: "captured", contentID };
     } finally {
-      captureInflight.delete(contentID);
+      captureInflight.delete(captureFlightKey(projectID, contentID));
     }
   } catch (error) {
     return fail(error);
@@ -1265,6 +1284,7 @@ export type CompactionReason =
   | "captured"
   | "duplicate"
   | "skipped"
+  | "dropped"
   | "failed";
 
 export interface CompactionOutcome {
@@ -1310,6 +1330,30 @@ export async function captureCompactionOutcome(
         ? (data["sessionID"] as string)
         : undefined;
     if (sessionID === undefined) return { reason: "skipped" };
+    // M-4: location-less `compaction.ended` for an unknown session is
+    // dropped (symmetric with the idle path). Without an event directory the
+    // root falls back to the receiver's memoryRoot, which would poison the
+    // receiver's handoffs/ + seen ledger under the receiver's projectID.
+    if (eventDirectoryOf(record) === undefined) {
+      let known = false;
+      try {
+        known =
+          (await getSnapshotHash(deps.storage, deps.projectID, sessionID)) !==
+            undefined ||
+          (await getThrottle(deps.storage, deps.projectID, sessionID)) !==
+            undefined;
+      } catch (error) {
+        return fail(error);
+      }
+      if (!known) {
+        try {
+          log(`[memory] dropping location-less compaction for unknown session`);
+        } catch {
+          // Logging must never break capture.
+        }
+        return { reason: "dropped" };
+      }
+    }
     let fresh: boolean;
     try {
       fresh = !(await hasSeen(deps.storage, deps.projectID, id));
@@ -1317,6 +1361,10 @@ export async function captureCompactionOutcome(
       return fail(error);
     }
     if (!fresh) return { reason: "duplicate" };
+    const flightKey = compactionFlightKey(deps.projectID, id);
+    if (compactionInflight.has(flightKey)) return { reason: "duplicate" };
+    compactionInflight.add(flightKey);
+    try {
     const now = eventTimeOf(record, deps.now ?? Date.now());
     const { branch } = await readVcsSnapshot(deps.vcs, log);
     const reason =
@@ -1370,6 +1418,9 @@ export async function captureCompactionOutcome(
       }
     });
     return { reason: "captured", file };
+    } finally {
+      compactionInflight.delete(flightKey);
+    }
   } catch (error) {
     return fail(error);
   }
@@ -1491,7 +1542,9 @@ export interface SnapshotIfDueOptions {
  * slot and never interleave `handoffs/` writes. Claiming the slot first
  * also makes this location-less synthesis a known session, so the
  * unknown-session drop never fires for it. Without a `vcs` the slot is
- * still recorded (stub-compatible) but nothing is written. Never throws.
+ * still recorded (stub-compatible) but nothing is written. When a `vcs` is
+ * present the content hash is pre-checked before claiming (L-3), so an
+ * unchanged poll does not burn the 10-min slot. Never throws.
  */
 export async function snapshotIfDue(
   storage: LedgerStorage,
@@ -1507,6 +1560,37 @@ export async function snapshotIfDue(
       DEFAULT_MEMORY_OPTIONS.snapshotThrottleMinutes;
     const windowMs =
       Number.isInteger(minutes) && minutes > 0 ? minutes * 60_000 : 0;
+    // L-3: when a VCS is present, skip the throttle burn on a provably
+    // unchanged poll. The hash covers branch + changes + pending; an equal
+    // stored hash means snapshotHandoffIfChanged would be a no-op, so return
+    // before claiming. Errors fall through to the claim path (which handles
+    // them), preserving the known-session + stub-compatible behavior.
+    if (options?.vcs !== undefined) {
+      try {
+        const { branch, changes } = await readVcsSnapshot(
+          options.vcs,
+          options.log,
+        );
+        let pending = 0;
+        try {
+          pending = await getPending(storage, projectID);
+        } catch {
+          pending = -1;
+        }
+        if (pending >= 0) {
+          const hash = snapshotContentHash(branch, changes, pending);
+          let stored: string | undefined;
+          try {
+            stored = await getSnapshotHash(storage, projectID, sessionID);
+          } catch {
+            stored = undefined;
+          }
+          if (stored !== undefined && stored === hash) return false;
+        }
+      } catch {
+        // Fall through to the claim path below.
+      }
+    }
     const proceed = await withWriteLock(async () => {
       const last = await storage.get(throttleKey(projectID, sessionID));
       if (
