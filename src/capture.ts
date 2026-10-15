@@ -11,7 +11,12 @@
  * Ledger helpers only — `captureFailure`/`snapshotHandoffIfChanged` land in
  * later tasks (T4/T8) on top of these primitives.
  */
-import { withWriteLock } from "./files.js";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { resolveMemoryRoot, withWriteLock, writeCapped, type CappedFileOptions } from "./files.js";
+import { flagInjection } from "./guard.js";
+import { redact } from "./redact.js";
 
 /**
  * Minimum surface of `ctx.storage` the ledger needs. Method shorthand keeps
@@ -349,4 +354,303 @@ export async function pruneSeenTo500(
     }
   });
   return victims.length;
+}
+
+/* ------------------------------------------------------------------ */
+/* captureFailure (spec §5.3 + c4-04 tool-hook contract, G4 baseline)  */
+/* ------------------------------------------------------------------ */
+
+/** Max chars of the message-derived summary line (spec §5.2). */
+export const FAILURE_SUMMARY_CHARS = 120;
+
+/** Max recall-only detail lines, written only when the event carries output. */
+export const FAILURE_DETAIL_LINES = 20;
+
+const KNOWN_ERRORS_HEADING_LINE = "## Known errors";
+
+const ACTIVE_CONTEXT_SCAFFOLD = `# Active context — current slice (append-until-60, then rotate)
+
+## Goal
+- (what this session is trying to do)
+
+## Pending
+- (open items)
+
+## Next
+- (immediate next steps)
+
+## Known errors
+`;
+
+const METADATA_OUTPUT_KEYS = [
+  "output",
+  "stdout",
+  "stderr",
+  "text",
+  "body",
+  "logs",
+  "log",
+  "outputText",
+  "detail",
+] as const;
+
+export type CaptureReason =
+  | "captured"
+  | "duplicate"
+  | "skipped"
+  | "retry-later"
+  | "failed";
+
+export interface CaptureOutcome {
+  readonly reason: CaptureReason;
+  readonly contentID?: string;
+}
+
+export interface CaptureFailureOptions extends CappedFileOptions {
+  readonly now?: number;
+  readonly log?: (error: unknown) => void;
+}
+
+/** Collapse whitespace/newlines and cap at `FAILURE_SUMMARY_CHARS`. */
+function summaryLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return "unknown error";
+  return collapsed.slice(0, FAILURE_SUMMARY_CHARS);
+}
+
+/**
+ * Best-effort `<cmd>` from untyped `event.input` (shell-tool-dependent;
+ * G4 never assumes it). Returns `undefined` when nothing yields a command.
+ */
+function commandOf(input: unknown): string | undefined {
+  try {
+    if (typeof input !== "object" || input === null) {
+      return typeof input === "string" && input.trim().length > 0
+        ? input.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 60)
+        : undefined;
+    }
+    const record = input as Record<string, unknown>;
+    for (const key of ["command", "cmd", "tool"] as const) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        const cmd = value
+          .split("\n")[0]!
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 60);
+        if (cmd.length > 0) return cmd;
+      }
+    }
+    const args = record["args"];
+    if (
+      Array.isArray(args) &&
+      args.every((a) => typeof a === "string") &&
+      args.length > 0
+    ) {
+      const cmd = (args as string[])
+        .join(" ")
+        .split("\n")[0]!
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 60);
+      if (cmd.length > 0) return cmd;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Optional recall-only detail: the sole candidate source is untyped
+ * `error.metadata` inspection — never assumed present. Returns at most the
+ * last `FAILURE_DETAIL_LINES` lines, or `undefined` when no output is found.
+ */
+function detailOf(metadata: unknown): string[] | undefined {
+  try {
+    let output: string | undefined;
+    if (typeof metadata === "string") {
+      output = metadata;
+    } else if (typeof metadata === "object" && metadata !== null) {
+      const record = metadata as Record<string, unknown>;
+      for (const key of METADATA_OUTPUT_KEYS) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim().length > 0) {
+          output = value;
+          break;
+        }
+      }
+      if (output === undefined) {
+        for (const value of Object.values(record)) {
+          if (typeof value === "string" && value.trim().length > 0) {
+            output = value;
+            break;
+          }
+        }
+      }
+    }
+    if (output === undefined || output.trim().length === 0) return undefined;
+    const lines = output.split("\n");
+    return lines.slice(-FAILURE_DETAIL_LINES);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Stable content ID over the redacted summary + detail. */
+export function failureContentID(summary: string, detail: string): string {
+  return createHash("sha256")
+    .update(`${summary}\n${detail}`, "utf8")
+    .digest("hex");
+}
+
+async function readRawActiveContext(root: string): Promise<string> {
+  try {
+    return await readFile(join(root, "activeContext.md"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+async function listArchive(root: string): Promise<Set<string>> {
+  try {
+    return new Set(await readdir(join(root, "handoffs", "archive")));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Failure-only capture for the `execute.after` tool hook (spec §5.3).
+ *
+ * Builds a `source:tool` message-derived summary line (`error.message`
+ * first line, ≤120 chars) with a `<cmd>:` prefix only when untyped
+ * `event.input` yields one, plus an optional ≤20-line recall-only detail
+ * block only when `error.metadata` carries output. Redacts, ledger-dedupes
+ * by stable content ID (~30s retry), appends under Known Errors via
+ * `writeCapped`, marks seen + attempt, increments scratchpad-only pending,
+ * and sets the rotated marker when the append rotated. Advisory
+ * `flagInjection` flags travel with the entry. Never throws.
+ */
+export async function captureFailure(
+  event: unknown,
+  storage: LedgerStorage,
+  projectID: string,
+  memoryRoot?: string,
+  options?: CaptureFailureOptions,
+): Promise<CaptureOutcome> {
+  const log = options?.log ?? (() => undefined);
+  const fail = (error: unknown): CaptureOutcome => {
+    try {
+      log(error);
+    } catch {
+      // Logging must never break the tool hook.
+    }
+    return { reason: "failed" };
+  };
+  try {
+    if (typeof event !== "object" || event === null) {
+      return { reason: "skipped" };
+    }
+    const record = event as Record<string, unknown>;
+    const status = record["status"];
+    const errorValue = record["error"];
+    // Failures only: prefer `status`, fall back to `error != null` (G4).
+    if (status !== undefined) {
+      if (status !== "error") return { reason: "skipped" };
+    } else if (errorValue === null || errorValue === undefined) {
+      return { reason: "skipped" };
+    }
+
+    const errorRecord =
+      typeof errorValue === "object" && errorValue !== null
+        ? (errorValue as Record<string, unknown>)
+        : undefined;
+    const rawMessage =
+      typeof errorRecord?.["message"] === "string"
+        ? (errorRecord["message"] as string)
+        : typeof errorValue === "string"
+          ? errorValue
+          : "unknown error";
+    const messageFirst = rawMessage.split("\n")[0] ?? "";
+    const cmd = commandOf(record["input"]);
+    const summary = summaryLine(
+      cmd !== undefined ? `${cmd}: ${messageFirst}` : messageFirst,
+    );
+    const detailLines = detailOf(errorRecord?.["metadata"]);
+    const detail = detailLines?.join("\n") ?? "";
+
+    const redactedSummary = redact(summary);
+    const redactedDetail = redact(detail);
+    const contentID = failureContentID(redactedSummary, redactedDetail);
+
+    if (await hasSeen(storage, projectID, contentID)) {
+      return { reason: "duplicate", contentID };
+    }
+    if (!(await shouldRetry(storage, projectID, contentID, options?.now))) {
+      return { reason: "retry-later", contentID };
+    }
+    await markAttempt(storage, projectID, contentID, options?.now);
+
+    const flags = flagInjection(`${redactedSummary}\n${redactedDetail}`);
+    const block: string[] = [`- ${redactedSummary} source:tool`];
+    if (redactedDetail.length > 0) {
+      for (const line of redactedDetail.split("\n")) block.push(`  ${line}`);
+    }
+    if (flags.length > 0) {
+      block.push(`  <!-- flags: ${flags.join(", ")} (advisory) -->`);
+    }
+    const entry = `${block.join("\n")}\n`;
+
+    const root = resolveMemoryRoot(memoryRoot);
+    const current = await readRawActiveContext(root);
+    let next: string;
+    if (current.length === 0) {
+      next = `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
+    } else {
+      const withNewline = current.endsWith("\n") ? current : `${current}\n`;
+      next = /^##\s+known errors\s*$/im.test(current)
+        ? `${withNewline}${entry}`
+        : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
+    }
+
+    const before = await listArchive(root);
+    await writeCapped("activeContext.md", next, {
+      memoryRoot,
+      fileLines: options?.fileLines,
+      indexLines: options?.indexLines,
+    });
+    await markSeen(storage, projectID, contentID, options?.now);
+    await incPending(storage, projectID);
+
+    // Rotation marker for the status line: a fresh archive file means this
+    // append rotated the oldest Known-Errors block(s) out.
+    try {
+      const after = await listArchive(root);
+      const fresh = [...after].filter((name) => !before.has(name));
+      if (fresh.length > 0) {
+        let blocks = 0;
+        for (const name of fresh) {
+          try {
+            const archived = await readFile(
+              join(root, "handoffs", "archive", name),
+              "utf8",
+            );
+            blocks += archived
+              .split("\n")
+              .filter((line) => /^\s*-\s+/.test(line)).length;
+          } catch {
+            // Fall through to the file-count fallback below.
+          }
+        }
+        await setRotated(storage, projectID, blocks > 0 ? blocks : fresh.length);
+      }
+    } catch {
+      // Rotation reporting is best-effort; the capture already landed.
+    }
+    return { reason: "captured", contentID };
+  } catch (error) {
+    return fail(error);
+  }
 }
