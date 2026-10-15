@@ -18,7 +18,7 @@ Memory content is treated as **untrusted data, never instructions** (ADR-0007). 
 AGENTS.md (repo root)         # hand-owned protocol + links only (never auto-written, never content)
 .opencode/
 ├── opencode.jsonc             # .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; repo-root → ["./.opencode/plugins/memory"]; plus agents: { memory-manager } and ≤5 plugin options (ADR-0006: no references entry)
-├── agents/memory-manager.md   # on-demand curator, read-only: no edit, no shell, no webfetch/websearch, no skill (proposes only; ADR-0007)
+├── agents/memory-manager.md   # on-demand curator, read-only: `*` deny, `read/glob/grep` allow only (proposes only; ADR-0007)
 ├── plugins/memory/index.ts    # prompt/context/compaction hooks, execute.after capture, memory_recall, memory_apply, /memory-review
 └── memory/                    # six files (INDEX, activeContext, decisions, architecture, style, issues) + handoffs/ root (snapshots) + handoffs/archive/ (retired lines)
 ```
