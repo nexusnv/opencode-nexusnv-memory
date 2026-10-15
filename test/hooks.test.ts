@@ -146,6 +146,16 @@ function setupHooks(
         };
       },
     },
+    command: {
+      transform: async (
+        cb: (editor: { add: (def: unknown) => void }) => void,
+      ) => {
+        cb({ add: (_def: unknown) => undefined });
+        return {
+          dispose: async () => undefined,
+        };
+      },
+    },
     session: {
       hook: async (
         name: string,
@@ -157,6 +167,9 @@ function setupHooks(
             hooks.delete(name);
           },
         };
+      },
+      prompt: async (_args: unknown) => {
+        return { sessionID: SESSION } as never;
       },
     },
   };
