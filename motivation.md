@@ -128,7 +128,7 @@ Long-past content is never auto-injected. What is always injected is a pointer s
 | Full decision text | capped file | only after the model peeks |
 | INDEX attach | ≤30 lines | once per prompt (deduped) |
 | Brief (`context` hook) | ≤48 lines | every session with content |
-| Captured failure bodies | optional, ≤20 lines on disk | **never** auto-injected (recall-only; the documented failure payload is message-only — G4) |
+| Captured failure bodies | optional, ≤20 lines on disk via `error.metadata` only | **never** auto-injected (recall-only; `Tool.Error{message}` only — G4 proven) |
 
 **Nothing raw is auto-injected.** Captured command output is untrusted data: the brief carries a one-line summary per known error and any captured body is `memory_recall`-only. Memory content is treated as data, never instructions — no component executes, fetches, or obeys text read from memory, the review writes nothing, and every durable write is approved per line (ADR-0007).
 
@@ -222,7 +222,7 @@ Durable `style.md` entries, quoted by the agent every session via the AGENTS.md 
 - "'Develop concrete implementation for X' means: implement the existing interface/contract; survey sibling implementations first; no core-engine disruption unless the contract itself must change; list ripple effects explicitly."
 - "Across model swaps, keep the recorded architecture style. A different pattern needs explicit justification referencing `decisions.md`."
 
-`memory-manager.md` system prompt: read traces, update `activeContext.md`, record patterns in `architecture.md`/`style.md` only via `/memory-review`, create handoffs. This makes "knows what I did, judges relevance for today" a file-read discipline, not a vector query.
+`memory-manager.md` system prompt: read traces, propose `activeContext.md` updates and `architecture.md`/`style.md` promotions only via `/memory-review` proposal tables (never write — read-only since ADR-0007), create handoff drafts for review. This makes "knows what I did, judges relevance for today" a file-read discipline, not a vector query.
 
 ### 4.8 Design principle: no human-like memory (Gemini discovery)
 

@@ -39,7 +39,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 
 | Primitive | Verified shape | Used by |
 |---|---|---|
-| Package | `import { Plugin } from "@opencode/plugin"`; `export default Plugin.define({ id, setup(ctx) \| effect(ctx) })` | entrypoint |
+| Package | `import { Plugin } from "@opencode/plugin"` (Promise flavor: `Plugin.define({ id, setup(ctx) })`); `import { Plugin } from "@opencode/plugin/effect"` (Effect flavor: `effect(ctx)`). This spec uses the Promise flavor only. | entrypoint |
 | Lifecycle | `setup` runs at load; **it may return a cleanup function that runs at unload**; unloading also disposes registrations | `index.ts` |
 | Location | `ctx.location.directory`, optional `ctx.location.workspaceID`, `ctx.location.project.{id,directory,canonical}`. **There is no `ctx.project`.** | path resolution |
 | Options | `ctx.options` from the `{package, options}` plugin config entry | `config.ts` |
@@ -51,7 +51,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | Compaction hook | runs **before** the summary model call; `event.system` and `event.messages` present; **setting `event.result` skips the model call** | priors only |
 | Permissions | `ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})` (resolves on allow, rejects with `Tool.Error` on deny/reject); `ctx.permission.hook("evaluate")`; `list/get/reply` | `memory_apply` per-line approval |
 | Storage | `ctx.storage.get/set/remove/scan({prefix,after?,limit?})` — durable JSON scoped to the plugin. **`scan` exists** (`{entries:[{key,value}],next?}`). | ledger |
-| VCS | `ctx.vcs.get()` → `Vcs.Info{provider?,branch:{current?,default?}}`; `ctx.vcs.status()` → `FileStatus[]`; `ctx.vcs.diff({mode,context?,maxOutputBytes?})`; `branches/transform/reload` | snapshots |
+| VCS | `ctx.vcs.get()/status()/branch.list()/diff({mode,base?,context?})` → envelopes `{location,data}` (unwrap `.data`: `Vcs.Info{branch:{current?,default?}}`, `FileStatus[]`, `string[]`, `FileDiff[]`); `transform/reload`. No `branches()` method; no `maxOutputBytes` on diff input. | snapshots |
 | Events | `ctx.event.subscribe({signal})` → async iterable of typed events; abort on cleanup. OpenAPI carries `V2EventEncoded` as an opaque string, but `@opencode/schema` enumerates the catalogue: `session.idle` (ephemeral, `data:{sessionID}`, optional `location`), `session.compaction.started/delta/ended/failed` (`ended.data:{reason,model?,providerState?,providerContext?,text,recent,cost?,tokens?,sessionID}`) | idle/compaction capture, diagnostics |
 | Config keys | `plugins` (plural), `agents`, `permissions`, `default_agent`, `references`, `instructions`, `compaction` | install |
 | Discovery | `.opencode/plugins/` loads direct `.ts`/`.js` files and immediate package directories; arrays merge global → project → `.opencode` | install |
@@ -237,8 +237,8 @@ Exactly five options, all optional, read once in `setup` via `ctx.options`:
 
 Ship `agents/memory-manager.md` (file-based) for `.opencode/agents/memory-manager.md`, and/or an
 equivalent `agents: { "memory-manager": { … } }` JSONC entry; both accept identical fields. See §5.8
-for the read-only permission rules. The **default/primary** agent needs a `subagent` allow for
-`memory-manager` **only** if the optional delegation path is enabled (the parent's `subagent`
+for the read-only permission rules. The **default/primary** agent needs `{ "action": "subagent", "resource": "memory-manager", "effect": "allow" }`
+**only** if the optional delegation path is enabled (the parent's `subagent`
 permissions control which agents it may launch); the default review runs in-session (§5.8).
 
 ### 4.3 References — not used (ADR-0006, P4)
@@ -250,7 +250,17 @@ mis-typed config entry (the earlier file-level `…/INDEX.md` form was invalid).
 
 ### 4.4 System, permissions, compaction, instructions (HS-07/08/09)
 
-Unchanged except agent-scoped `permissions`. Never set `compaction` thresholds or `auto`. V2 does
+Ship this user-pasted rule so `memory_apply` prompts instead of failing open (base policy `*/* → allow` would otherwise auto-allow a novel action with no matching rule):
+
+```jsonc
+{
+  "permissions": [
+    { "action": "memory_write", "resource": "*", "effect": "ask" }
+  ]
+}
+```
+
+The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. Never set `compaction` thresholds or `auto`. V2 does
 resolve the `instructions` array, but this design deliberately does not use it: memory rides
 `AGENTS.md` + the `prompt` hook so injection has one owner and needs no client config edit.
 
@@ -402,7 +412,7 @@ await registrations.push(await ctx.tool.hook("execute.after", async (event) => {
   untyped `event.input` yields one. The indented ≤20-line detail block is an **optional
   enhancement**, written only when the event actually carries command output; when it does not, the
   entry is the summary line alone, and nothing downstream (budgets, redaction fixtures, evals) may
-  assume a body exists. It redacts, computes a stable content ID; ledger `has(id)` → no-op; else appends
+  assume a body exists. The sole candidate source for the optional detail is untyped `error.metadata` inspection — never assumed present. It redacts, computes a stable content ID; ledger `has(id)` → no-op; else appends
   to `activeContext.md` under Known Errors and marks the ledger; retry only inside ~30s. Each entry is
   written as **structure, not a blob** (summary line + optional recall-only detail). On a real scratchpad write it
   increments `<projectID>/curation.pending`, and if the append triggered a rotation it also sets the
@@ -481,7 +491,7 @@ await registrations.push(await ctx.command.transform((editor) => {
 }));
 ```
 
-- Spread `prompt` so `files`/`agents`/`skills`/`metadata` survive (P7).
+- Spread `prompt` so `files`/`agents`/`skills` survive (P7). `PromptInput.Prompt` carries only `{text,files?,agents?,skills?}` — there is no `metadata` to preserve; `delivery` comes from the invocation.
 - Invocation `/memory-review [scope]`. **The read+propose phase performs no writes and proposes only** —
   its sole output is a proposal table; nothing is applied until a human approves line by line (ADR-0007).
   It is **not** sandboxed: a plugin command cannot target a subagent (`CommandInvocation` has no agent
@@ -495,26 +505,30 @@ await registrations.push(await ctx.command.transform((editor) => {
 - **Untrusted candidates are never covered by a bulk "approve all"** — candidates not tagged
   `source:user` require explicit per-line approval. This is the step where a poisoned entry is caught by
   the human before it can be auto-injected every session.
-- **Application is deterministic and has an explicit channel.** The command cannot await the human's
+ - **Application is deterministic and has an explicit channel.** The command cannot await the human's
   approval (its executor receives only `{ sessionID, prompt, delivery }` and returns `void`), so
-  application is a separate, plugin-owned step: the **`memory_apply` tool**, whose executor calls
-  `ctx.permission.assert(...)` once per candidate line (the exact line + its `source:` tag go in the
-  prompt `metadata`, so approval is per line by construction and untrusted lines cannot be bulk-approved),
-  then writes each approved line via `writeCapped` exactly as approved (cap + redaction + routing),
-  never paraphrased or extended by a model. (A `/memory-apply` command is **not** an equivalent channel:
-  its executor still cannot await the human, so the per-line `permission.assert` guarantee would be lost —
-  the tool is the channel.)
+  application is a separate, plugin-owned step: the **`memory_apply` tool**. (A `/memory-apply` command is
+  **not** an equivalent channel: its executor still cannot await the human, so the per-line
+  `permission.assert` guarantee would be lost — the tool is the channel.)
 - **`memory_apply` contract (normative, mirrors `c4-04`).** Input:
   `{ candidates: [{ file, line, source: "user"|"tool"|"model"|"snapshot", flags?: string[] }] }`
-  (`file` allowlisted, `required`, `additionalProperties:false`). Output: `{ content: <summary> }`
-  (applied count + per-line outcome, via `toolResult`). Behavior: for each candidate call
-  `ctx.permission.assert({ sessionID, agent?, action, resources, metadata: { line, source }, save: [] })`
-  once; on allow call `writeCapped(file, line)`; untrusted lines cannot be bulk-approved; the model
-  never writes durable memory directly.
+  (`file` allowlisted, `required`, `additionalProperties:false`; `candidates:[]` is the explicit
+  reviewed-nothing signal). Executor: `execute: async (input, context) => …` binding
+  `sessionID: context.sessionID`, `agent: context.agent`,
+  `source: { type: "tool", messageID: context.messageID, id: context.id }` (the command's `sessionID`
+  is the wrong value by apply time). Per candidate, in order: call
+  `ctx.permission.assert({ sessionID: context.sessionID, agent: context.agent, action: "memory_write", resources: [file], metadata: { line, source }, source: { type: "tool", messageID: context.messageID, id: context.id }, save: [] })`
+  once (line + `source:` tag in `metadata`, so approval is per line by construction; `save:[]` stores
+  nothing on allow-always), then on allow call `writeCapped(file, line)` exactly as approved (cap +
+  redaction + routing), never paraphrased. Untrusted lines cannot be bulk-approved; the model never
+  writes durable memory directly. Requires the shipped `{ action: "memory_write", resource: "*", effect: "ask" }`
+  rule (§4.4) — without it the base `*/* → allow` policy resolves silently and the gate fails open.
+  Output on the all-allowed path: `{ content: <summary> }` (applied count, via `toolResult`). On the
+  first deny/rejection, propagate the `Tool.Error` (or step-ending error) immediately — remaining
+  candidates stay pending for a re-invoke; no summary is returned.
 - On completion, **`memory_apply` resets `<projectID>/curation.pending` to `0` and clears the
-  `<projectID>/curation.rotated` marker** (§5.7) so the status line stops nudging until new uncurated
-  captures accumulate. The `/memory-review` command itself resets nothing (it cannot observe approval);
-  when a review proposes zero candidates, the command may reset directly as the completion signal.
+  `<projectID>/curation.rotated` marker** (§5.7), including for `candidates:[]`. The `/memory-review`
+  command itself never resets (it cannot observe the proposal outcome).
 - A file-based `commands/memory-review.md` is an optional secondary affordance; the plugin-registered
   command is normative and shares one registry with file-based commands (later source wins).
 
@@ -566,8 +580,8 @@ await registrations.push(await ctx.session.hook("compaction", async (event) => {
   - Dropped (never truncated mid-sentence) before the hint line when the payload is over budget.
 - `snapshotHandoffIfChanged()`: resolves the memory root for the **event's** session/location (event
   `location.directory` + `data.sessionID`, falling back to `ctx.location`), never from a root captured
-  once at load; `branch` via `ctx.vcs.get()` (`Vcs.Info.branch.current`, fallback `ctx.vcs.branches()`);
-  open changes via `ctx.vcs.status()` (fallback `ctx.vcs.diff({mode:"working"})`); hash(branch + status + pending);
+  once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await ctx.vcs.branch.list()).data`);
+  open changes via `(await ctx.vcs.status()).data` (fallback `(await ctx.vcs.diff({mode:"working"})).data` — normalize to strings before hashing since the fallback changes `FileStatus[]` to `FileDiff[]`); hash(branch + status + pending);
   same hash as `<projectID>/snapshot/<sessionID>` in the ledger → no-op. All VCS calls
   sit behind one adapter so shape drift touches one function.
 - `ledger` (P6): persisted in `ctx.storage`, never in-memory alone. `ctx.storage` is scoped to the
@@ -578,8 +592,8 @@ await registrations.push(await ctx.session.hook("compaction", async (event) => {
   - `<projectID>/seen/<contentID>` → first-seen timestamp; check-before-write via `get`.
   - `<projectID>/attempt/<contentID>` → last attempt timestamp; retry only inside ~30s.
   - `<projectID>/curation.pending` → integer count of **uncurated scratchpad** captures since the last
-    apply; incremented by `captureFailure` and snapshot writes only (never by `source:user` direct
-    `decisions.md` appends); reset to `0` by `memory_apply` (or by the command on a zero-candidate review).
+    apply; incremented by `captureFailure` scratchpad writes only (never by `source:user` direct
+    `decisions.md` appends); reset to `0` by `memory_apply` (including `memory_apply({candidates:[]})` as the reviewed-nothing signal — the command itself never resets).
   - `<projectID>/curation.rotated` → transient marker with the number of blocks rotated out of `activeContext.md`;
     cleared after `statusLine()` reports it.
   - `<projectID>/snapshot/<sessionID>` → last snapshot content hash for hash-guarded idempotency.
@@ -674,7 +688,7 @@ void (async () => {
   not the location of every session it can access or event it receives"). `isThisLocation(event)`
   compares `event.location?.directory` (and `data.projectID`/`sessionID` where present) against the
   plugin's project and drops foreign events before writing; the memory root is resolved per
-  invocation from the event's session location (fallback `ctx.location`), never captured once at load.
+  invocation from the event's session location (`event.location?.directory`, fallback `ctx.location`), never captured once at load. Location-less events (e.g. `session.idle` without `location`) are treated as own and absorbed by the content-hash guard (spurious no-op wakeups only).
 - **Idle snapshots (D-A).** `session.idle` (ephemeral, `data:{sessionID}`) and the
   `session.compaction.*` family are enumerated in `@opencode/schema` (G1 proven). Primary = handle
   `session.idle` when delivered, content-hash-guarded (`<projectID>/snapshot/<sessionID>`), newest-wins.
@@ -684,7 +698,7 @@ void (async () => {
   changed. It must tolerate concurrent `context` invocations (tool-driven continuations) without
   interleaving `handoffs/` writes.
 - **Compaction capture (D-B).** `session.compaction.ended.data` carries the produced summary as `text`
-  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer). When the event
+  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer), guarded by ledger check-before-write on `<projectID>/seen/<event.id>` since `ended` is durable and `subscribe` replays redeliver it (same guard as snapshots via `<projectID>/snapshot/<sessionID>`, plus deterministic filename). When the event
   is missing, write a pointer-only handoff (timestamp + branch +
   "compaction occurred") — the durable pre-compaction state is already on disk.
 - Failure capture is **not** here; it is the tool hook (§5.3).
@@ -891,10 +905,10 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
   - redaction blocks the secrets fixtures and `<private>` (incl. unclosed tags);
   - `memory_recall` rejects unknown/traversal paths and returns the documented **executor** envelope via
     `toolResult` (default `{ content }`; G2), asserted by a contract test against the installed package;
-  - `memory_apply` approves **one candidate line per `ctx.permission.assert` call** (untrusted lines
-    cannot be bulk-approved) and writes via `writeCapped`;
-  - `handoffs/` root vs `archive/` routing covered;
-  - `vcs`/`storage` adapters tolerate shape drift;
+  - `memory_apply` approves **one candidate line per `ctx.permission.assert` call** with `action:"memory_write"`, `resources:[file]`, tool-context `sessionID/agent/source`, `save:[]` (untrusted lines
+    cannot be bulk-approved), writes via `writeCapped` sequentially and propagates the first deny (no summary on deny), and resets via `candidates:[]`; the shipped `memory_write → ask` rule is installed so `assert` actually prompts instead of auto-allowing;
+  - `handoffs/` root vs `archive/` routing covered; `compaction.ended` replay guarded via ledger;
+  - `vcs`/`storage` adapters unwrap envelopes (`.data`), use `branch.list()` (never `branches()`), `diff({mode,base?,context?})` (no `maxOutputBytes`), and normalize the status/diff fallback before hashing; `scan` paginates via `after`/`next`;
   - `memory-manager` has **no `edit`, no `shell`, no `webfetch`, no `websearch`, no `skill`** (permission
     test) (P17); the `subagent` allow for `memory-manager` is present when the optional delegation path
     is enabled;
