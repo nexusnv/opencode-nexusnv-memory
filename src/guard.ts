@@ -78,11 +78,12 @@ export function sanitizeForBrief(entry: unknown): string {
     if (typeof entry !== "string") return "";
     const first = (entry.split("\n")[0] ?? "").replace(/\s+/g, " ").trim();
     if (first.length === 0) return "";
-    // Strip every `source:` token, then append the canonical tag. The
+    // Strip every `source:` token (case-insensitive — display-only tag),
+    // then append the canonical tag. The
     // stored error blocks are always tool-derived, so `source:tool` is
     // correct by construction.
     const cleaned = first
-      .replace(/source:\S+/g, " ")
+      .replace(/source:\S+/gi, " ")
       .replace(/\s+/g, " ")
       .trim();
     const fallback = " source:tool";

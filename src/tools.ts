@@ -299,6 +299,8 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
     let applied = 0;
     for (let i = 0; i < parsed.length; i += 1) {
       const candidate = parsed[i]!;
+      // Deny propagates verbatim (identity-preserved): callers and tests
+      // rely on the original permission error surfacing unwrapped.
       await deps.permission.assert({
         sessionID: context.sessionID,
         agent: context.agent,
