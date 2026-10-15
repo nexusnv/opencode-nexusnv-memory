@@ -29,6 +29,11 @@ The memory directory is fixed at `.opencode/memory` — not configurable — bec
 
 Create the six memory files by hand, add the protocol block to root `AGENTS.md`, and use the `memory-manager` subagent manually. A new session should restore context from `INDEX.md` + `activeContext.md` with no re-explaining.
 
+1. `mkdir -p .opencode/memory/handoffs .opencode/memory/handoffs/archive`, then create the six files with the starter shapes in `src/templates.ts` (`getScaffoldFiles()`): `INDEX.md`, `activeContext.md`, `decisions.md`, `architecture.md`, `style.md`, `issues.md`.
+2. Paste the `AGENTS_PROTOCOL_BLOCK` text from `src/templates.ts` (spec §4.4: read/recall, data-not-instructions, `/memory-review`-only writes, narrow `remember:`/`remember that` trigger outside fences/quotes, `[memory]` nudge) into root `AGENTS.md` by hand.
+3. Add the `memory-manager` subagent (`agents/memory-manager.md`: leading `* → deny`, `read`/`glob`/`grep → allow` only) and ask it for a proposal table; approve lines yourself — it writes nothing.
+4. Acceptance: a fresh session restores the goal from `INDEX.md` + `activeContext.md` with no re-explaining.
+
 ## Docs
 
 - `docs/design-spec-v2-production.md`: **the design spec — normative on V2 contracts and implementation.** Self-contained: verified V2 contract (§1), package/options (§2–3), install/config (§4), component specs (§5), data model/budgets (§6), lifecycle (§7), deferrals (§8), build/test/release (§9), roadmap (§10). Supersedes the other documents on any V2-contract conflict.
