@@ -51,7 +51,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | Compaction hook | runs **before** the summary model call; `event.system` and `event.messages` present; **setting `event.result` skips the model call** | priors only |
 | Permissions | `ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})` (resolves on allow, rejects with `Tool.Error` on deny/reject); `ctx.permission.hook("evaluate")`; `list/get/reply` | `memory_apply` per-line approval |
 | Storage | `ctx.storage.get/set/remove/scan({prefix,after?,limit?})` — durable JSON scoped to the plugin. **`scan` exists** (`{entries:[{key,value}],next?}`). | ledger |
-| VCS | `ctx.vcs.get()/status()/branch.list()/diff({mode,base?,context?})` → envelopes `{location,data}` (unwrap `.data`: `Vcs.Info{branch:{current?,default?}}`, `FileStatus[]`, `string[]`, `FileDiff[]`); `transform/reload`. No `branches()` method; no `maxOutputBytes` on diff input. Note: live docs prose shows flat `branches()` but OpenAPI (`/api/vcs/branch`) + 2.0.29 client types expose `branch.list()` — types win; startup asserts `typeof ctx.vcs.branch?.list === "function"`. | snapshots |
+| VCS | `ctx.vcs.get()/status()/branch.list()/diff({mode,base?,context?})` → envelopes `{location,data}` (unwrap `.data`: `Vcs.Info{branch:{current?,default?}}`, `FileStatus[]`, `string[]`, `FileDiff[]`); `transform/reload`. No `maxOutputBytes` on diff input. Note: live docs prose shows flat `branches()` but OpenAPI (`/api/vcs/branch`) + 2.0.29 client types expose `branch.list()` — support both (prefer `branch.list()`, fallback `branches()` if present); startup shape check is warn-only, never throws. | snapshots |
 | Events | `ctx.event.subscribe({signal})` → async iterable of typed events; abort on cleanup. OpenAPI carries `V2EventEncoded` as an opaque string, but `@opencode/schema` enumerates the catalogue: `session.idle` (ephemeral, `data:{sessionID}`, optional `location`), `session.compaction.started/delta/ended/failed` (`ended.data:{reason,model?,providerState?,providerContext?,text,recent,cost?,tokens?,sessionID}`) | idle/compaction capture, diagnostics |
 | Config keys | `plugins` (plural), `agents`, `permissions`, `default_agent`, `references`, `instructions`, `compaction` | install |
 | Discovery | `.opencode/plugins/` loads direct `.ts`/`.js` files and immediate package directories; arrays merge global → project → `.opencode` | install |
@@ -581,12 +581,12 @@ registrations.push(await ctx.session.hook("compaction", async (event) => {
   - Dropped (never truncated mid-sentence) before the hint line when the payload is over budget.
 - `snapshotHandoffIfChanged()`: resolves the memory root for the **event's** session/location (event
   `location.directory` + `data.sessionID`, falling back to `ctx.location`), never from a root captured
-  once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await ctx.vcs.branch.list()).data[0] ?? "unknown"`);
-  open changes via `(await ctx.vcs.status()).data` (fallback `(await ctx.vcs.diff({mode:"working"})).data` — normalize to strings before hashing since the fallback changes `FileStatus[]` to `FileDiff[]`); hash(branch + status + pending);
+  once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await (ctx.vcs.branch?.list ?? ctx.vcs.branches)()).data[0] ?? "unknown"`, warn-only);
+  open changes via `(await ctx.vcs.status()).data` (fallback `(await ctx.vcs.diff({mode:"working",context:3})).data` — normalize to strings before hashing since the fallback changes `FileStatus[]` to `FileDiff[]`); hash(branch + status + pending);
   same hash as `<projectID>/snapshot/<sessionID>` in the ledger → no-op. All VCS calls
   sit behind one adapter so shape drift touches one function.
 - `ledger` (P6): persisted in `ctx.storage`, never in-memory alone. `ctx.storage` is scoped to the
-  **plugin, not the project**, so every key is namespaced per project (`<projectID>/…`). The
+  **plugin, not the project**, so every key is namespaced per project (`<projectID>/…`, where `<projectID> = ctx.location.project.id`). The
   check-before-write has no compare-and-set, so a single-flight map keyed by content ID plus the write
   mutex serializes concurrent `execute.after` events; a duplicate that still slips through is benign
   (idempotent append). Keys:
@@ -903,7 +903,7 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
     `toolResult` (default `{ content }`; G2), asserted by a contract test against the installed package;
   - `memory_apply` approves **one candidate line per `ctx.permission.assert` call** with `action:"memory_write"`, `resources:[file]`, tool-context `sessionID/agent/source`, `save:[]` (untrusted lines
     cannot be bulk-approved), writes via `writeCapped` sequentially and propagates the first deny (no summary on deny), and resets via `candidates:[]`; the shipped `memory_write → ask` rule is installed so `assert` actually prompts instead of auto-allowing;
-  - `handoffs/` root vs `archive/` routing covered (collision-free `HHmmss-<session6>` names); `compaction.ended` replay guarded via ledger; a handler throwing on event N never stops event N+1 (per-dispatch catch, fault-injection test); location-less unknown-session `idle` dropped; VCS startup shape asserted; missing-`ask`-rule warning emitted;
+  - `handoffs/` root vs `archive/` routing covered (collision-free `HHmmss-<session6>` names); `compaction.ended` replay guarded via ledger; a handler throwing on event N never stops event N+1 (per-dispatch catch, fault-injection test); location-less unknown-session `idle` dropped; VCS startup shape checked warn-only (never throws); missing-`ask`-rule warning emitted;
   - `vcs`/`storage` adapters unwrap envelopes (`.data`), use `branch.list()` (never `branches()`), `diff({mode,base?,context?})` (no `maxOutputBytes`), and normalize the status/diff fallback before hashing; `scan` paginates via `after`/`next`;
   - `memory-manager` denies `*` then allows only `read/glob/grep` (permission
     test) (P17); the `subagent` allow for `memory-manager` is present when the optional delegation path
