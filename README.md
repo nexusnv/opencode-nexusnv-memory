@@ -38,3 +38,54 @@ Create the six memory files by hand, add the protocol block to root `AGENTS.md`,
 - Root: `motivation.md` (background synthesis + the superseded §4.6 sketch; **not** normative on V2 contracts).
 
 **Precedence:** ADRs are normative on decision intent; `design-spec-v2-production.md` is normative on V2 contracts and implementation; the C4 docs and `user-stories.md` are descriptive and defer to the spec; `motivation.md` is background and its §4.6 skeleton is superseded and non-normative.
+
+## Install
+
+Two independent axes: **where the plugin code lives** (drop-in vs package) and **which config file declares it** (`.opencode/` vs repo root). Pick one cell.
+
+| Code location | Config file | `plugins` entry |
+|---|---|---|
+| `.opencode/plugins/memory/` (drop-in, auto-discovered; no config edit) | — | — (auto-discovery) |
+| `.opencode/plugins/memory/` | `.opencode/opencode.jsonc` | `"plugins": ["./plugins/memory"]` (relative to the containing config) |
+| `.opencode/plugins/memory/` | repo-root `opencode.jsonc` | `"plugins": ["./.opencode/plugins/memory"]` |
+| npm package `opencode-nexusnv-memory` | either config | `"plugins": ["opencode-nexusnv-memory"]` or `{ "package": "opencode-nexusnv-memory", "options": { … } }` |
+
+Global variant: `~/.config/opencode/plugins/`. Arrays merge global → project → `.opencode` (they do not replace). Never mix the two relative spellings for one location. Inside `.opencode/plugins/memory/`, only `index.ts` is the entrypoint; sibling modules load via relative imports.
+
+Verify with `opencode plugin list` (shows `memory`); reload by touching the entry file or restarting the runtime per its reload guidance. Supported range: OpenCode `2.0.x` with `@opencode/plugin` pinned to the exact `2.0.29` in `package.json` (never `latest`).
+
+### Plugin options (all optional)
+
+```jsonc
+{
+  // "indexLines": 30,              // INDEX.md cap (lines, on disk)
+  // "fileLines": 60,               // activeContext/architecture/style/issues + per-handoff cap
+  // "injectBudgetLines": 80,       // total auto-inject payload (INDEX attach + brief + status + hint)
+  // "captureFailures": true,       // append failed shell/build/test output to activeContext.md
+  // "snapshotThrottleMinutes": 10  // min interval between context-hook snapshots per session
+}
+```
+
+Invalid or missing values warn once and fall back to defaults; loading never throws. The memory directory is fixed at `.opencode/memory` and intentionally not configurable. The plugin never edits `opencode.jsonc`; on first run it scaffolds the directory and prints this snippet for you to paste.
+
+### Permissions (required)
+
+Ship this rule alongside the plugin so `memory_apply` prompts instead of failing open (the base `*/* → allow` policy would otherwise auto-allow the novel action with no matching rule):
+
+```jsonc
+{
+  "permissions": [
+    { "action": "memory_write", "resource": "*", "effect": "ask" }
+  ]
+}
+```
+
+On setup the plugin emits an unconditional loud warning that this rule must be installed — effective rules cannot be verified at setup. If the optional `memory-manager` delegation path is enabled, the parent agent also needs `{ "action": "subagent", "resource": "memory-manager", "effect": "allow" }`.
+
+## Budgets
+
+`INDEX.md` ≤ 30 lines on disk; `activeContext`/`architecture`/`style`/`issues` ≤ 60 lines; `decisions.md` unbounded with a ≤60-line injectable tail; handoffs ≤ 60 lines/file. Auto-inject payload = `INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1` (≤80 total). An over-cap `INDEX.md` is not attached; `/memory-review` reports the violation instead.
+
+## Uninstall
+
+Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
