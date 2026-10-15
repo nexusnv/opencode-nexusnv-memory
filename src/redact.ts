@@ -97,10 +97,12 @@ const BLOCKLIST: readonly Pattern[] = [
     re: /\baws_secret_access_key\s*[:=]\s*['"]?[A-Za-z0-9/+=]{30,}['"]?/gi,
     replacement: "aws_secret_access_key=[redacted]",
   },
-  // Generic .env-style assignments for secret-ish keys. Value (incl. quotes)
-  // is replaced; the key label is preserved.
+  // Generic .env-style assignments for secret-ish keys. The value is
+  // replaced with [redacted], preserving the key label. Quoted values match
+  // through their closing quote (so values containing spaces are fully
+  // covered); unterminated quotes match to end of line (fail-closed).
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)['"]?[^\s'";,]+['"]?/gi,
+    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|"[^"\n]*|'[^'\n]*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];

@@ -122,6 +122,12 @@ async function readRaw(root: string, file: string): Promise<string> {
   }
 }
 
+/** In-process single-flight for user-asserted facts (same pattern as the
+ * ledger `inflight` map): concurrent admissions of one fact converge on a
+ * single append. The persisted `hasSeen` check remains the cross-restart
+ * dedupe; this set only closes the same-process check-then-act race. */
+const assertedInflight = new Set<string>();
+
 /**
  * Append a `source:user` directive to `decisions.md` (the prompt-hook fast
  * path). Resolves `true` when appended, `false` on no-op (ambiguous text,
@@ -141,25 +147,36 @@ export async function rememberAsserted(
     const fact = redact(extractAssertedFacts(text).join("; ")).trim();
     if (fact.length === 0) return false;
     const contentID = assertedContentID(fact);
-    if (await hasSeen(deps.storage, deps.projectID, contentID)) return false;
-
-    const root = resolveMemoryRoot(deps.memoryRoot);
-    const current = await readRaw(root, "decisions.md");
     const entry = `- ${fact} (user-asserted) source:user`;
-    const next =
-      current.length === 0
-        ? `${entry}\n`
-        : current.endsWith("\n")
-          ? `${current}${entry}\n`
-          : `${current}\n${entry}\n`;
-    // decisions.md is append-only and unbounded: plain serialized write
-    // (no cap/rotation path applies).
-    await withWriteLock(async () => {
-      await mkdir(root, { recursive: true });
-      await writeFile(join(root, "decisions.md"), redact(next), "utf8");
-    });
-    await markSeen(deps.storage, deps.projectID, contentID, deps.now);
-    return true;
+
+    // Same-process single-flight first: concurrent admissions of one fact
+    // converge here without touching storage.
+    if (assertedInflight.has(contentID)) return false;
+    assertedInflight.add(contentID);
+    try {
+      if (await hasSeen(deps.storage, deps.projectID, contentID)) return false;
+
+      // File read + append inside one lock hold so a concurrent append of a
+      // *different* fact cannot interleave between the read and the write
+      // and be silently dropped. The ledger calls stay outside the lock:
+      // they take the same mutex internally and must never nest.
+      await withWriteLock(async () => {
+        const root = resolveMemoryRoot(deps.memoryRoot);
+        const current = await readRaw(root, "decisions.md");
+        const next =
+          current.length === 0
+            ? `${entry}\n`
+            : current.endsWith("\n")
+              ? `${current}${entry}\n`
+              : `${current}\n${entry}\n`;
+        await mkdir(root, { recursive: true });
+        await writeFile(join(root, "decisions.md"), redact(next), "utf8");
+      });
+      await markSeen(deps.storage, deps.projectID, contentID, deps.now);
+      return true;
+    } finally {
+      if (assertedInflight.has(contentID)) assertedInflight.delete(contentID);
+    }
   } catch (error) {
     try {
       log(error);

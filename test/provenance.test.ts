@@ -213,6 +213,31 @@ describe("captureFailure", () => {
     expect(summary.length).toBeLessThanOrEqual(140);
   });
 
+  it("concurrent captures keep every entry (no lost append)", async () => {
+    const results = await Promise.all([
+      captureFailure(
+        { status: "error", error: { message: "concurrent alpha failure" } },
+        storage,
+        PROJECT,
+        root,
+      ),
+      captureFailure(
+        { status: "error", error: { message: "concurrent beta failure" } },
+        storage,
+        PROJECT,
+        root,
+      ),
+    ]);
+    expect(results.map((r) => r.reason).sort()).toEqual([
+      "captured",
+      "captured",
+    ]);
+    const active = await readActive();
+    expect(active).toContain("concurrent alpha failure");
+    expect(active).toContain("concurrent beta failure");
+    expect(await getPending(storage, PROJECT)).toBe(2);
+  });
+
   it("dedupes replays without double pending", async () => {
     const event = { status: "error", error: { message: "same boom" } };
     expect((await captureFailure(event, storage, PROJECT, root)).reason).toBe(

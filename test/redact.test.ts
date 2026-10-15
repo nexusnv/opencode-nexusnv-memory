@@ -76,3 +76,28 @@ describe("strips_blocklist_and_private_variants", () => {
     expect(redact(once)).toBe(once);
   });
 });
+
+describe("quoted_env_values_with_spaces", () => {
+  it("redacts double-quoted values through the closing quote", () => {
+    const out = redact('API_KEY="with spaces inside"');
+    expect(out).not.toContain("with spaces inside");
+    expect(out).toContain("API_KEY=[redacted]");
+  });
+
+  it("redacts single-quoted values through the closing quote", () => {
+    const out = redact("PASSWORD='correct horse battery staple'");
+    expect(out).not.toContain("correct horse");
+    expect(out).toContain("PASSWORD=[redacted]");
+  });
+
+  it("still redacts unquoted values", () => {
+    const out = redact("TOKEN=abc123XYZ");
+    expect(out).not.toContain("abc123XYZ");
+    expect(out).toContain("TOKEN=[redacted]");
+  });
+
+  it("fail-closed on unterminated quotes (no leak to end of line)", () => {
+    const out = redact('SECRET="starts here but never ends');
+    expect(out).not.toContain("starts here");
+  });
+});

@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { resolveMemoryRoot, withWriteLock, writeCapped, type CappedFileOptions } from "./files.js";
+import { resolveMemoryRoot, updateCapped, withWriteLock, writeCapped, type CappedFileOptions } from "./files.js";
 import { flagInjection } from "./guard.js";
 import { redact } from "./redact.js";
 
@@ -48,6 +48,13 @@ export const RETRY_WINDOW_MS = 30_000;
 
 /** In-flight `markSeen` writes keyed by full storage key (single-flight). */
 const inflight = new Map<string, Promise<boolean>>();
+
+/** In-process single-flight for in-progress failure captures by content ID:
+ * concurrent `execute.after` events for one failure converge on a single
+ * append instead of each passing the `hasSeen` check and duplicating the
+ * entry (with a double `pending` increment). The persisted ledger remains
+ * the cross-restart dedupe. */
+const captureInflight = new Set<string>();
 
 /** Test seam: drop single-flight state between isolated suites. */
 export function resetLedgerSingleFlightForTests(): void {
@@ -507,15 +514,6 @@ export function failureContentID(summary: string, detail: string): string {
     .digest("hex");
 }
 
-async function readRawActiveContext(root: string): Promise<string> {
-  try {
-    return await readFile(join(root, "activeContext.md"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
-    throw error;
-  }
-}
-
 async function listArchive(root: string): Promise<Set<string>> {
   try {
     return new Set(await readdir(join(root, "handoffs", "archive")));
@@ -591,10 +589,15 @@ export async function captureFailure(
     if (await hasSeen(storage, projectID, contentID)) {
       return { reason: "duplicate", contentID };
     }
-    if (!(await shouldRetry(storage, projectID, contentID, options?.now))) {
-      return { reason: "retry-later", contentID };
+    if (captureInflight.has(contentID)) {
+      return { reason: "duplicate", contentID };
     }
-    await markAttempt(storage, projectID, contentID, options?.now);
+    captureInflight.add(contentID);
+    try {
+      if (!(await shouldRetry(storage, projectID, contentID, options?.now))) {
+        return { reason: "retry-later", contentID };
+      }
+      await markAttempt(storage, projectID, contentID, options?.now);
 
     const flags = flagInjection(`${redactedSummary}\n${redactedDetail}`);
     const block: string[] = [`- ${redactedSummary} source:tool`];
@@ -607,23 +610,24 @@ export async function captureFailure(
     const entry = `${block.join("\n")}\n`;
 
     const root = resolveMemoryRoot(memoryRoot);
-    const current = await readRawActiveContext(root);
-    let next: string;
-    if (current.length === 0) {
-      next = `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
-    } else {
-      const withNewline = current.endsWith("\n") ? current : `${current}\n`;
-      next = /^##\s+known errors\s*$/im.test(current)
-        ? `${withNewline}${entry}`
-        : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
-    }
-
     const before = await listArchive(root);
-    await writeCapped("activeContext.md", next, {
-      memoryRoot,
-      fileLines: options?.fileLines,
-      indexLines: options?.indexLines,
-    });
+    // Atomic read-modify-write inside the choke-point lock: concurrent
+    // failure captures must not read the same base and drop each other.
+    await updateCapped(
+      "activeContext.md",
+      {
+        memoryRoot,
+        fileLines: options?.fileLines,
+        indexLines: options?.indexLines,
+      },
+      (current) => {
+        if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
+        const withNewline = current.endsWith("\n") ? current : `${current}\n`;
+        return /^##\s+known errors\s*$/im.test(current)
+          ? `${withNewline}${entry}`
+          : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
+      },
+    );
     await markSeen(storage, projectID, contentID, options?.now);
     await incPending(storage, projectID);
 
@@ -663,6 +667,9 @@ export async function captureFailure(
       // Rotation reporting is best-effort; the capture already landed.
     }
     return { reason: "captured", contentID };
+    } finally {
+      captureInflight.delete(contentID);
+    }
   } catch (error) {
     return fail(error);
   }

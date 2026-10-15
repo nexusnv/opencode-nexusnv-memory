@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCapped, writeCapped, withWriteLock } from "../src/files.js";
+import { readCapped, updateCapped, writeCapped, withWriteLock } from "../src/files.js";
 
 let root: string;
 
@@ -154,5 +154,40 @@ describe("rejects_traversal_and_enforces_caps", () => {
     // Chain order = call order, so the second write wins intact.
     expect(out).toContain("B-1");
     expect(out).not.toContain("A-1");
+  });
+});
+
+describe("updateCapped_atomic_append", () => {
+  it("concurrent appends all land with no lost entries", async () => {
+    await writeCapped("activeContext.md", "# ctx\n", opts());
+    const append = (tag: string) =>
+      updateCapped(
+        "activeContext.md",
+        opts(),
+        (current) => `${current}- entry-${tag}\n`,
+      );
+    await Promise.all([
+      append("a"),
+      append("b"),
+      append("c"),
+      append("d"),
+      append("e"),
+    ]);
+    const out = await readCapped("activeContext.md", opts());
+    for (const tag of ["a", "b", "c", "d", "e"]) {
+      expect(out, `missing entry-${tag}`).toContain(`entry-${tag}`);
+    }
+  });
+
+  it("updater observes the latest content (no stale-base overwrite)", async () => {
+    await writeCapped("issues.md", "- one\n", opts());
+    await Promise.all([
+      updateCapped("issues.md", opts(), (c) => `${c}- two\n`),
+      updateCapped("issues.md", opts(), (c) => `${c}- three\n`),
+    ]);
+    const out = await readCapped("issues.md", opts());
+    expect(out).toContain("- one");
+    expect(out).toContain("- two");
+    expect(out).toContain("- three");
   });
 });

@@ -320,6 +320,28 @@ describe("tools", () => {
     );
   });
 
+  it("apply_rejects_disallowed_path_before_prompting", async () => {
+    const permission = new FakePermission();
+    const execute = createMemoryApplyExecute({
+      memoryRoot: root,
+      projectID: PROJECT,
+      storage,
+      permission,
+    });
+    await expect(
+      execute(
+        {
+          candidates: [
+            { file: "../INDEX.md", line: "- evil", source: "tool" },
+          ],
+        },
+        TOOL_CTX,
+      ),
+    ).rejects.toThrow();
+    // No approval prompt for a path outside the allowlist.
+    expect(permission.calls).toHaveLength(0);
+  });
+
   it("registers recall and apply via ctx.tool.transform", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-wire-"));
     const memoryDir = join(projectRoot, ".opencode", "memory");

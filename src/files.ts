@@ -255,6 +255,85 @@ export async function readCapped(
 }
 
 /**
+ * Inner write body: assumes the caller already holds `withWriteLock` and
+ * passes already-redacted text. Shared by `writeCapped` (overwrite) and
+ * `updateCapped` (read-modify-write) so caps, rotation, and archive routing
+ * cannot drift between the two paths. Never takes the lock itself.
+ */
+async function writeRedactedCapped(
+  file: string,
+  redactedText: string,
+  root: string,
+  indexLines: number,
+  fileLines: number,
+): Promise<void> {
+  const abs = resolveUnderRoot(root, file);
+  const total = countLines(redactedText);
+  const cap = getCapForFile(file, indexLines, fileLines);
+  if (!Number.isFinite(cap) || total <= (cap as number)) {
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, redactedText, "utf8");
+    return;
+  }
+  const limit = cap as number;
+  if (file !== "activeContext.md") {
+    throw new Error(
+      `[memory] write rejected: ${file} has ${total} lines, cap is ${limit}; refusing to silently truncate`,
+    );
+  }
+  // activeContext.md: rotate oldest Known-Errors block(s) to archive/.
+  const allLines = redactedText.split("\n");
+  // Drop a single trailing empty part from a terminal newline for block math.
+  const working =
+    allLines.length > 0 && allLines[allLines.length - 1] === ""
+      ? allLines.slice(0, -1)
+      : allLines;
+  const headingIdx = working.findIndex((l) => KNOWN_ERRORS_HEADING.test(l.trim()));
+  if (headingIdx === -1) {
+    throw new Error(
+      `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
+    );
+  }
+  const blocks = knownErrorBlocks(working, headingIdx);
+  if (blocks.length === 0) {
+    throw new Error(
+      `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
+    );
+  }
+  let remaining = working.slice();
+  // Remove oldest-first until under cap; account for index shifts by
+  // removing from the front and tracking the offset.
+  let removedCount = 0;
+  const rotated: string[] = [];
+  let blockCursor = 0;
+  while (countLines(remaining.join("\n")) > limit && blockCursor < blocks.length) {
+    const block = blocks[blockCursor]!;
+    const start = block.start - removedCount;
+    const len = block.end - block.start;
+    rotated.push(...remaining.slice(start, start + len));
+    remaining = [...remaining.slice(0, start), ...remaining.slice(start + len)];
+    removedCount += len;
+    blockCursor += 1;
+  }
+  if (countLines(remaining.join("\n")) > limit) {
+    throw new Error(
+      `[memory] write rejected: activeContext.md still over cap ${limit} after rotating ${rotated.length} lines`,
+    );
+  }
+  const archiveRel = rotatedArchiveName();
+  assertAllowedPath(archiveRel);
+  const archiveAbs = resolveUnderRoot(root, archiveRel);
+  await mkdir(dirname(archiveAbs), { recursive: true });
+  await writeFile(
+    archiveAbs,
+    `# Rotated Known-Errors block(s) from activeContext.md\n\n${rotated.join("\n")}\n`,
+    "utf8",
+  );
+  await mkdir(dirname(abs), { recursive: true });
+  await writeFile(abs, remaining.join("\n"), "utf8");
+}
+
+/**
  * Write one allowlisted file (full-content overwrite). Text is redacted
  * first, then the cap is enforced; writes serialize via the per-process
  * mutex. Over-cap writes throw — except `activeContext.md`, which rotates
@@ -273,69 +352,39 @@ export async function writeCapped(
   await withWriteLock(async () => {
     const { indexLines, fileLines } = capsOf(opts);
     const root = resolveMemoryRoot(opts?.memoryRoot);
+    await writeRedactedCapped(file, redactedText, root, indexLines, fileLines);
+  });
+}
+
+/**
+ * Atomic read-modify-write under the per-process mutex. The updater receives
+ * the current raw content (`""` when the file does not exist yet) and
+ * returns the next raw content; redaction, caps, rotation, and archive
+ * routing apply exactly as in `writeCapped`. Use this (never a
+ * read-outside/write-inside pair) whenever concurrent writers may append to
+ * the same file — otherwise the second writer's read misses the first
+ * writer's entry and silently drops it.
+ */
+export async function updateCapped(
+  file: string,
+  opts: CappedFileOptions | undefined,
+  updater: (current: string) => string | Promise<string>,
+): Promise<void> {
+  assertAllowedPath(file);
+  await withWriteLock(async () => {
+    const { indexLines, fileLines } = capsOf(opts);
+    const root = resolveMemoryRoot(opts?.memoryRoot);
     const abs = resolveUnderRoot(root, file);
-    const total = countLines(redactedText);
-    const cap = getCapForFile(file, indexLines, fileLines);
-    if (!Number.isFinite(cap) || total <= (cap as number)) {
-      await mkdir(dirname(abs), { recursive: true });
-      await writeFile(abs, redactedText, "utf8");
-      return;
+    let current = "";
+    try {
+      current = await readFile(abs, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
     }
-    const limit = cap as number;
-    if (file !== "activeContext.md") {
-      throw new Error(
-        `[memory] write rejected: ${file} has ${total} lines, cap is ${limit}; refusing to silently truncate`,
-      );
+    const next = await updater(current);
+    if (typeof next !== "string") {
+      throw new Error("[memory] updateCapped updater must return a string");
     }
-    // activeContext.md: rotate oldest Known-Errors block(s) to archive/.
-    const allLines = redactedText.split("\n");
-    // Drop a single trailing empty part from a terminal newline for block math.
-    const working =
-      allLines.length > 0 && allLines[allLines.length - 1] === ""
-        ? allLines.slice(0, -1)
-        : allLines;
-    const headingIdx = working.findIndex((l) => KNOWN_ERRORS_HEADING.test(l.trim()));
-    if (headingIdx === -1) {
-      throw new Error(
-        `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
-      );
-    }
-    const blocks = knownErrorBlocks(working, headingIdx);
-    if (blocks.length === 0) {
-      throw new Error(
-        `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
-      );
-    }
-    let remaining = working.slice();
-    // Remove oldest-first until under cap; account for index shifts by
-    // removing from the front and tracking the offset.
-    let removedCount = 0;
-    const rotated: string[] = [];
-    let blockCursor = 0;
-    while (countLines(remaining.join("\n")) > limit && blockCursor < blocks.length) {
-      const block = blocks[blockCursor]!;
-      const start = block.start - removedCount;
-      const len = block.end - block.start;
-      rotated.push(...remaining.slice(start, start + len));
-      remaining = [...remaining.slice(0, start), ...remaining.slice(start + len)];
-      removedCount += len;
-      blockCursor += 1;
-    }
-    if (countLines(remaining.join("\n")) > limit) {
-      throw new Error(
-        `[memory] write rejected: activeContext.md still over cap ${limit} after rotating ${rotated.length} lines`,
-      );
-    }
-    const archiveRel = rotatedArchiveName();
-    assertAllowedPath(archiveRel);
-    const archiveAbs = resolveUnderRoot(root, archiveRel);
-    await mkdir(dirname(archiveAbs), { recursive: true });
-    await writeFile(
-      archiveAbs,
-      `# Rotated Known-Errors block(s) from activeContext.md\n\n${rotated.join("\n")}\n`,
-      "utf8",
-    );
-    await mkdir(dirname(abs), { recursive: true });
-    await writeFile(abs, remaining.join("\n"), "utf8");
+    await writeRedactedCapped(file, redact(next), root, indexLines, fileLines);
   });
 }
