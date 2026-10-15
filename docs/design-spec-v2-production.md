@@ -41,7 +41,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 |---|---|---|
 | Package | `import { Plugin } from "@opencode/plugin"` (Promise flavor: `Plugin.define({ id, setup(ctx) })`); `import { Plugin } from "@opencode/plugin/effect"` (Effect flavor: `effect(ctx)`). This spec uses the Promise flavor only. | entrypoint |
 | Lifecycle | `setup` runs at load; **it may return a cleanup function that runs at unload**; unloading also disposes registrations | `index.ts` |
-| Location | `ctx.location.directory`, optional `ctx.location.workspaceID`, `ctx.location.project.{id,directory,canonical}`. **There is no `ctx.project`.** | path resolution |
+| Location | `ctx.location.directory`, optional `ctx.location.workspaceID`, required `ctx.location.project.{id,directory,canonical}`. **There is no `ctx.project`.** | path resolution |
 | Options | `ctx.options` from the `{package, options}` plugin config entry | `config.ts` |
 | Tool transform | `ctx.tool.transform(editor => editor.add({ name, description, input, execute }))`; executor returns `Tool.Result{output?,content?: string|Content[],metadata?}`; `tool.hook("execute.before"\|"execute.after")` with `status === "completed"\|"error"`; failure is `Tool.Error{message,error?,metadata?}` (no cmd/code/stdout) | `memory_recall`, capture |
 | Command transform | `ctx.command.transform(editor => editor.add({ name, description, execute }))`; executor gets `{ sessionID, prompt: PromptInput, delivery }` | `/memory-review` |
@@ -57,7 +57,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | Discovery | `.opencode/plugins/` loads direct `.ts`/`.js` files and immediate package directories; arrays merge global → project → `.opencode` | install |
 | Publish manifest | `package.json` `type:module`, `exports["."]`, optional `"./rpc"`, dep `@opencode/plugin` | distribution |
 | Agents | Markdown frontmatter accepts the same fields as an `agents` entry: `description`, `mode: primary\|subagent\|all`, `model`, `permissions` (ordered `{action,resource,effect}`), etc. Body = `system` prompt. | `memory-manager` |
-| Permission evaluation | **"The last matching rule wins, so put broad rules before exceptions."** Subagents are not deny-by-default. | `memory-manager` |
+| Permission evaluation | **"The last matching rule wins"** (permissions guide; global rules append before agent rules). Subagents use their own permissions, not a subset of the parent. | `memory-manager` |
 | References | `references` entries attach **directories** (`path`) or Git repos (`repository`/`branch`); attachment is a non-recursive root listing and is client-initiated. Designed for directories **outside** the project. | not used (§4.3) |
 | Instructions | V2 **does** resolve the `instructions` array (relative/glob, `~/`, absolute, `http(s)`), loading it after `AGENTS.md`. The design still injects via `AGENTS.md` + hooks — a deliberate choice (single-owner injection, no client config edit), **not** a platform limitation. | ADR-0002 |
 | AGENTS.md | Global + upward files live-reload before the next request; **edits to already-loaded nested files are not detected** (new session required). | ADR-0002 |
@@ -353,7 +353,7 @@ registrations.push(await ctx.session.hook("context", async (event) => {
     if (status) event.system.push({ type: "text", text: status });
     const hint = await matchIndex(event);    // exact match on latest user message; undefined when absent
     if (hint) event.system.push({ type: "text", text: hint });
-    void snapshotIfDue(event).catch(logDiagnostic); // §5.9 fallback: fire-and-forget, never awaited
+    void snapshotIfDue(event).catch(logDiagnostic); // = throttle-gate (snapshotThrottle/<sessionID>) around snapshotHandoffIfChanged; fire-and-forget, never awaited
   } catch (error) { logDiagnostic(error); }  // never throw from a request hook
 }));
 ```
@@ -449,7 +449,7 @@ registrations.push(await ctx.tool.transform((editor) => {
       required: ["file"],
       additionalProperties: false,
     },
-    execute: async (input) => toolResult(readCapped((input as { file: string }).file)),
+    execute: async (input) => toolResult(await readCapped((input as { file: string }).file)),
   });
 }));
 ```
@@ -581,7 +581,7 @@ registrations.push(await ctx.session.hook("compaction", async (event) => {
   - Dropped (never truncated mid-sentence) before the hint line when the payload is over budget.
 - `snapshotHandoffIfChanged()`: resolves the memory root for the **event's** session/location (event
   `location.directory` + `data.sessionID`, falling back to `ctx.location`), never from a root captured
-  once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await ctx.vcs.branch.list()).data`);
+  once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await ctx.vcs.branch.list()).data[0] ?? "unknown"`);
   open changes via `(await ctx.vcs.status()).data` (fallback `(await ctx.vcs.diff({mode:"working"})).data` — normalize to strings before hashing since the fallback changes `FileStatus[]` to `FileDiff[]`); hash(branch + status + pending);
   same hash as `<projectID>/snapshot/<sessionID>` in the ledger → no-op. All VCS calls
   sit behind one adapter so shape drift touches one function.
@@ -696,7 +696,7 @@ void (async () => {
   changed. It must tolerate concurrent `context` invocations (tool-driven continuations) without
   interleaving `handoffs/` writes.
 - **Compaction capture (D-B).** `session.compaction.ended.data` carries the produced summary as `text`
-  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer), guarded by ledger check-before-write on `<projectID>/seen/<event.id>` since `ended` is durable and `subscribe` replays redeliver it (same guard as snapshots via `<projectID>/snapshot/<sessionID>`, plus deterministic filename). When the event is missing, no idle path invents one: the pointer-only handoff (timestamp + branch + "compaction occurred") is written on demand via `/memory-review` only — the durable pre-compaction state is already on disk.
+  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer), guarded by ledger check-before-write on `<projectID>/seen/<event.id>` (`event.id: Event.ID` present on all `V2Event`s; `ended` is durable, `idle` ephemeral) since `ended` is durable and `subscribe` replays redeliver it (same guard as snapshots via `<projectID>/snapshot/<sessionID>`, plus deterministic filename). When the event is missing, no idle path invents one: the pointer-only handoff (timestamp + branch + "compaction occurred") is written on demand via `/memory-review` only — the durable pre-compaction state is already on disk.
 - Failure capture is **not** here; it is the tool hook (§5.3).
 - The stream is abortable and aborted on unload.
 

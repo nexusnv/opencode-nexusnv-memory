@@ -12,7 +12,7 @@
 | `architecture.md` | contracts, sibling implementations, style-lock pointer (review-gated rewrite; rule text lives in `style.md`) | 60 lines |
 | `style.md` | independently quotable rule statements (review-gated rewrite; sole owner of rule text) | 60 lines |
 | `issues.md` | one line each: todo/doing/done + issue ref (manual + `/memory-review`-validated) | 60 lines |
-| `handoffs/YYYY-MM-DD-HHmmss-<session6>ss-<session6>.md` | branch (via `vcs.get()`), open changes (via `vcs.status()`), completed, pending, next; immutable; content-hash-guarded via `<projectID>/snapshot/<sessionID>` (same content → no new file); newest wins | per file 60 lines |
+| `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch (via `vcs.get()`), open changes (via `vcs.status()`), completed, pending, next; immutable; content-hash-guarded via `<projectID>/snapshot/<sessionID>` (same content → no new file); newest wins | per file 60 lines |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable on demand via `memory_recall`, never auto-injected | per file 60 lines |
 | Ledger (`ctx.storage`) | `<projectID>/seen/<contentID>` + `<projectID>/attempt/<contentID>`, plus `<projectID>/curation.pending` (scratchpad-only count) and `<projectID>/curation.rotated`, plus `<projectID>/snapshot/<sessionID>`, `<projectID>/snapshotThrottle/<sessionID>`, `<projectID>/hint/<sessionID>/<promptHash>`; 30s retry window; persisted, never in-memory alone (`ctx.storage` is plugin-scoped); single-flight per content ID (the API has no CAS), pruned via `scan({prefix:"<projectID>/seen/"})` with `after`/`next` pagination to ≤500 entries | bounded |
 
