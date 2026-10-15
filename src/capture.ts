@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import { resolveMemoryRoot, withWriteLock, writeCapped, type CappedFileOptions } from "./files.js";
 import { flagInjection } from "./guard.js";
 import { redact } from "./redact.js";
@@ -652,5 +653,45 @@ export async function captureFailure(
     return { reason: "captured", contentID };
   } catch (error) {
     return fail(error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* snapshotIfDue — context-hook throttle gate (stub; T8 fleshes out)  */
+/* ------------------------------------------------------------------ */
+
+export interface SnapshotIfDueOptions {
+  readonly now?: number;
+  readonly throttleMinutes?: number;
+}
+
+/**
+ * Context-hook snapshot throttle gate (interim stub; T8 implements the
+ * `snapshotHandoffIfChanged` write behind it).
+ *
+ * Resolves `false` without writing a handoff. When the per-session
+ * throttle window has elapsed it records the throttle slot
+ * (`<projectID>/snapshotThrottle/<sessionID>`) so concurrent continuations
+ * share one slot; calls inside the window are no-ops. Never throws.
+ */
+export async function snapshotIfDue(
+  storage: LedgerStorage,
+  projectID: string,
+  sessionID: string,
+  options?: SnapshotIfDueOptions,
+): Promise<boolean> {
+  try {
+    const now = options?.now ?? Date.now();
+    const minutes =
+      options?.throttleMinutes ??
+      DEFAULT_MEMORY_OPTIONS.snapshotThrottleMinutes;
+    const windowMs =
+      Number.isInteger(minutes) && minutes > 0 ? minutes * 60_000 : 0;
+    const last = await getThrottle(storage, projectID, sessionID);
+    if (last !== undefined && now - last < windowMs) return false;
+    await setThrottle(storage, projectID, sessionID, now);
+    return false;
+  } catch {
+    return false;
   }
 }
