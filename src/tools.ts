@@ -24,13 +24,21 @@
  * open. Setup emits an unconditional loud warning about this (src/index.ts).
  */
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { Plugin } from "@opencode/plugin";
 import {
   clearRotated,
   resetPending,
   type LedgerStorage,
 } from "./capture.js";
-import { readCapped, writeCapped, type CappedFileOptions } from "./files.js";
+import { parseMemoryOptions } from "./config.js";
+import {
+  assertAllowedPath,
+  readCapped,
+  resolveMemoryRoot,
+  writeCapped,
+  type CappedFileOptions,
+} from "./files.js";
 
 /** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
 const MEMORY_DIR = ".opencode/memory";
@@ -175,11 +183,31 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
 }
 
 /**
+ * Read one memory file verbatim (no cap, no redaction — `writeCapped`
+ * redacts the merged text on write). Resolves `""` when the file does not
+ * exist yet; other IO errors propagate (fail-closed, like a deny).
+ */
+async function readRawQuiet(
+  memoryRoot: string,
+  file: string,
+): Promise<string> {
+  try {
+    return await readFile(join(resolveMemoryRoot(memoryRoot), file), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+/**
  * `memory_apply` executor: the only deterministic apply channel.
  *
  * Per candidate in order: one `permission.assert` (line + `source:` tag in
  * `metadata`, so approval is per line by construction; `save: []` stores
- * nothing on allow-always), then a verbatim `writeCapped` on allow. The
+ * nothing on allow-always), then a verbatim append via read-modify-write
+ * `writeCapped` on allow (`writeCapped` is a full-content overwrite, so the
+ * current content is read first and the approved line appended — same-file
+ * candidates accumulate in order instead of clobbering each other). The
  * first deny/rejection propagates immediately — remaining candidates stay
  * pending, no summary is returned, counters are untouched. On full
  * completion (including `candidates: []`) pending resets to 0 and the
@@ -217,7 +245,16 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
         },
         save: [],
       });
-      await writeCapped(candidate.file, candidate.line, {
+      // Allowlist before the raw read: never touch paths outside the root.
+      assertAllowedPath(candidate.file);
+      const current = await readRawQuiet(deps.memoryRoot, candidate.file);
+      const next =
+        current === ""
+          ? candidate.line
+          : current.endsWith("\n")
+            ? current + candidate.line
+            : `${current}\n${candidate.line}`;
+      await writeCapped(candidate.file, next, {
         memoryRoot: deps.memoryRoot,
         indexLines: deps.indexLines,
         fileLines: deps.fileLines,
@@ -263,6 +300,10 @@ function ledgerOf(ctx: Plugin.Context): LedgerStorage {
 export function registerMemoryTools(
   ctx: Plugin.Context,
 ): Promise<{ readonly dispose: () => Promise<void> }> {
+  // Caps come from the plugin options (same parse as setup); the memory
+  // root and project ID still resolve per execute call from the live
+  // context — never captured once at load (spec P22).
+  const options = parseMemoryOptions(ctx.options);
   return ctx.tool.transform((editor) => {
     editor.add({
       name: "memory_recall",
@@ -271,6 +312,8 @@ export function registerMemoryTools(
       execute: async (input, context) => {
         const execute = createMemoryRecallExecute({
           memoryRoot: memoryRootOf(ctx),
+          indexLines: options.indexLines,
+          fileLines: options.fileLines,
         });
         return execute(input, {
           sessionID: context.sessionID,
@@ -290,6 +333,8 @@ export function registerMemoryTools(
           projectID: projectIDOf(ctx),
           storage: ledgerOf(ctx),
           permission: ctx.permission,
+          indexLines: options.indexLines,
+          fileLines: options.fileLines,
         });
         return execute(input, {
           sessionID: context.sessionID,

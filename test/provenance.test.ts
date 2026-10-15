@@ -9,6 +9,7 @@ import {
   captureFailure,
   getPending,
   getRotated,
+  SEEN_LIMIT,
   type LedgerStorage,
 } from "../src/capture.js";
 import {
@@ -308,6 +309,25 @@ describe("captureFailure", () => {
         root,
       ),
     ).resolves.toBeDefined();
+  });
+
+  it("prunes the seen set after capture (bounded keys)", async () => {
+    for (let i = 0; i < SEEN_LIMIT + 5; i += 1) {
+      await storage.set(`${PROJECT}/seen/pre-${i}`, i);
+    }
+    const outcome = await captureFailure(
+      { status: "error", error: { message: "prune-trigger-UNIQUE-555" } },
+      storage,
+      PROJECT,
+      root,
+    );
+    expect(outcome.reason).toBe("captured");
+    // Prune is fire-and-forget off the write mutex: let it land.
+    await new Promise((r) => setTimeout(r, 50));
+    const seen = [...storage.data.keys()].filter((k) =>
+      k.startsWith(`${PROJECT}/seen/`),
+    );
+    expect(seen.length).toBeLessThanOrEqual(SEEN_LIMIT);
   });
 });
 

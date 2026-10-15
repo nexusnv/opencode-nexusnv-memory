@@ -75,11 +75,14 @@ export function sanitizeForBrief(entry: unknown): string {
     if (typeof entry !== "string") return "";
     const first = (entry.split("\n")[0] ?? "").replace(/\s+/g, " ").trim();
     if (first.length === 0) return "";
-    let summary = first.slice(0, BRIEF_SUMMARY_CHARS);
-    if (!/source:\S+/.test(summary)) {
-      summary = `${summary} source:tool`.slice(0, BRIEF_SUMMARY_CHARS);
+    // Keep a complete `source:` tag when one fits; otherwise reserve room
+    // so the appended tag is never sliced mid-token.
+    const tag = first.match(/source:\S+/);
+    if (tag && (tag.index ?? 0) + tag[0].length <= BRIEF_SUMMARY_CHARS) {
+      return first.slice(0, BRIEF_SUMMARY_CHARS);
     }
-    return summary;
+    const fallback = " source:tool";
+    return `${first.slice(0, BRIEF_SUMMARY_CHARS - fallback.length)}${fallback}`;
   } catch {
     return "";
   }

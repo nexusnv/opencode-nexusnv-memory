@@ -431,7 +431,9 @@ function commandOf(input: unknown): string | undefined {
         : undefined;
     }
     const record = input as Record<string, unknown>;
-    for (const key of ["command", "cmd", "tool"] as const) {
+    // Only real command spellings — never the `tool` name (e.g. "bash"),
+    // which is not a command and would mislabel the summary prefix.
+    for (const key of ["command", "cmd"] as const) {
       const value = record[key];
       if (typeof value === "string" && value.trim().length > 0) {
         const cmd = value
@@ -624,6 +626,16 @@ export async function captureFailure(
     });
     await markSeen(storage, projectID, contentID, options?.now);
     await incPending(storage, projectID);
+
+    // Bound the seen set: fire-and-forget off the write mutex (prune takes
+    // its own lock); never throws, logging is best-effort.
+    void pruneSeenTo500(storage, projectID).catch((error) => {
+      try {
+        log(error);
+      } catch {
+        // Logging must never break the tool hook.
+      }
+    });
 
     // Rotation marker for the status line: a fresh archive file means this
     // append rotated the oldest Known-Errors block(s) out.
@@ -1296,6 +1308,15 @@ export async function captureCompactionOutcome(
     } catch (error) {
       return fail(error);
     }
+    // Bound the seen set: fire-and-forget off the write mutex (prune takes
+    // its own lock); never throws, logging is best-effort.
+    void pruneSeenTo500(deps.storage, deps.projectID).catch((error) => {
+      try {
+        log(error);
+      } catch {
+        // Logging must never break capture.
+      }
+    });
     return { reason: "captured", file };
   } catch (error) {
     return fail(error);

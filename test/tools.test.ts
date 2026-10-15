@@ -263,6 +263,63 @@ describe("tools", () => {
     expect(MEMORY_APPLY_DESCRIPTION.length).toBeGreaterThan(0);
   });
 
+  it("apply_appends_same_file_candidates_in_order", async () => {
+    const permission = new FakePermission();
+    const execute = createMemoryApplyExecute({
+      memoryRoot: root,
+      projectID: PROJECT,
+      storage,
+      permission,
+    });
+    // Pre-seeded content (with trailing newline) must survive.
+    await writeMemory("issues.md", "- seed line source:user\n");
+
+    const out = await execute(
+      {
+        candidates: [
+          { file: "issues.md", line: "- first line source:user", source: "user" },
+          { file: "issues.md", line: "- second line source:user", source: "user" },
+        ],
+      },
+      TOOL_CTX,
+    );
+
+    // Both lines present verbatim, in order — no clobbering.
+    const text = await readFile(join(root, "issues.md"), "utf8");
+    expect(text).toBe(
+      "- seed line source:user\n- first line source:user\n- second line source:user",
+    );
+    expect(text.indexOf("first line")).toBeLessThan(
+      text.indexOf("second line"),
+    );
+    expect(permission.calls).toHaveLength(2);
+    expect(out).toEqual(toolResult(expect.any(String) as unknown as string));
+    expect(await getPending(storage, PROJECT)).toBe(0);
+  });
+
+  it("apply_joins_without_trailing_newline", async () => {
+    const permission = new FakePermission();
+    const execute = createMemoryApplyExecute({
+      memoryRoot: root,
+      projectID: PROJECT,
+      storage,
+      permission,
+    });
+    await writeMemory("issues.md", "- seed line source:user");
+
+    await execute(
+      {
+        candidates: [
+          { file: "issues.md", line: "- appended source:user", source: "user" },
+        ],
+      },
+      TOOL_CTX,
+    );
+    expect(await readFile(join(root, "issues.md"), "utf8")).toBe(
+      "- seed line source:user\n- appended source:user",
+    );
+  });
+
   it("registers recall and apply via ctx.tool.transform", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-wire-"));
     const memoryDir = join(projectRoot, ".opencode", "memory");

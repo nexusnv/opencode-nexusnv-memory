@@ -140,6 +140,12 @@ function fakeForSetup(store: LedgerStorage = storage) {
         cb({ add: (_tool: unknown) => undefined });
         return { dispose: async () => undefined };
       },
+      hook: async (
+        _name: string,
+        _cb: (event: never) => Promise<void> | void,
+      ) => {
+        return { dispose: async () => undefined };
+      },
     },
     command: {
       transform: async (

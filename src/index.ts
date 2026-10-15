@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  captureFailure,
   dispatchEvent,
   snapshotIfDue,
   startEventLoop,
@@ -239,6 +240,29 @@ export default Plugin.define({
           }
           // Never set event.result: the hook runs before the summary model
           // call, so setting it would skip the native summary (ADR-0003).
+        } catch (error) {
+          logDiagnostic(error);
+        }
+      }),
+    );
+
+    // execute.after hook: failure-only capture → activeContext.md (§5.3).
+    // Failures only (successes ignored); captureFailures:false disables the
+    // channel entirely; the body never throws (a throwing tool hook can
+    // disturb tool-result delivery).
+    registrations.push(
+      await ctx.tool.hook("execute.after", async (event) => {
+        try {
+          if ((event as { status?: string }).status !== "error") return;
+          if (!options.captureFailures) return;
+          const ledger = asLedger(ctx.storage);
+          const projectID = projectIDOf(ctx);
+          const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
+          await captureFailure(event, ledger, projectID, memoryRoot, {
+            fileLines: options.fileLines,
+            indexLines: options.indexLines,
+            log: logDiagnostic,
+          });
         } catch (error) {
           logDiagnostic(error);
         }

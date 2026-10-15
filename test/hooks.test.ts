@@ -122,6 +122,7 @@ function setupHooks(
   store: LedgerStorage = storage,
 ) {
   const hooks = new Map<string, (event: never) => Promise<void> | void>();
+  const toolHooks = new Map<string, (event: never) => Promise<void> | void>();
   const fakeCtx = {
     options: opts,
     location: {
@@ -143,6 +144,17 @@ function setupHooks(
         cb({ add: (_tool: unknown) => undefined });
         return {
           dispose: async () => undefined,
+        };
+      },
+      hook: async (
+        name: string,
+        cb: (event: never) => Promise<void> | void,
+      ) => {
+        toolHooks.set(name, cb);
+        return {
+          dispose: async () => {
+            toolHooks.delete(name);
+          },
         };
       },
     },
@@ -178,7 +190,7 @@ function setupHooks(
       ctx: unknown,
     ) => Promise<(() => Promise<void>) | void>;
     const cleanup = await setup(fakeCtx);
-    return { hooks, cleanup };
+    return { hooks, toolHooks, cleanup };
   })();
 }
 
@@ -601,5 +613,68 @@ describe("compaction hook", () => {
     };
     await expect(runHook(hooks, "compaction", event)).resolves.toBeUndefined();
     expect(event.result).toBeUndefined();
+  });
+});
+
+describe("execute.after failure hook", () => {
+  function toolEvent(status: string, error?: unknown, input?: unknown) {
+    return { tool: "bash", sessionID: SESSION, agent: "primary", messageID: "m1", id: "call-1", status, error, input };
+  }
+
+  it("registers execute.after and captures failures only", async () => {
+    const { toolHooks } = await setupHooks();
+    const handler = toolHooks.get("execute.after");
+    expect(handler, "hook execute.after registered").toBeDefined();
+
+    // Successes are ignored: no ledger trace, no new entry (scaffold
+    // activeContext.md from setup is untouched).
+    await handler!(toolEvent("completed") as never);
+    expect(await getPending(storage, PROJECT)).toBe(0);
+    const scaffolded = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    expect(scaffolded).not.toContain("wiring-boom-UNIQUE-789");
+
+    // Failures append a source:tool summary line.
+    await handler!(
+      toolEvent("error", { message: "wiring-boom-UNIQUE-789" }) as never,
+    );
+    const active = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    expect(active).toContain("wiring-boom-UNIQUE-789");
+    expect(active).toContain("source:tool");
+    expect(await getPending(storage, PROJECT)).toBe(1);
+
+    // A second distinct failure appends alongside the first.
+    await handler!(
+      toolEvent("error", { message: "wiring-second-UNIQUE-790" }) as never,
+    );
+    const both = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    expect(both).toContain("wiring-boom-UNIQUE-789");
+    expect(both).toContain("wiring-second-UNIQUE-790");
+  });
+
+  it("is a no-op when captureFailures is false", async () => {
+    const { toolHooks } = await setupHooks({ captureFailures: false });
+    const handler = toolHooks.get("execute.after");
+    expect(handler, "hook execute.after registered").toBeDefined();
+    await handler!(
+      toolEvent("error", { message: "must-not-land" }) as never,
+    );
+    // Scaffold activeContext.md from setup is untouched: no failure entry.
+    const active = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    expect(active).not.toContain("must-not-land");
+    expect(await getPending(storage, PROJECT)).toBe(0);
+  });
+
+  it("never throws with hostile storage", async () => {
+    const { toolHooks } = await setupHooks({}, new ThrowingStorage());
+    const handler = toolHooks.get("execute.after");
+    await expect(
+      handler!(toolEvent("error", { message: "x" }) as never),
+    ).resolves.toBeUndefined();
+    await expect(
+      handler!(toolEvent("completed") as never),
+    ).resolves.toBeUndefined();
+    await expect(
+      handler!(null as never),
+    ).resolves.toBeUndefined();
   });
 });

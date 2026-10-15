@@ -12,6 +12,7 @@ import {
   isThisLocation,
   readVcsSnapshot,
   resetLedgerSingleFlightForTests,
+  SEEN_LIMIT,
   setSnapshotHash,
   setThrottle,
   snapshotHandoffIfChanged,
@@ -483,6 +484,27 @@ describe("captureCompactionOutcome", () => {
     ).resolves.toMatchObject({ reason: "skipped" });
     expect(await handoffFiles()).toHaveLength(0);
   });
+  it("prunes the seen set after capture (bounded keys)", async () => {
+    for (let i = 0; i < SEEN_LIMIT + 5; i += 1) {
+      await storage.set(`${PROJECT}/seen/pre-${i}`, i);
+    }
+    const outcome = await captureCompactionOutcome(
+      endedEvent("sess-prune", projectRoot, "PRUNE-TEXT-UNIQUE", "recent"),
+      {
+        vcs: new FakeVcs({ current: "main" }),
+        storage,
+        projectID: PROJECT,
+        memoryRoot,
+      },
+    );
+    expect(outcome.reason).toBe("captured");
+    // Prune is fire-and-forget off the write mutex: let it land.
+    await new Promise((r) => setTimeout(r, 50));
+    const seen = [...storage.data.keys()].filter((k) =>
+      k.startsWith(`${PROJECT}/seen/`),
+    );
+    expect(seen.length).toBeLessThanOrEqual(SEEN_LIMIT);
+  });
 });
 
 describe("dispatchEvent", () => {
@@ -713,6 +735,17 @@ describe("setup wiring: single controller + dispose()", () => {
           return {
             dispose: async () => {
               toolDisposed = true;
+            },
+          };
+        },
+        hook: async (
+          name: string,
+          cb: (event: never) => Promise<void> | void,
+        ) => {
+          hooks.set(`tool:${name}`, cb);
+          return {
+            dispose: async () => {
+              hooks.delete(`tool:${name}`);
             },
           };
         },
