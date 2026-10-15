@@ -14,5 +14,5 @@ Long-past "why" (e.g. enum naming from project inception) is invisible in curren
 
 ## Consequences
 
-- Positive: inception reasoning survives and is findable in two capped reads; constant ~13-line overhead otherwise; no embeddings, no classifier, no bloat.
+- Positive: inception reasoning survives and is findable in two capped reads; overhead is bounded (static ~13 lines for the directive + tool description, plus a per-model-call payload only when content exists); no embeddings, no classifier, no bloat.
 - Negative: recall depends on INDEX accuracy and symbol naming; accepted — enforced by budgets and the review gate, both cheap and inspectable.

@@ -6,15 +6,16 @@
 
 | Component | Responsibility | V2 primitive |
 |---|---|---|
-| Prompt hook | Sole injector of `INDEX.md` content (capped; over-cap file is *not* attached); deduped — skip if already attached; root `AGENTS.md` carries protocol+links only, never content; reads only, retry-safe | `session.hook("prompt")` |
-| Context hook | Push active brief at bottom + one `[memory]` status line (rotation notice / review-due nudge) + 1-line tell-tale hint on exact INDEX match only; brief does **not** duplicate INDEX | `session.hook("context")`, `event.system.push` |
-| Compaction hook | Inject capped + redacted priors into summary context; **never sets `event.result`** (that would skip the native summary); never change model/threshold/trigger | `session.hook("compaction")` |
-| Tool hook | Failure-only capture on `execute.after` (`event.status === "error"`); 20-line truncation, redact, ledger check-before-write; writes `source:tool` summary line + recall-only detail | `ctx.tool.hook("execute.after")` |
-| Event subscriber | `session.idle` snapshots (hash-guarded; G1-gated) + `session.compaction.*` summary capture (G1-gated) + diagnostics; abortable stream | `ctx.event.subscribe` + `AbortController` |
-| Provenance classifier | Pure, zero-LLM: tags every entry `source:user \| tool \| model \| snapshot`; only an explicit user directive (documented form, outside fences/quotes) is `user`; routes `source:user` to `decisions.md` immediately | pure function |
+| Prompt hook | Sole injector of `INDEX.md` content (capped; over-cap file is *not* attached); deduped — skip if already attached; root `AGENTS.md` carries protocol+links only, never content; retry-safe. One bounded side effect: a `source:user` directive appends to `decisions.md` (the only hook that sees the user's turn before admission; serialized, never-throw, ledger-idempotent) | `session.hook("prompt")` |
+| Context hook | **Async, never-throws**; push active brief at bottom + one `[memory]` status line (rotation notice / review-due nudge) + 1-line tell-tale hint on exact INDEX match only, **throttled to once per prompt/session**; brief does **not** duplicate INDEX | `session.hook("context")`, `event.system.push` |
+| Compaction hook | Inject capped + redacted priors into summary context; **never sets `event.result`** (that would skip the native summary); never change model/threshold/trigger; never throws | `session.hook("compaction")` |
+| Tool hook | Failure-only capture on `execute.after` (`event.status === "error"`); redact, ledger check-before-write; writes a `source:tool` summary line from `event.error.message` (message-only baseline, G4) + **optional** recall-only detail block | `ctx.tool.hook("execute.after")` |
+| Event subscriber | `session.idle` snapshots (hash-guarded; G1-gated) + `session.compaction.*` summary capture (G1-gated) + diagnostics; **filters events to this location** before writing; single abortable stream, never throws | `ctx.event.subscribe` + `AbortController` |
+| Provenance classifier | Pure, zero-LLM **detection**: tags every entry `source:user \| tool \| model \| snapshot`; only an explicit user directive (documented form, outside fences/quotes) is `user`; the `source:user` write is performed in the `prompt` hook (serialized, never-throw) | pure function |
 | Injection guard | `flagInjection` advisory flags + untrusted labelling + `sanitizeForBrief` (summary line only; bodies never enter the payload) | pure functions |
-| Capture ledger | Persisted (`ctx.storage`, never in-memory alone); `seen/<id>` check-before-write, `attempt/<id>` timestamps, `curation.pending` uncurated count, `curation.rotated` marker; ~30s retry window; pruned via `scan` | `ctx.storage` |
-| `memory_recall` tool | Allowlisted single-file read (`INDEX/activeContext/decisions/architecture/style/issues` + `handoffs/<name>.md` + `handoffs/archive/<name>.md`; recallable on demand, never auto-injected); capped + redacted; returns `{type:"text",text}`; error on unknown/traversal; description doubles as retrieval policy | `ctx.tool.transform` |
+| Capture ledger | Persisted (`ctx.storage`, never in-memory alone); `seen/<id>` check-before-write, `attempt/<id>` timestamps, `curation.pending` uncurated count, `curation.rotated` marker; keys namespaced per project; single-flight per content ID (no CAS in the API); ~30s retry window; pruned via `scan` | `ctx.storage` |
+| `memory_recall` tool | Allowlisted single-file read (`INDEX/activeContext/decisions/architecture/style/issues` + `handoffs/<name>.md` + `handoffs/archive/<name>.md`; recallable on demand, never auto-injected); capped + redacted; returns the executor envelope via `toolResult` (default `{ content }`); error on unknown/traversal; description doubles as retrieval policy | `ctx.tool.transform` |
+| `memory_apply` tool | The **only** channel that writes approved lines: one `ctx.permission.assert` per candidate (line + `source:` tag in the prompt `metadata`) → `writeCapped`; untrusted lines cannot be bulk-approved | `ctx.tool.transform` |
 | `/memory-review` command | Propose scratchpad → durable promotions (`decisions/architecture/style/issues`); validate `issues.md` manual edits; human approves | `ctx.command.transform` |
 | Loaders | `loadBrief`, `loadPriors`, `matchIndex`, `readCapped`/`writeCapped` (all budget-enforcing) | pure functions |
 | Redactor | Secrets blocklist + `<private>` stripping before any write/inject | pure function |
@@ -29,8 +30,8 @@ flowchart TD
   K[Compaction] --> KH[Compaction hook: priors only, never event.result]
   Agent --> Tool[memory_recall: allowlisted, recall-only bodies] --> Files[Memory files]
   U[User directive: remember] --> Prov2[source:user] --> Dec[decisions.md append-only, tagged]
-  Dev --> Cmd[/memory-review] --> Sandbox[memory-manager: read-only, no shell] --> Prop[Proposal table + provenance + flags]
-  Prop --> Approve[Human approves per line] --> Durable[decisions/architecture/style/issues]
+  Dev --> Cmd[/memory-review] --> Prop[Proposal table + provenance + flags]
+  Prop --> Approve[Human approves per line via memory_apply: assert per line] --> Durable[decisions/architecture/style/issues]
   Durable --> Reset[resets curation.pending + rotated marker]
   Guard[Injection guard: flagInjection advisory + untrusted labelling] -.-> Prov
   Guard --> Cmd
@@ -39,14 +40,14 @@ flowchart TD
 ## Verification-note (P1 runtime gates)
 
 - Failure capture uses the documented tool hook (`event.status === "completed"|"error"`), not the event stream.
-- The public event-name catalogue is not enumerable from the docs. `session.idle` (snapshot) and the `session.compaction.*` family (summary capture) are provisional: confirm via a runtime `event.type` log before merge. Fallbacks: throttled hash-guarded `context`-hook snapshot writer; pointer-only compaction handoff.
+- The public event-name catalogue is not enumerable from the docs, but the V2 compaction docs **do** confirm the `session.compaction.*` family. `session.idle` (snapshot) remains **unproven**: confirm via a runtime `event.type` log before merge. Fallbacks: an async, fire-and-forget, serialized, hash-guarded `context`-hook snapshot writer (per-session throttle key); pointer-only compaction handoff.
 - `session.idle` ≠ session end — it may fire N times; the handler MUST be content-hash-guarded (branch + status + pending); same content → no-op.
-- **G5 (new):** confirm a plugin command can dispatch to the read-only `memory-manager` subagent; if not, the primary agent delegates the read+propose pass so the sandbox still applies. The sandbox must never be silently skipped. The containment controls in ADR-0007 do not depend on this gate — only the isolation half does, and its fallback preserves it.
+- **G5 (retired):** a plugin command **cannot** target a subagent (`CommandInvocation` has no agent selector), and a session permission lock does not contain `T1` (it is time-scoped — the reviewed text persists in the transcript — and it would deny the user's own tools). The review is **proposal-only** and every write is per-line approved, so no sandbox is required. The read-only `memory-manager` subagent remains an optional isolated venue.
 
 ## Rules
 
-- Hooks transform the current call only; durable writes happen exclusively through ledger-guarded capture (scratchpad) and approved promotion (durable). `issues.md` accepts manual edits but `/memory-review` validates format/caps/redaction.
+- Hooks transform the current call only; durable writes happen exclusively through ledger-guarded capture (scratchpad), the `source:user` fast path (`decisions.md`, written in the `prompt` hook), and approved promotion via `memory_apply` (durable). `issues.md` accepts manual edits but `/memory-review` validates format/caps/redaction.
 - `decisions.md` and `handoffs/` are append-only/immutable; `architecture.md`/`style.md`/`issues.md` are review-gated rewrites (git blame preserves lineage).
-- **Memory content is untrusted data, never instructions.** No component acts on text read from memory; the review runs read-only with no shell; captured command output never enters the auto-injected payload except as a tagged summary line; untrusted candidates are never bulk-approved (ADR-0007).
+- **Memory content is untrusted data, never instructions.** No component acts on text read from memory; the review writes nothing and only proposes, and every durable write is approved per line (`memory_apply`) — not merely a system-prompt instruction; captured command output never enters the auto-injected payload except as a tagged summary line; untrusted candidates are never bulk-approved (ADR-0007).
 - No component calls the network, embeddings, or an LLM in the default path.
 - Decisions: ADR-0001 through ADR-0007.

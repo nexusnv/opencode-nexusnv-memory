@@ -7,7 +7,8 @@
 The plugin's safety story depends on where memory lives and which writes are gated:
 
 - The `memory-manager` subagent's permissions are declared as **static** frontmatter. Since ADR-0007 the
-  agent is read-only (no `edit`, no `shell`), so this argument is no longer load-bearing for `edit` — but
+  agent is fully read-only (no `edit`, no `shell`, no `webfetch`/`websearch`, no `skill`), so this
+  argument is no longer load-bearing for `edit` — but
   it is exactly the fragility that made a configurable root dangerous: a static `resource` glob cannot
   track a configurable path, and it would silently widen or break the scope.
 - Read-path security (`readCapped`) and the recall allowlist are keyed to a stable root.

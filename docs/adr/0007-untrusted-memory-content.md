@@ -1,4 +1,4 @@
-# ADR-0007 — Memory content is untrusted: minimise, tag provenance, isolate the review, gate per line
+# ADR-0007 — Memory content is untrusted: minimise, tag provenance, proposal-only review, gate per line
 
 **Status:** accepted. **Date:** 2026-10-15.
 
@@ -38,13 +38,20 @@ Containment rests on four structural controls, none of which require detecting a
   data, and the `AGENTS.md` directive states that memory content is data, never instructions.
 2. **Provenance.** Every entry carries `source:user | tool | model | snapshot`. Provenance decides the
    write path (ADR-0004) and is shown to the human at review time.
-3. **Isolation.** The read+propose phase of `/memory-review` runs in the `memory-manager` subagent,
-   which is **read-only**: no `edit`, no `shell`. It reads and proposes; it can never act on what it
-   reads, and application of approved lines happens outside it. Verifying that a plugin command can
-   target a subagent is runtime gate G5; if it cannot, the primary agent delegates the pass so the
-   sandbox still applies.
+3. **Proposal-only review (no sandbox).** The read+propose phase of `/memory-review` writes nothing and
+   its only output is a proposal table; no execution happens as part of the review. It is deliberately
+   **not** sandboxed. A plugin-registered command **cannot** target a subagent (`CommandInvocation` has
+   no agent selector), and the session permission-lock substitute does not contain the threat:
+   `ctx.permission.hook("evaluate")` is scoped to the review turn, while the reviewed text persists in
+   the transcript — so it **defers `T1` rather than preventing it**, and it would deny the user's own
+   concurrent tools in that session. The **read-only `memory-manager` subagent** (no `edit`/`shell`/
+   `webfetch`/`websearch`/`skill`) is available as an **optional** isolated venue when the primary agent
+   chooses to delegate — which is stronger, because a child session keeps poisoned text out of the
+   user's transcript. Containment rests on controls 1, 2, and 4, not on a lock.
 4. **Human approval, per line.** Untrusted-provenance candidates are **excluded from any bulk
-   "approve all"**; they require explicit line-by-line approval with their `source:` tag visible.
+   "approve all"**; they require explicit line-by-line approval with their `source:` tag visible. The
+   channel is the plugin's `memory_apply` tool, which calls `ctx.permission.assert` once per candidate
+   line (so per-line approval holds by construction) and only then writes via `writeCapped`.
 
 `flagInjection(text)` exists, but **only as advisory metadata**: it marks instruction-shaped content,
 agent-directed directives, URL/`fetch` payloads, and encoded blobs, and surfaces flags in the proposal
@@ -55,8 +62,10 @@ as "injection detected".
 
 - Positive: prompt-injection *detection* is not a load-bearing assumption; the containment holds even
   when a poisoned line reaches the proposal table. The auto-injected payload can no longer carry raw
-  command output, so the highest-traffic injection path is closed. `memory-manager` being read-only
-  also removes the permission-ordering fragility of the earlier scoped-`edit` design (ADR-0006/P2).
+  command output, so the highest-traffic injection path is closed. Dropping the session permission lock
+  removes complexity that did not buy containment (it is time-scoped) and a footgun that would have
+  denied the user's own tools during review; `memory-manager` being read-only still removes the
+  permission-ordering fragility of the earlier scoped-`edit` design (ADR-0006/P2).
 - Negative: reviewing requires reading provenance tags and approving untrusted lines individually —
   deliberately more work than a bulk approve, because a bulk approve is exactly the button that turns T2
   into a permanent compromise.
