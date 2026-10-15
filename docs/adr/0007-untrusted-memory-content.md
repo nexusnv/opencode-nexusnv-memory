@@ -33,7 +33,8 @@ revisited here.
 Containment rests on four structural controls, none of which require detecting an injection:
 
 1. **Minimisation.** Raw captured output is **never auto-injected**. `loadBrief()` emits one bounded
-   summary line per known error (`- \`<cmd>\` exit <code>: <first line, ≤120 chars>`); the detail body
+   message-derived summary line per known error (first line of `event.error.message`, ≤120 chars,
+   newlines collapsed; `<cmd>:` prefix only when `event.input` yields it; max 5 lines); the detail body
   stays on disk and is `memory_recall`-only. Captured content in the payload is labelled as untrusted
   data, and the `AGENTS.md` directive states that memory content is data, never instructions.
 2. **Provenance.** Every entry carries `source:user | tool | model | snapshot`. Provenance decides the

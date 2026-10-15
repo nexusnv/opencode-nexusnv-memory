@@ -34,7 +34,9 @@ references are not an automatic injection channel.
 
 ## Consequences
 
-- Positive: agent `edit` scoping is enforceable; read-path gating has one stable choke point; config
-  surface stays at one file with ≤5 options; removes the invalid/redundant reference.
+- Positive: read-path gating has one stable choke point (`readCapped`/`writeCapped` + recall allowlist); config
+  surface stays at one file with ≤5 options; removes the invalid/redundant reference. (Agent `edit`
+  scoping no longer load-bearing since the manager is read-only — retained only as defense-in-depth
+  for any future allow.)
 - Negative: users cannot relocate the memory directory; accepted because relocation has no current
-  use case and would break permission scoping.
+  use case and would break the read-path choke point and allowlist.

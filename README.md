@@ -23,7 +23,7 @@ AGENTS.md (repo root)         # hand-owned protocol + links only (never auto-wri
 └── memory/                    # six files (INDEX, activeContext, decisions, architecture, style, issues) + handoffs/ root (snapshots) + handoffs/archive/ (retired lines)
 ```
 
-The memory directory is fixed at `.opencode/memory` — not configurable — because the `readCapped`/`writeCapped` choke point, the recall allowlist, and the agent permission shape all depend on a stable root (ADR-0006). Since ADR-0007 the `memory-manager` subagent is read-only, so the fix is now load-bearing for the read path and the allowlist. The plugin never edits `opencode.jsonc` or `AGENTS.md`; it scaffolds templates and emits a commented options snippet.
+The memory directory is fixed at `.opencode/memory` — not configurable — because the `readCapped`/`writeCapped` choke point and the recall allowlist depend on a stable root (ADR-0006). The plugin never edits `opencode.jsonc` or `AGENTS.md`; it scaffolds templates and emits a commented options snippet.
 
 ## Try it without code (P0)
 
