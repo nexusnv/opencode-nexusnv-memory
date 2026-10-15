@@ -19,6 +19,7 @@ import {
   readVcsSnapshot,
   setRotated,
   snapshotHandoffIfChanged,
+  writeHandoffUnique,
   type LedgerStorage,
 } from "../src/capture.js";
 import { DEFAULT_MEMORY_OPTIONS } from "../src/config.js";
@@ -681,5 +682,52 @@ describe("acceptance_compatibility_and_deploy_gate", () => {
     console.log(
       `[memory-deploy] observed event.type: ${[...new Set(seenTypes)].sort().join(", ")}`,
     );
+  });
+});
+
+describe("acceptance_handoff_collision", () => {
+  const NOW = Date.UTC(2026, 9, 15, 12, 34, 56);
+
+  it("same_second_different_content_mints_suffixed_sibling_never_overwrites", async () => {
+    const base = handoffName(SESSION, NOW);
+    await writeFile(join(memoryRoot, base), "pre-existing different body\n", "utf8");
+    const outcome = await snapshotHandoffIfChanged(
+      {
+        type: "session.idle",
+        data: { sessionID: SESSION },
+        location: { directory: projectRoot },
+      },
+      {
+        storage,
+        projectID: PROJECT,
+        memoryRoot,
+        now: NOW,
+      },
+    );
+    expect(outcome.reason).toBe("written");
+    // Fixed-width sibling, never a bare `-1` (which would mis-sort).
+    expect(outcome.file).toBe("handoffs/2026-10-15-123456-123456-01.md");
+    // The original file is untouched — no overwrite.
+    expect(await readFile(join(memoryRoot, base), "utf8")).toBe(
+      "pre-existing different body\n",
+    );
+    // The newest pointer resolves to the newer sibling, not the base.
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("handoffs/2026-10-15-123456-123456-01.md");
+  });
+
+  it("same_content_dedupes_to_the_existing_file", async () => {
+    const file = await writeHandoffUnique(
+      "handoffs/2026-10-15-123456-123456.md",
+      "identical body\n",
+      { memoryRoot },
+    );
+    const again = await writeHandoffUnique(
+      "handoffs/2026-10-15-123456-123456.md",
+      "identical body\n",
+      { memoryRoot },
+    );
+    expect(again).toBe(file);
+    expect(await readdir(join(memoryRoot, "handoffs"))).toHaveLength(1);
   });
 });

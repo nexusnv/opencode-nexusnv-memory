@@ -14,11 +14,9 @@
  * admission).
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { LedgerStorage } from "./capture.js";
 import { hasSeen, markSeen } from "./capture.js";
-import { resolveMemoryRoot, withWriteLock } from "./files.js";
+import { updateCapped } from "./files.js";
 import { redact } from "./redact.js";
 
 /** Provenance classes; the tag follows content into review and storage. */
@@ -113,15 +111,6 @@ function extractPromptText(input: unknown): string | undefined {
   return typeof text === "string" ? text : undefined;
 }
 
-async function readRaw(root: string, file: string): Promise<string> {
-  try {
-    return await readFile(join(root, file), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
-    throw error;
-  }
-}
-
 /** In-process single-flight for user-asserted facts (same pattern as the
  * ledger `inflight` map): concurrent admissions of one fact converge on a
  * single append. The persisted `hasSeen` check remains the cross-restart
@@ -156,22 +145,22 @@ export async function rememberAsserted(
     try {
       if (await hasSeen(deps.storage, deps.projectID, contentID)) return false;
 
-      // File read + append inside one lock hold so a concurrent append of a
-      // *different* fact cannot interleave between the read and the write
-      // and be silently dropped. The ledger calls stay outside the lock:
-      // they take the same mutex internally and must never nest.
-      await withWriteLock(async () => {
-        const root = resolveMemoryRoot(deps.memoryRoot);
-        const current = await readRaw(root, "decisions.md");
-        const next =
+      // Shared choke-point append: `decisions.md` is allowlisted and
+      // unbounded (append-only by design), so this is the same write
+      // contract as every other memory file — atomic read-modify-write
+      // inside the lock, so a concurrent append of a *different* fact
+      // cannot be silently dropped. The ledger calls stay outside the
+      // lock: they take the same mutex internally and must never nest.
+      await updateCapped(
+        "decisions.md",
+        { memoryRoot: deps.memoryRoot },
+        (current) =>
           current.length === 0
             ? `${entry}\n`
             : current.endsWith("\n")
               ? `${current}${entry}\n`
-              : `${current}\n${entry}\n`;
-        await mkdir(root, { recursive: true });
-        await writeFile(join(root, "decisions.md"), redact(next), "utf8");
-      });
+              : `${current}\n${entry}\n`,
+      );
       await markSeen(deps.storage, deps.projectID, contentID, deps.now);
       return true;
     } finally {

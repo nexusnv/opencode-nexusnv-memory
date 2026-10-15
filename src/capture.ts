@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { resolveMemoryRoot, updateCapped, withWriteLock, writeCapped, type CappedFileOptions } from "./files.js";
+import { resolveMemoryRoot, updateCapped, withWriteLock, writeNewCapped, type CappedFileOptions } from "./files.js";
 import { flagInjection } from "./guard.js";
 import { redact } from "./redact.js";
 
@@ -961,6 +961,47 @@ export function handoffName(sessionID: string, now: number): string {
   return `handoffs/${handoffStamp(now)}-${sessionSuffix(sessionID)}.md`;
 }
 
+/** Collision suffix: fixed-width `-NN`, so suffixed names keep a stable
+ * lexicographic order (`-01` < `-02`; never bare `-1`, which would sort
+ * before the unsuffixed base since `-` < `.`). */
+function suffixedHandoffName(base: string, seq: number): string {
+  return `${base.slice(0, -".md".length)}-${String(seq).padStart(2, "0")}.md`;
+}
+
+/**
+ * Write a handoff without ever overwriting an existing file. The base name
+ * keeps the spec format; only a genuine same-name/different-content
+ * collision (same session, same second, e.g. an idle snapshot racing a
+ * compaction handoff) mints a `-01`, `-02`, … sibling. Same content
+ * resolves to the existing file (dedupe, no duplicate). Returns the file
+ * that now holds the content. Throws past 99 siblings (unreachable in
+ * practice; the caller reports `failed` and its guards stay unset so a
+ * retry can proceed).
+ */
+export async function writeHandoffUnique(
+  baseFile: string,
+  body: string,
+  opts?: CappedFileOptions,
+): Promise<string> {
+  const wanted = redact(body);
+  for (let seq = 0; seq <= 99; seq += 1) {
+    const file = seq === 0 ? baseFile : suffixedHandoffName(baseFile, seq);
+    const outcome = await writeNewCapped(file, body, opts);
+    if (outcome === "created") return file;
+    const root = resolveMemoryRoot(opts?.memoryRoot);
+    let current: string;
+    try {
+      current = await readFile(join(root, file), "utf8");
+    } catch {
+      continue;
+    }
+    if (current === wanted) return file;
+  }
+  throw new Error(
+    `[memory] write rejected: too many handoff siblings for ${baseFile}`,
+  );
+}
+
 /** Stable content hash over branch + normalized status + pending count. */
 export function snapshotContentHash(
   branch: string,
@@ -1186,20 +1227,19 @@ export async function snapshotHandoffIfChanged(
       return fail(error);
     }
     const root = resolveSnapshotRoot(record, deps.memoryRoot);
-    const file = handoffName(sessionID, at);
+    const file = await writeHandoffUnique(
+      handoffName(sessionID, at),
+      buildIdleHandoff({
+        sessionID,
+        branch,
+        changes,
+        pending,
+        now: at,
+        fileLines: deps.fileLines,
+      }),
+      { memoryRoot: root, fileLines: deps.fileLines },
+    );
     try {
-      await writeCapped(
-        file,
-        buildIdleHandoff({
-          sessionID,
-          branch,
-          changes,
-          pending,
-          now: at,
-          fileLines: deps.fileLines,
-        }),
-        { memoryRoot: root, fileLines: deps.fileLines },
-      );
       await setSnapshotHash(deps.storage, deps.projectID, sessionID, hash);
     } catch (error) {
       return fail(error);
@@ -1272,7 +1312,7 @@ export async function captureCompactionOutcome(
     if (sessionID === undefined) return { reason: "skipped" };
     let fresh: boolean;
     try {
-      fresh = await markSeen(deps.storage, deps.projectID, id, deps.now);
+      fresh = !(await hasSeen(deps.storage, deps.projectID, id));
     } catch (error) {
       return fail(error);
     }
@@ -1288,7 +1328,6 @@ export async function captureCompactionOutcome(
     const recent =
       typeof data?.["recent"] === "string" ? (data["recent"] as string) : "";
     const root = resolveSnapshotRoot(record, deps.memoryRoot);
-    const file = handoffName(sessionID, now);
     const body =
       text.trim().length > 0
         ? buildCompactionHandoff({
@@ -1307,11 +1346,17 @@ export async function captureCompactionOutcome(
             now,
             fileLines: deps.fileLines,
           });
+    // Exclusive, never-overwriting write: a same-name idle snapshot cannot
+    // replace the produced summary (and replay stays able to restore it,
+    // since `seen` is marked only after the write lands below).
+    const file = await writeHandoffUnique(handoffName(sessionID, now), body, {
+      memoryRoot: root,
+      fileLines: deps.fileLines,
+    });
     try {
-      await writeCapped(file, body, {
-        memoryRoot: root,
-        fileLines: deps.fileLines,
-      });
+      // Mark seen only after the handoff lands: a failed write must stay
+      // replayable, otherwise the produced summary is lost for good.
+      await markSeen(deps.storage, deps.projectID, id, deps.now);
     } catch (error) {
       return fail(error);
     }

@@ -357,6 +357,50 @@ export async function writeCapped(
 }
 
 /**
+ * Exclusive create of one allowlisted file: redaction, caps, and the
+ * per-process mutex apply exactly as in `writeCapped`, but the file must
+ * not already exist (`wx` flag). Resolves `"created"` on success or
+ * `"exists"` when a file is already there (caller decides: dedupe when the
+ * content matches, or retry under a suffixed name). Never overwrites, so a
+ * same-name collision between two different handoffs cannot destroy either.
+ * Intended for immutable new files (`handoffs/`); appends use
+ * `updateCapped`, overwrites use `writeCapped`.
+ */
+export async function writeNewCapped(
+  file: string,
+  text: string,
+  opts?: CappedFileOptions,
+): Promise<"created" | "exists"> {
+  assertAllowedPath(file);
+  if (typeof text !== "string") {
+    throw new Error("[memory] writeNewCapped text must be a string");
+  }
+  const redactedText = redact(text);
+  return withWriteLock(async () => {
+    const { indexLines, fileLines } = capsOf(opts);
+    const root = resolveMemoryRoot(opts?.memoryRoot);
+    const abs = resolveUnderRoot(root, file);
+    const total = countLines(redactedText);
+    const cap = getCapForFile(file, indexLines, fileLines);
+    if (Number.isFinite(cap) && total > (cap as number)) {
+      throw new Error(
+        `[memory] write rejected: ${file} has ${total} lines, cap is ${cap}; refusing to silently truncate`,
+      );
+    }
+    await mkdir(dirname(abs), { recursive: true });
+    try {
+      await writeFile(abs, redactedText, { encoding: "utf8", flag: "wx" });
+      return "created" as const;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+        return "exists" as const;
+      }
+      throw error;
+    }
+  });
+}
+
+/**
  * Atomic read-modify-write under the per-process mutex. The updater receives
  * the current raw content (`""` when the file does not exist yet) and
  * returns the next raw content; redaction, caps, rotation, and archive

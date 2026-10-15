@@ -23,6 +23,7 @@
  * the base `* / * → allow` wildcard and resolves silently, so the gate fails
  * open. Setup emits an unconditional loud warning about this (src/index.ts).
  */
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import {
@@ -30,13 +31,17 @@ import {
   resetPending,
   type LedgerStorage,
 } from "./capture.js";
-import { parseMemoryOptions } from "./config.js";
+import { DEFAULT_MEMORY_OPTIONS, parseMemoryOptions } from "./config.js";
 import {
   assertAllowedPath,
+  countLines,
+  getCapForFile,
   readCapped,
+  resolveMemoryRoot,
   updateCapped,
   type CappedFileOptions,
 } from "./files.js";
+import { redact } from "./redact.js";
 
 /** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
 const MEMORY_DIR = ".opencode/memory";
@@ -181,6 +186,67 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
 }
 
 /**
+ * Raw read for cap projection only (no cap, no redaction — the projection
+ * replicates the `updateCapped` merge and counts redacted lines itself).
+ * Resolves `""` when the file does not exist yet; other IO errors propagate
+ * (fail-closed, like a deny).
+ */
+async function readRawForProjection(
+  memoryRoot: string,
+  file: string,
+): Promise<string> {
+  try {
+    return await readFile(join(resolveMemoryRoot(memoryRoot), file), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+/**
+ * Batch cap preflight: project every target file's line count after the
+ * whole batch and reject before the first prompt when a capped file would
+ * overflow. Without this, a mid-batch `writeCapped` throw leaves earlier
+ * candidates durable while the rest stay pending — and the next review
+ * re-proposes the already-applied lines, duplicating them. `activeContext.md`
+ * is exempt (rotation, not rejection) and `decisions.md` is unbounded; both
+ * still go through the per-line prompts and atomic appends below.
+ */
+async function preflightBatchCaps(
+  parsed: readonly ApplyCandidate[],
+  deps: ApplyDeps,
+  indexLines: number,
+  fileLines: number,
+): Promise<void> {
+  const byFile = new Map<string, string[]>();
+  for (const candidate of parsed) {
+    const lines = byFile.get(candidate.file) ?? [];
+    lines.push(candidate.line);
+    byFile.set(candidate.file, lines);
+  }
+  for (const [file, lines] of byFile) {
+    const cap = getCapForFile(file, indexLines, fileLines);
+    if (!Number.isFinite(cap)) continue;
+    if (file === "activeContext.md") continue;
+    const current = await readRawForProjection(deps.memoryRoot, file);
+    let merged = current;
+    for (const line of lines) {
+      merged =
+        merged === ""
+          ? line
+          : merged.endsWith("\n")
+            ? merged + line
+            : `${merged}\n${line}`;
+    }
+    if (countLines(redact(merged)) > (cap as number)) {
+      throw new Error(
+        `[memory] memory_apply rejected: batch would put ${file} over its ${cap}-line cap; nothing was written and no approval was requested`,
+      );
+    }
+  }
+}
+
+/**
  * `memory_apply` executor: the only deterministic apply channel.
  *
  * Per candidate in order: allowlist-validate, then one `permission.assert`
@@ -210,13 +276,16 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
         "No candidates to apply (reviewed-nothing signal); pending review counters reset.",
       );
     }
+    const indexLines = deps.indexLines ?? DEFAULT_MEMORY_OPTIONS.indexLines;
+    const fileLines = deps.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
+    // Validate everything up front: shape, allowlist, then whole-batch caps.
+    // A batch that cannot fit is rejected before the first approval prompt,
+    // so a cap overflow can never leave a half-applied batch behind.
+    const parsed = candidates.map((_, i) => candidateAt(candidates, i));
+    for (const candidate of parsed) assertAllowedPath(candidate.file);
+    await preflightBatchCaps(parsed, deps, indexLines, fileLines);
     let applied = 0;
-    for (let i = 0; i < candidates.length; i += 1) {
-      const candidate = candidateAt(candidates, i);
-      // Allowlist first: disallowed paths are rejected before any approval
-      // prompt, so the user is never asked to approve a path outside the
-      // memory root.
-      assertAllowedPath(candidate.file);
+    for (const candidate of parsed) {
       await deps.permission.assert({
         sessionID: context.sessionID,
         agent: context.agent,
@@ -234,8 +303,8 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
         candidate.file,
         {
           memoryRoot: deps.memoryRoot,
-          indexLines: deps.indexLines,
-          fileLines: deps.fileLines,
+          indexLines,
+          fileLines,
         },
         (current) =>
           current === ""

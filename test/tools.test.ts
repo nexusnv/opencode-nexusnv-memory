@@ -342,6 +342,35 @@ describe("tools", () => {
     expect(permission.calls).toHaveLength(0);
   });
 
+  it("apply_rejects_overcap_batch_before_any_prompt_or_write", async () => {
+    const permission = new FakePermission();
+    const execute = createMemoryApplyExecute({
+      memoryRoot: root,
+      projectID: PROJECT,
+      storage,
+      permission,
+    });
+    // style.md cap is 60 lines; seed 59 so two more lines cannot all fit.
+    const seed = Array.from({ length: 59 }, (_, i) => `- rule-${i + 1}`);
+    await writeMemory("style.md", `${seed.join("\n")}\n`);
+    await expect(
+      execute(
+        {
+          candidates: [
+            { file: "style.md", line: "- new-a", source: "user" },
+            { file: "style.md", line: "- new-b", source: "user" },
+          ],
+        },
+        TOOL_CTX,
+      ),
+    ).rejects.toThrow(/over its .* cap/);
+    // No approval was requested and the file is untouched (no partial batch).
+    expect(permission.calls).toHaveLength(0);
+    const text = await readFile(join(root, "style.md"), "utf8");
+    expect(text.split("\n").filter((l) => l.length > 0)).toHaveLength(59);
+    expect(await getPending(storage, PROJECT)).toBe(0);
+  });
+
   it("registers recall and apply via ctx.tool.transform", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-wire-"));
     const memoryDir = join(projectRoot, ".opencode", "memory");

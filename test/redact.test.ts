@@ -101,3 +101,18 @@ describe("quoted_env_values_with_spaces", () => {
     expect(out).not.toContain("starts here");
   });
 });
+
+describe("escaped_quotes_in_values", () => {
+  it("consumes escaped quotes inside double-quoted values", () => {
+    const out = redact('PASSWORD="first\\"remaining-secret"');
+    expect(out).not.toContain("first");
+    expect(out).not.toContain("remaining-secret");
+    expect(out).toContain("PASSWORD=[redacted]");
+  });
+
+  it("consumes escaped quotes inside single-quoted values", () => {
+    const out = redact("TOKEN='it\\'s-secret-value'");
+    expect(out).not.toContain("secret-value");
+    expect(out).toContain("TOKEN=[redacted]");
+  });
+});

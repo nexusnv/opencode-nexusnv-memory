@@ -100,9 +100,11 @@ const BLOCKLIST: readonly Pattern[] = [
   // Generic .env-style assignments for secret-ish keys. The value is
   // replaced with [redacted], preserving the key label. Quoted values match
   // through their closing quote (so values containing spaces are fully
-  // covered); unterminated quotes match to end of line (fail-closed).
+  // covered); quoted alternatives consume backslash escapes first, so an
+  // escaped quote cannot end the match early and leak the remainder.
+  // Unterminated quotes match to end of line (fail-closed).
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|"[^"\n]*|'[^'\n]*|[^\s'";,]+)/gi,
+    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];

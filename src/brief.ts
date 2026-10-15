@@ -140,6 +140,29 @@ function splitKnownErrors(allLines: string[]): {
 }
 
 /**
+ * Order key for a top-level handoff name: explicit `(stamp, sequence)` so a
+ * collision sibling (`<stamp>-<session6>-01.md`) ranks after its base
+ * (`<stamp>-<session6>.md`). The session suffix is a fixed 6 characters, so
+ * a trailing `-NN` is unambiguous; anything else ranks as sequence 0 with
+ * the full name as tiebreak. Names without a timestamp stamp sort first
+ * (legacy/unexpected, never newest).
+ */
+function handoffOrder(name: string): {
+  stamp: string;
+  seq: number;
+  name: string;
+} {
+  const match = name.match(/^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)\.md$/);
+  if (!match) return { stamp: "", seq: 0, name };
+  const rest = match[2]!;
+  const seqMatch = rest.match(/^(.*)-(\d{2})$/);
+  if (seqMatch && seqMatch[1]!.length === 6) {
+    return { stamp: match[1]!, seq: Number.parseInt(seqMatch[2]!, 10), name };
+  }
+  return { stamp: match[1]!, seq: 0, name };
+}
+
+/**
  * Newest top-level `handoffs/*.md` pointer line, or `undefined` when there
  * is none. Archive entries are recall-only and never pointed at. Never
  * throws.
@@ -151,7 +174,14 @@ export async function newestHandoffLine(
     const entries = await readdir(join(memoryRoot, "handoffs"));
     const names = entries
       .filter((n) => /^[A-Za-z0-9._-]+\.md$/.test(n))
-      .sort();
+      .map(handoffOrder)
+      .sort(
+        (a, b) =>
+          (a.stamp < b.stamp ? -1 : a.stamp > b.stamp ? 1 : 0) ||
+          a.seq - b.seq ||
+          (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+      )
+      .map((o) => o.name);
     if (names.length === 0) return undefined;
     return `[memory] handoff: handoffs/${names[names.length - 1]!} (latest)`;
   } catch {
