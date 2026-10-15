@@ -91,6 +91,28 @@ On setup the plugin emits an unconditional loud warning that this rule must be i
 
 `INDEX.md` ≤ 30 lines on disk; `activeContext`/`architecture`/`style`/`issues` ≤ 60 lines; `decisions.md` unbounded with a ≤60-line injectable tail; handoffs ≤ 60 lines/file. Auto-inject payload = `INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1` (≤80 total). An over-cap `INDEX.md` is not attached; `/memory-review` reports the violation instead.
 
+## Evals (spec §9)
+
+Recall success (why-questions answered in ≤2 capped reads) vs tokens injected, reported as three numbers (measured by `test/acceptance.test.ts`):
+
+- **static = 10 lines** — hand-owned `AGENTS.md` protocol block (≤10 non-empty lines) + the `memory_recall` description (~3–4 wrapped lines). Always present, never counted against `injectBudgetLines`.
+- **per-prompt with content = 90 lines** — static + `INDEX` ≤30 (once per prompt) + brief ≤48 + hint ≤1 + status ≤1. The injectable portion (INDEX + brief + hint + status) is capped at `injectBudgetLines` = 80.
+- **session-total = per-prompt × model steps** — the `context` hook re-emits brief + status on every model call including tool-driven continuations, so 4 model steps ≈ 360 lines. The hint is throttled to once per prompt/session (`<projectID>/hint/<sessionID>/<promptHash>`).
+
+## Deploy check (event delivery)
+
+`session.idle` and the `session.compaction.*` family are type-proven against `@opencode/schema` (G1); delivery still needs a runtime confirmation. At deploy, log observed `event.type` values once from the subscriber loop and confirm both `session.idle` and `session.compaction.ended` arrive:
+
+```
+[memory-deploy] observed event.type: session.compaction.ended, session.compaction.started, session.idle
+```
+
+If either primary type is missing, the resilience fallbacks still hold (throttled `context`-hook snapshot writer for idle; pointer-only handoff via `/memory-review` for a missing produced summary — pre-compaction state is already durable on disk). The VCS startup shape check is warn-only and never throws, so a missing/odd `ctx.vcs` surface degrades to `{ branch: "unknown", changes: [] }` instead of breaking load.
+
+## Compatibility
+
+Supported range: OpenCode `2.0.x` with `@opencode/plugin` pinned to the exact `2.0.29` in `package.json` (never `latest`). The published package form (`"plugins": ["opencode-nexusnv-memory"]`) loads the same `Plugin.define({ id: "memory", setup })` entrypoint as the drop-in; verify with `opencode plugin list` (shows `memory`). Bump the pin deliberately when adopting a newer API contract and re-run the §9 gates (`npx tsc --noEmit`, `npx vitest run`).
+
 ## Uninstall
 
 Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
