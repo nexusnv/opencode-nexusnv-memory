@@ -15,6 +15,7 @@ import { matchIndex } from "./hints.js";
 import { statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { parseMemoryOptions } from "./config.js";
+import { registerMemoryTools } from "./tools.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
@@ -236,6 +237,10 @@ export default Plugin.define({
         }
       }),
     );
+
+    // memory_recall + memory_apply tools: allowlisted recall + the only
+    // deterministic apply channel with fail-closed per-line approval (§§5.4, 5.5).
+    registrations.push(await registerMemoryTools(ctx));
 
     const projectRoot = projectRootOf(ctx);
     const firstRun = await scaffoldMemoryDir(projectRoot);

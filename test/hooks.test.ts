@@ -133,6 +133,19 @@ function setupHooks(
       },
     },
     storage: store,
+    permission: {
+      assert: async (_input: unknown): Promise<void> => undefined,
+    },
+    tool: {
+      transform: async (
+        cb: (editor: { add: (tool: unknown) => void }) => void,
+      ) => {
+        cb({ add: (_tool: unknown) => undefined });
+        return {
+          dispose: async () => undefined,
+        };
+      },
+    },
     session: {
       hook: async (
         name: string,
