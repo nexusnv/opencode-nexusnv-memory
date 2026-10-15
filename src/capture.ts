@@ -657,22 +657,768 @@ export async function captureFailure(
 }
 
 /* ------------------------------------------------------------------ */
-/* snapshotIfDue — context-hook throttle gate (stub; T8 fleshes out)  */
+/* Task 8: idle/compaction capture + VCS adapter (spec §§5.7, 5.9)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Plugin project identity for location isolation. `directory` is the
+ * normalized project root (`canonical ?? directory`, no trailing slash);
+ * `projectID` is `ctx.location.project.id` when present.
+ */
+export interface PluginLocation {
+  readonly directory: string;
+  readonly projectID?: string;
+}
+
+/**
+ * Minimal structural surface of `ctx.vcs` the snapshots need. Deliberately
+ * loose: the live docs prose shows a flat `branches()` while the 2.0.29
+ * client types expose `branch.list()` — both are accepted (prefer
+ * `branch.list()`), and every call is `.data`-unwrapped with a warn-only
+ * shape check that never throws.
+ */
+export interface VcsPort {
+  readonly get?: () => Promise<unknown>;
+  readonly status?: () => Promise<unknown>;
+  readonly branch?: { readonly list?: () => Promise<unknown> };
+  readonly branches?: () => Promise<unknown>;
+  readonly diff?: (input: {
+    readonly mode: string;
+    readonly base?: string;
+    readonly context?: number;
+  }) => Promise<unknown>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stripTrailingSlashes(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+/**
+ * True when the subscribed event belongs to this plugin instance.
+ * `ctx.event.subscribe` is the server-wide stream, so `event.location`
+ * carries other projects too: a present `event.location.directory` must
+ * equal the plugin directory, and a present `data.projectID` must equal
+ * the plugin project ID. Location-less events pass here — the
+ * unknown-session drop for `session.idle` lives in
+ * `snapshotHandoffIfChanged`, which has the ledger to judge known-ness.
+ * Never throws.
+ */
+export function isThisLocation(
+  event: unknown,
+  plugin: PluginLocation,
+): boolean {
+  try {
+    const record = asRecord(event);
+    if (record === undefined) return false;
+    const dir = asRecord(record["location"])?.["directory"];
+    if (typeof dir === "string" && dir.length > 0) {
+      if (stripTrailingSlashes(dir) !== stripTrailingSlashes(plugin.directory)) {
+        return false;
+      }
+    }
+    const projectID = asRecord(record["data"])?.["projectID"];
+    if (typeof projectID === "string" && projectID.length > 0) {
+      if (
+        typeof plugin.projectID === "string" &&
+        plugin.projectID.length > 0 &&
+        projectID !== plugin.projectID
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Event-type prefixes worth one diagnostic log line (sample allowlist). */
+const KNOWN_DIAGNOSTIC_PREFIXES = [
+  "session.",
+  "permission.",
+  "vcs.",
+  "mcp.",
+  "project.",
+  "worktree.",
+  "command.",
+] as const;
+
+/**
+ * True for sampled diagnostics only. `tui.*` chatter and unknown/vendor
+ * event noise are dropped by default (the loop stays silent for them).
+ * `session.compaction.*` is routed before this check, so overlap is fine.
+ * Never throws.
+ */
+export function isKnownDiagnostic(event: unknown): boolean {
+  try {
+    const type = asRecord(event)?.["type"];
+    if (typeof type !== "string" || type.length === 0) return false;
+    if (type.startsWith("tui.")) return false;
+    return KNOWN_DIAGNOSTIC_PREFIXES.some((prefix) =>
+      type.startsWith(prefix),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Branch + normalized open-change file list behind the VCS adapter. */
+export interface VcsSnapshot {
+  readonly branch: string;
+  readonly changes: readonly string[];
+}
+
+/** Unwrap the `{ location, data }` envelope; tolerate bare payloads. */
+function unwrapData(envelope: unknown): unknown {
+  const record = asRecord(envelope);
+  if (record !== undefined && "data" in record) return record["data"];
+  return envelope;
+}
+
+/**
+ * Normalize `FileStatus[]` and the `FileDiff[]` fallback to sorted unique
+ * file-path strings before hashing (the fallback changes the element
+ * shape, so raw values must never reach the hash).
+ */
+function normalizeChanges(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      if (entry.length > 0) out.push(entry);
+    } else {
+      const file = asRecord(entry)?.["file"];
+      if (typeof file === "string" && file.length > 0) {
+        out.push(file);
+      } else if (entry !== null && entry !== undefined) {
+        try {
+          out.push(JSON.stringify(entry));
+        } catch {
+          // Unstringifiable entries carry no hashable signal; skip.
+        }
+      }
+    }
+  }
+  return [...new Set(out)].sort();
+}
+
+async function readDiffFallback(
+  vcs: VcsPort | undefined,
+  warn: (error: unknown) => void,
+): Promise<string[]> {
+  if (typeof vcs?.diff !== "function") {
+    warn(new Error("[memory] vcs.diff missing; no open-change signal"));
+    return [];
+  }
+  const raw = unwrapData(await vcs.diff({ mode: "working", context: 3 }));
+  if (!Array.isArray(raw)) {
+    warn(new Error("[memory] vcs diff shape unexpected"));
+    return [];
+  }
+  return normalizeChanges(raw);
+}
+
+/**
+ * The one VCS adapter: branch via `(await vcs.get()).data.branch.current`
+ * (fallback `(await (vcs.branch?.list ?? vcs.branches)()).data[0] ??
+ * "unknown"`, warn-only); open changes via `(await
+ * vcs.status()).data` (fallback `(await vcs.diff({ mode: "working",
+ * context: 3 })).data`, normalized to strings). Shape drift is warn-only —
+ * this never throws; worst case is `{ branch: "unknown", changes: [] }`.
+ */
+export async function readVcsSnapshot(
+  vcs: VcsPort | undefined,
+  log?: (error: unknown) => void,
+): Promise<VcsSnapshot> {
+  const warn = (error: unknown): void => {
+    try {
+      (log ?? (() => undefined))(error);
+    } catch {
+      // Logging must never break capture.
+    }
+  };
+  let branch = "unknown";
+  try {
+    if (vcs?.get === undefined) {
+      warn(new Error("[memory] vcs.get missing"));
+    } else {
+      const current = asRecord(
+        asRecord(unwrapData(await vcs.get()))?.["branch"],
+      )?.["current"];
+      if (typeof current === "string" && current.length > 0) {
+        branch = current;
+      } else {
+        const list = vcs.branch?.list;
+        const legacy = vcs.branches;
+        let listed: unknown;
+        if (typeof list === "function") listed = unwrapData(await list());
+        else if (typeof legacy === "function") {
+          listed = unwrapData(await legacy());
+        } else {
+          warn(
+            new Error(
+              "[memory] vcs branch source missing (branch.list/branches)",
+            ),
+          );
+        }
+        if (listed !== undefined) {
+          const first = Array.isArray(listed) ? listed[0] : undefined;
+          if (typeof first === "string" && first.length > 0) branch = first;
+          else warn(new Error("[memory] vcs branch list shape unexpected"));
+        }
+      }
+    }
+  } catch (error) {
+    warn(error);
+  }
+  let changes: string[] = [];
+  let statusOk = false;
+  try {
+    if (vcs?.status === undefined) {
+      warn(new Error("[memory] vcs.status missing; trying diff fallback"));
+    } else {
+      const raw = unwrapData(await vcs.status());
+      if (Array.isArray(raw)) {
+        changes = normalizeChanges(raw);
+        statusOk = true;
+      } else {
+        warn(
+          new Error("[memory] vcs status shape unexpected; trying diff fallback"),
+        );
+      }
+    }
+  } catch (error) {
+    warn(error);
+  }
+  if (!statusOk) {
+    try {
+      changes = await readDiffFallback(vcs, warn);
+    } catch (error) {
+      warn(error);
+      changes = [];
+    }
+  }
+  return { branch, changes };
+}
+
+function eventDirectoryOf(event: Record<string, unknown>): string | undefined {
+  const dir = asRecord(event["location"])?.["directory"];
+  return typeof dir === "string" && dir.length > 0 ? dir : undefined;
+}
+
+function eventSessionIDOf(
+  event: Record<string, unknown>,
+): string | undefined {
+  const id = asRecord(event["data"])?.["sessionID"];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function eventTimeOf(event: Record<string, unknown>, now: number): number {
+  const created = event["created"];
+  return typeof created === "number" && Number.isFinite(created)
+    ? created
+    : now;
+}
+
+function handoffStamp(now: number): string {
+  const d = new Date(now);
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+}
+
+/** Last-6 of the session ID, sanitized for the handoff allowlist. */
+function sessionSuffix(sessionID: string): string {
+  return sessionID.slice(-6).replace(/[^A-Za-z0-9._-]/g, "-") || "session";
+}
+
+/** Immutable newest-wins name: `handoffs/YYYY-MM-DD-HHmmss-<session6>.md`. */
+export function handoffName(sessionID: string, now: number): string {
+  return `handoffs/${handoffStamp(now)}-${sessionSuffix(sessionID)}.md`;
+}
+
+/** Stable content hash over branch + normalized status + pending count. */
+export function snapshotContentHash(
+  branch: string,
+  changes: readonly string[],
+  pending: number,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({ branch, changes: [...changes], pending }),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+/** Resolve the memory root for the event's session/location (never cached). */
+function resolveSnapshotRoot(
+  event: Record<string, unknown>,
+  fallbackMemoryRoot?: string,
+): string {
+  const dir = eventDirectoryOf(event);
+  if (dir !== undefined) return resolveMemoryRoot(join(dir, ".opencode", "memory"));
+  return resolveMemoryRoot(fallbackMemoryRoot);
+}
+
+function fitLines(lines: string[], cap: number): string {
+  const limit =
+    Number.isInteger(cap) && cap > 0 ? cap : DEFAULT_MEMORY_OPTIONS.fileLines;
+  if (lines.length <= limit) return `${lines.join("\n")}\n`;
+  const kept = lines.slice(0, limit);
+  kept[limit - 1] =
+    `[truncated: showing first ${limit - 1} of ${lines.length} lines]`;
+  return `${kept.join("\n")}\n`;
+}
+
+/** Max open-change lines listed in an idle handoff (hash covers all). */
+const IDLE_DISPLAY_CHANGES = 40;
+
+function buildIdleHandoff(input: {
+  readonly sessionID: string;
+  readonly branch: string;
+  readonly changes: readonly string[];
+  readonly pending: number;
+  readonly now: number;
+  readonly fileLines?: number;
+}): string {
+  const lines = [
+    `# Handoff ${new Date(input.now).toISOString()} (source:snapshot)`,
+    ``,
+    `- session: ${input.sessionID}`,
+    `- branch: ${input.branch}`,
+    `- pending-captures: ${input.pending}`,
+    ``,
+    `## Open changes`,
+  ];
+  if (input.changes.length === 0) {
+    lines.push(`- (clean)`);
+  } else {
+    for (const file of input.changes.slice(0, IDLE_DISPLAY_CHANGES)) {
+      lines.push(`- ${file}`);
+    }
+    if (input.changes.length > IDLE_DISPLAY_CHANGES) {
+      lines.push(`- (+${input.changes.length - IDLE_DISPLAY_CHANGES} more)`);
+    }
+  }
+  lines.push(``, `## Next`, `- (resume here; newest handoff wins)`);
+  return fitLines(lines, input.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines);
+}
+
+/** Max summary/recent lines carried in a compaction handoff. */
+const COMPACTION_TEXT_LINES = 40;
+const COMPACTION_RECENT_LINES = 8;
+
+function cappedSection(lines: string[], max: number): string[] {
+  if (lines.length <= max) return lines;
+  return [
+    ...lines.slice(0, max),
+    `[truncated: showing first ${max} of ${lines.length} lines]`,
+  ];
+}
+
+function buildCompactionHandoff(input: {
+  readonly sessionID: string;
+  readonly reason: string;
+  readonly branch: string;
+  readonly text: string;
+  readonly recent: string;
+  readonly now: number;
+  readonly fileLines?: number;
+}): string {
+  const lines = [
+    `# Handoff ${new Date(input.now).toISOString()} (source:snapshot, compaction)`,
+    ``,
+    `- session: ${input.sessionID}`,
+    `- reason: ${input.reason}`,
+    `- branch: ${input.branch}`,
+    ``,
+    `## Summary`,
+    ...cappedSection(input.text.split("\n"), COMPACTION_TEXT_LINES),
+  ];
+  if (input.recent.trim().length > 0) {
+    lines.push(
+      ``,
+      `## Recent`,
+      ...cappedSection(input.recent.split("\n"), COMPACTION_RECENT_LINES),
+    );
+  }
+  return fitLines(lines, input.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines);
+}
+
+function buildPointerHandoff(input: {
+  readonly sessionID: string;
+  readonly reason: string;
+  readonly branch: string;
+  readonly now: number;
+  readonly fileLines?: number;
+}): string {
+  return fitLines(
+    [
+      `# Handoff ${new Date(input.now).toISOString()} (source:snapshot, compaction)`,
+      ``,
+      `- session: ${input.sessionID}`,
+      `- reason: ${input.reason}`,
+      `- branch: ${input.branch}`,
+      ``,
+      `compaction occurred (summary unavailable; run /memory-review).`,
+    ],
+    input.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines,
+  );
+}
+
+export interface SnapshotDeps {
+  readonly vcs?: VcsPort;
+  readonly storage: LedgerStorage;
+  readonly projectID: string;
+  /** Fallback (ctx) memory root; the event location wins when present. */
+  readonly memoryRoot?: string;
+  readonly fileLines?: number;
+  readonly now?: number;
+  readonly log?: (error: unknown) => void;
+}
+
+export type SnapshotReason =
+  | "written"
+  | "unchanged"
+  | "skipped"
+  | "dropped"
+  | "failed";
+
+export interface SnapshotOutcome {
+  readonly reason: SnapshotReason;
+  readonly file?: string;
+}
+
+/**
+ * Idle snapshot writer (spec §5.7/§5.9 D-A).
+ *
+ * Resolves the memory root for the event's session/location
+ * (`event.location.directory`, fallback `deps.memoryRoot`) — never from a
+ * root captured once at load. Branch/changes come from the VCS adapter;
+ * `hash(branch + status + pending)` equal to
+ * `<projectID>/snapshot/<sessionID>` is a no-op, otherwise an immutable
+ * `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` is written (newest wins).
+ * Location-less `idle` for a session with neither a snapshot nor a
+ * throttle key is dropped + debug-logged. Serialized via `writeCapped`'s
+ * mutex; never throws.
+ */
+export async function snapshotHandoffIfChanged(
+  event: unknown,
+  deps: SnapshotDeps,
+): Promise<SnapshotOutcome> {
+  const log = deps.log ?? (() => undefined);
+  const fail = (error: unknown): SnapshotOutcome => {
+    try {
+      log(error);
+    } catch {
+      // Logging must never break capture.
+    }
+    return { reason: "failed" };
+  };
+  try {
+    const record = asRecord(event);
+    if (record === undefined) return { reason: "skipped" };
+    if (record["type"] !== undefined && record["type"] !== "session.idle") {
+      return { reason: "skipped" };
+    }
+    const sessionID = eventSessionIDOf(record);
+    if (sessionID === undefined) return { reason: "skipped" };
+    if (eventDirectoryOf(record) === undefined) {
+      let known = false;
+      try {
+        known =
+          (await getSnapshotHash(deps.storage, deps.projectID, sessionID)) !==
+            undefined ||
+          (await getThrottle(deps.storage, deps.projectID, sessionID)) !==
+            undefined;
+      } catch (error) {
+        return fail(error);
+      }
+      if (!known) {
+        try {
+          log(`[memory] dropping location-less idle for unknown session`);
+        } catch {
+          // Logging must never break capture.
+        }
+        return { reason: "dropped" };
+      }
+    }
+    const now = deps.now ?? Date.now();
+    const at = eventTimeOf(record, now);
+    const { branch, changes } = await readVcsSnapshot(deps.vcs, log);
+    let pending = 0;
+    try {
+      pending = await getPending(deps.storage, deps.projectID);
+    } catch (error) {
+      return fail(error);
+    }
+    const hash = snapshotContentHash(branch, changes, pending);
+    try {
+      if ((await getSnapshotHash(deps.storage, deps.projectID, sessionID)) === hash) {
+        return { reason: "unchanged" };
+      }
+    } catch (error) {
+      return fail(error);
+    }
+    const root = resolveSnapshotRoot(record, deps.memoryRoot);
+    const file = handoffName(sessionID, at);
+    try {
+      await writeCapped(
+        file,
+        buildIdleHandoff({
+          sessionID,
+          branch,
+          changes,
+          pending,
+          now: at,
+          fileLines: deps.fileLines,
+        }),
+        { memoryRoot: root, fileLines: deps.fileLines },
+      );
+      await setSnapshotHash(deps.storage, deps.projectID, sessionID, hash);
+    } catch (error) {
+      return fail(error);
+    }
+    return { reason: "written", file };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export interface CompactionDeps {
+  readonly vcs?: VcsPort;
+  readonly storage: LedgerStorage;
+  readonly projectID: string;
+  /** Fallback (ctx) memory root; the event location wins when present. */
+  readonly memoryRoot?: string;
+  readonly fileLines?: number;
+  readonly now?: number;
+  readonly log?: (error: unknown) => void;
+}
+
+export type CompactionReason =
+  | "captured"
+  | "duplicate"
+  | "skipped"
+  | "failed";
+
+export interface CompactionOutcome {
+  readonly reason: CompactionReason;
+  readonly file?: string;
+}
+
+/**
+ * Produced-summary capture (spec §5.9 D-B): `session.compaction.ended`
+ * `data.text` (+ kept-tail `data.recent`) → `handoffs/`, replay-guarded via
+ * `<projectID>/seen/<event.id>` (`ended` is durable, `subscribe` replays
+ * redeliver it). When the produced text is missing, a pointer-only handoff
+ * (timestamp + branch + "compaction occurred") is written instead. Never
+ * throws.
+ */
+export async function captureCompactionOutcome(
+  event: unknown,
+  deps: CompactionDeps,
+): Promise<CompactionOutcome> {
+  const log = deps.log ?? (() => undefined);
+  const fail = (error: unknown): CompactionOutcome => {
+    try {
+      log(error);
+    } catch {
+      // Logging must never break capture.
+    }
+    return { reason: "failed" };
+  };
+  try {
+    const record = asRecord(event);
+    if (record === undefined) return { reason: "skipped" };
+    if (
+      record["type"] !== undefined &&
+      record["type"] !== "session.compaction.ended"
+    ) {
+      return { reason: "skipped" };
+    }
+    const id = record["id"];
+    if (typeof id !== "string" || id.length === 0) return { reason: "skipped" };
+    const data = asRecord(record["data"]);
+    const sessionID =
+      typeof data?.["sessionID"] === "string" && data["sessionID"].length > 0
+        ? (data["sessionID"] as string)
+        : undefined;
+    if (sessionID === undefined) return { reason: "skipped" };
+    let fresh: boolean;
+    try {
+      fresh = await markSeen(deps.storage, deps.projectID, id, deps.now);
+    } catch (error) {
+      return fail(error);
+    }
+    if (!fresh) return { reason: "duplicate" };
+    const now = eventTimeOf(record, deps.now ?? Date.now());
+    const { branch } = await readVcsSnapshot(deps.vcs, log);
+    const reason =
+      typeof data?.["reason"] === "string" && data["reason"].length > 0
+        ? (data["reason"] as string)
+        : "unknown";
+    const text =
+      typeof data?.["text"] === "string" ? (data["text"] as string) : "";
+    const recent =
+      typeof data?.["recent"] === "string" ? (data["recent"] as string) : "";
+    const root = resolveSnapshotRoot(record, deps.memoryRoot);
+    const file = handoffName(sessionID, now);
+    const body =
+      text.trim().length > 0
+        ? buildCompactionHandoff({
+            sessionID,
+            reason,
+            branch,
+            text,
+            recent,
+            now,
+            fileLines: deps.fileLines,
+          })
+        : buildPointerHandoff({
+            sessionID,
+            reason,
+            branch,
+            now,
+            fileLines: deps.fileLines,
+          });
+    try {
+      await writeCapped(file, body, {
+        memoryRoot: root,
+        fileLines: deps.fileLines,
+      });
+    } catch (error) {
+      return fail(error);
+    }
+    return { reason: "captured", file };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export interface EventDispatchDeps extends SnapshotDeps {
+  /** Normalized plugin project directory (`canonical ?? directory`). */
+  readonly directory: string;
+}
+
+/**
+ * Route one subscribed event (spec §5.9): drop foreign locations before
+ * any write, then `session.idle` → snapshot, `session.compaction.ended` →
+ * produced-summary capture, other `session.compaction.*` → diagnostic log,
+ * other sampled diagnostics → diagnostic log, everything else (foreign/TUI
+ * noise) → silent drop. Each handler carries its own catch (M1); this
+ * never throws.
+ */
+export async function dispatchEvent(
+  event: unknown,
+  deps: EventDispatchDeps,
+): Promise<void> {
+  const log = deps.log ?? (() => undefined);
+  const report = (error: unknown): void => {
+    try {
+      log(error);
+    } catch {
+      // Logging must never break the loop.
+    }
+  };
+  try {
+    if (
+      !isThisLocation(event, {
+        directory: deps.directory,
+        projectID: deps.projectID,
+      })
+    ) {
+      return;
+    }
+    const type = asRecord(event)?.["type"];
+    if (type === "session.idle") {
+      await snapshotHandoffIfChanged(event, deps).catch(report);
+    } else if (type === "session.compaction.ended") {
+      await captureCompactionOutcome(event, deps).catch(report);
+    } else if (
+      typeof type === "string" &&
+      type.startsWith("session.compaction.")
+    ) {
+      report(event);
+    } else if (isKnownDiagnostic(event)) {
+      report(event);
+    }
+  } catch (error) {
+    report(error);
+  }
+}
+
+export interface EventLoopOptions {
+  readonly signal: AbortSignal;
+  readonly handleEvent: (event: unknown) => Promise<void> | void;
+  readonly log?: (error: unknown) => void;
+}
+
+/**
+ * Consume `subscribe({ signal })` until the stream ends or aborts. Each
+ * dispatch is individually caught (a throw on event N never stops N+1) and
+ * the loop itself is caught, so the returned promise never rejects
+ * unhandled. Abortion surfaces as the iterator ending/throwing, which is
+ * logged and swallowed.
+ */
+export async function startEventLoop(
+  subscribe: (options: {
+    readonly signal: AbortSignal;
+  }) => AsyncIterable<unknown>,
+  options: EventLoopOptions,
+): Promise<void> {
+  const log = options.log ?? (() => undefined);
+  const report = (error: unknown): void => {
+    try {
+      log(error);
+    } catch {
+      // Logging must never break unload.
+    }
+  };
+  try {
+    for await (const event of subscribe({ signal: options.signal })) {
+      try {
+        await options.handleEvent(event);
+      } catch (error) {
+        report(error);
+      }
+    }
+  } catch (error) {
+    report(error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* snapshotIfDue — context-hook throttle gate (spec §§5.2, 5.9 D-A)   */
 /* ------------------------------------------------------------------ */
 
 export interface SnapshotIfDueOptions {
   readonly now?: number;
   readonly throttleMinutes?: number;
+  readonly vcs?: VcsPort;
+  readonly memoryRoot?: string;
+  readonly fileLines?: number;
+  readonly log?: (error: unknown) => void;
 }
 
 /**
- * Context-hook snapshot throttle gate (interim stub; T8 implements the
- * `snapshotHandoffIfChanged` write behind it).
+ * Context-hook fallback snapshot writer (spec §5.9 D-A): throttle-gate
+ * (`<projectID>/snapshotThrottle/<sessionID>`) around
+ * `snapshotHandoffIfChanged` — at most once per `snapshotThrottleMinutes`
+ * per session AND only when the content hash changed.
  *
- * Resolves `false` without writing a handoff. When the per-session
- * throttle window has elapsed it records the throttle slot
- * (`<projectID>/snapshotThrottle/<sessionID>`) so concurrent continuations
- * share one slot; calls inside the window are no-ops. Never throws.
+ * The throttle slot is claimed atomically under the write mutex, so
+ * concurrent `context` invocations (tool-driven continuations) share one
+ * slot and never interleave `handoffs/` writes. Claiming the slot first
+ * also makes this location-less synthesis a known session, so the
+ * unknown-session drop never fires for it. Without a `vcs` the slot is
+ * still recorded (stub-compatible) but nothing is written. Never throws.
  */
 export async function snapshotIfDue(
   storage: LedgerStorage,
@@ -681,16 +1427,40 @@ export async function snapshotIfDue(
   options?: SnapshotIfDueOptions,
 ): Promise<boolean> {
   try {
+    if (typeof sessionID !== "string" || sessionID.length === 0) return false;
     const now = options?.now ?? Date.now();
     const minutes =
       options?.throttleMinutes ??
       DEFAULT_MEMORY_OPTIONS.snapshotThrottleMinutes;
     const windowMs =
       Number.isInteger(minutes) && minutes > 0 ? minutes * 60_000 : 0;
-    const last = await getThrottle(storage, projectID, sessionID);
-    if (last !== undefined && now - last < windowMs) return false;
-    await setThrottle(storage, projectID, sessionID, now);
-    return false;
+    const proceed = await withWriteLock(async () => {
+      const last = await storage.get(throttleKey(projectID, sessionID));
+      if (
+        typeof last === "number" &&
+        Number.isFinite(last) &&
+        now - last < windowMs
+      ) {
+        return false;
+      }
+      await storage.set(throttleKey(projectID, sessionID), now);
+      return true;
+    });
+    if (!proceed) return false;
+    if (options?.vcs === undefined) return false;
+    const outcome = await snapshotHandoffIfChanged(
+      { type: "session.idle", data: { sessionID } },
+      {
+        vcs: options.vcs,
+        storage,
+        projectID,
+        memoryRoot: options.memoryRoot,
+        fileLines: options.fileLines,
+        now,
+        log: options.log,
+      },
+    );
+    return outcome.reason === "written";
   } catch {
     return false;
   }

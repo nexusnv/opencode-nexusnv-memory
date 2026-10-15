@@ -2,8 +2,11 @@ import { Plugin } from "@opencode/plugin";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  dispatchEvent,
   snapshotIfDue,
+  startEventLoop,
   type LedgerStorage,
+  type VcsPort,
 } from "./capture.js";
 import {
   indexWithinCap,
@@ -213,6 +216,9 @@ export default Plugin.define({
           // Throttled handoff writer: fire-and-forget, never awaited.
           void snapshotIfDue(ledger, projectID, event.sessionID, {
             throttleMinutes: options.snapshotThrottleMinutes,
+            vcs: ctx.vcs as unknown as VcsPort,
+            memoryRoot,
+            fileLines: options.fileLines,
           }).catch(logDiagnostic);
         } catch (error) {
           logDiagnostic(error);
@@ -246,6 +252,40 @@ export default Plugin.define({
     // /memory-review command: read+propose phase only — writes nothing,
     // never resets counters (only memory_apply resets, incl. []).
     registrations.push(await registerMemoryReview(ctx));
+
+    // Event subscriber: idle/compaction capture + sampled diagnostics
+    // (spec §§5.7, 5.9). Fire-and-forget on the ONE setup controller: the
+    // loop never rejects (outer catch) and each dispatch carries its own
+    // catch, so a throw on event N never stops event N+1. Location
+    // isolation drops foreign events before any write.
+    try {
+      const ledger = asLedger(ctx.storage);
+      const projectID = projectIDOf(ctx);
+      const projectDir = projectRootOf(ctx);
+      const memoryRoot = join(projectDir, MEMORY_DIR);
+      const subscribe = ctx.event?.subscribe;
+      if (typeof subscribe === "function") {
+        void startEventLoop(
+          (opts) => subscribe.call(ctx.event, opts) as AsyncIterable<unknown>,
+          {
+            signal: controller.signal,
+            handleEvent: (event) =>
+              dispatchEvent(event, {
+                vcs: ctx.vcs as unknown as VcsPort,
+                storage: ledger,
+                projectID,
+                directory: projectDir,
+                memoryRoot,
+                fileLines: options.fileLines,
+                log: logDiagnostic,
+              }),
+            log: logDiagnostic,
+          },
+        );
+      }
+    } catch (error) {
+      logDiagnostic(error);
+    }
 
     const projectRoot = projectRootOf(ctx);
     const firstRun = await scaffoldMemoryDir(projectRoot);
