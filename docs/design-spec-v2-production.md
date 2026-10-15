@@ -51,7 +51,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | Compaction hook | runs **before** the summary model call; `event.system` and `event.messages` present; **setting `event.result` skips the model call** | priors only |
 | Permissions | `ctx.permission.assert({sessionID, agent?, action, resources, save?, metadata?, source?})` (resolves on allow, rejects with `Tool.Error` on deny/reject); `ctx.permission.hook("evaluate")`; `list/get/reply` | `memory_apply` per-line approval |
 | Storage | `ctx.storage.get/set/remove/scan({prefix,after?,limit?})` — durable JSON scoped to the plugin. **`scan` exists** (`{entries:[{key,value}],next?}`). | ledger |
-| VCS | `ctx.vcs.get()/status()/branch.list()/diff({mode,base?,context?})` → envelopes `{location,data}` (unwrap `.data`: `Vcs.Info{branch:{current?,default?}}`, `FileStatus[]`, `string[]`, `FileDiff[]`); `transform/reload`. No `branches()` method; no `maxOutputBytes` on diff input. | snapshots |
+| VCS | `ctx.vcs.get()/status()/branch.list()/diff({mode,base?,context?})` → envelopes `{location,data}` (unwrap `.data`: `Vcs.Info{branch:{current?,default?}}`, `FileStatus[]`, `string[]`, `FileDiff[]`); `transform/reload`. No `branches()` method; no `maxOutputBytes` on diff input. Note: live docs prose shows flat `branches()` but OpenAPI (`/api/vcs/branch`) + 2.0.29 client types expose `branch.list()` — types win; startup asserts `typeof ctx.vcs.branch?.list === "function"`. | snapshots |
 | Events | `ctx.event.subscribe({signal})` → async iterable of typed events; abort on cleanup. OpenAPI carries `V2EventEncoded` as an opaque string, but `@opencode/schema` enumerates the catalogue: `session.idle` (ephemeral, `data:{sessionID}`, optional `location`), `session.compaction.started/delta/ended/failed` (`ended.data:{reason,model?,providerState?,providerContext?,text,recent,cost?,tokens?,sessionID}`) | idle/compaction capture, diagnostics |
 | Config keys | `plugins` (plural), `agents`, `permissions`, `default_agent`, `references`, `instructions`, `compaction` | install |
 | Discovery | `.opencode/plugins/` loads direct `.ts`/`.js` files and immediate package directories; arrays merge global → project → `.opencode` | install |
@@ -260,7 +260,7 @@ Ship this user-pasted rule so `memory_apply` prompts instead of failing open (ba
 }
 ```
 
-The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. Never set `compaction` thresholds or `auto`. V2 does
+The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. On setup the plugin reads the acting agent's effective rules via `ctx.agent.get` and emits a loud warning (log + `[memory]` status flag) when no `memory_write → ask` rule is present. Never set `compaction` thresholds or `auto`. V2 does
 resolve the `instructions` array, but this design deliberately does not use it: memory rides
 `AGENTS.md` + the `prompt` hook so injection has one owner and needs no client config edit.
 
@@ -315,7 +315,7 @@ hook can disturb tool-result delivery.
 ### 5.1 Prompt hook — sole INDEX injector (US-10, AS-01, HS-02, ADR-0002)
 
 ```ts
-await registrations.push(await ctx.session.hook("prompt", async (event) => {
+registrations.push(await ctx.session.hook("prompt", async (event) => {
   try {
     event.prompt.files ??= [];
     const root = (ctx.location.project?.canonical ?? ctx.location.directory).replace(/\/+$/, "");
@@ -345,7 +345,7 @@ await registrations.push(await ctx.session.hook("prompt", async (event) => {
 ### 5.2 Context hook — brief + status + tell-tale (US-10/12/25, AS-02/03, HS-02)
 
 ```ts
-await registrations.push(await ctx.session.hook("context", async (event) => {
+registrations.push(await ctx.session.hook("context", async (event) => {
   try {
     const brief = loadBrief(event);          // activeContext slice + newest handoff pointer, ≤ 48 lines
     if (brief) event.system.push({ type: "text", text: brief });
@@ -397,7 +397,7 @@ await registrations.push(await ctx.session.hook("context", async (event) => {
 ### 5.3 Tool hook — failure-only capture (US-07/08, HS-03)
 
 ```ts
-await registrations.push(await ctx.tool.hook("execute.after", async (event) => {
+registrations.push(await ctx.tool.hook("execute.after", async (event) => {
   if (event.status !== "error") return;   // failures only; successes ignored
   await captureFailure(event, ledger);    // summary from event.error.message (G4); redact; ledger check
 }));
@@ -439,7 +439,7 @@ await registrations.push(await ctx.tool.hook("execute.after", async (event) => {
 ### 5.4 `memory_recall` tool (US-11, AS-02/03, HS-04)
 
 ```ts
-await registrations.push(await ctx.tool.transform((editor) => {
+registrations.push(await ctx.tool.transform((editor) => {
   editor.add({
     name: "memory_recall",
     description: "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone.",
@@ -472,7 +472,7 @@ await registrations.push(await ctx.tool.transform((editor) => {
 ### 5.5 `/memory-review` command (US-13/14, AS-05, HS-04)
 
 ```ts
-await registrations.push(await ctx.command.transform((editor) => {
+registrations.push(await ctx.command.transform((editor) => {
   editor.add({
     name: "memory-review",
     description: "Promote scratchpad notes into durable memory (human-approved)",
@@ -535,7 +535,7 @@ await registrations.push(await ctx.command.transform((editor) => {
 ### 5.6 Compaction hook — priors only (US-16, HS-02/09, ADR-0003)
 
 ```ts
-await registrations.push(await ctx.session.hook("compaction", async (event) => {
+registrations.push(await ctx.session.hook("compaction", async (event) => {
   event.system.push({ type: "text", text: loadPriors() }); // capped + redacted
   // Never set event.result: the hook runs before the summary model call, so setting it
   // skips the native summary entirely (ADR-0003).
@@ -555,6 +555,7 @@ await registrations.push(await ctx.session.hook("compaction", async (event) => {
 
 ### 5.7 Loaders, redactor, ledger, status (HS-05, US-15/25, `c4-06`)
 
+- IO channel: `node:fs/promises` server-side only (no `ctx.filesystem` domain exists for plugins). All file IO is async; the prompt-hook cap check is an async read + line count (never sync-block the event loop).
 - `readCapped(file)` / `writeCapped(file, text)`: allowlisted paths only; `readCapped` returns text
   with a truncation notice; `writeCapped` enforces `indexLines`/`fileLines` on every **plugin** write
   (throws on violation for a capped rule file — never silently truncates); both
@@ -674,8 +675,9 @@ void (async () => {
   try {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
       if (!isThisLocation(event)) continue;  // server-wide stream (§1.1): compare event.location?.directory + data.sessionID/projectID, drop foreign
-      if (event.type === "session.idle") await snapshotHandoffIfChanged(event, ledger);      // G1 proven
-      else if (event.type === "session.compaction.ended") await captureCompactionOutcome(event); // data.text + data.recent
+      // Per-dispatch catch: a throwing handler must not kill the loop (M1). Both handlers are never-throw by contract.
+      if (event.type === "session.idle") await snapshotHandoffIfChanged(event, ledger).catch(logDiagnostic);
+      else if (event.type === "session.compaction.ended") await captureCompactionOutcome(event).catch(logDiagnostic); // data.text + data.recent
       else if (event.type.startsWith("session.compaction.")) logDiagnostic(event); // started/delta/failed: diagnostics only
       else logDiagnostic(event);                                                              // no-op by default
     }
@@ -688,7 +690,7 @@ void (async () => {
   not the location of every session it can access or event it receives"). `isThisLocation(event)`
   compares `event.location?.directory` (and `data.projectID`/`sessionID` where present) against the
   plugin's project and drops foreign events before writing; the memory root is resolved per
-  invocation from the event's session location (`event.location?.directory`, fallback `ctx.location`), never captured once at load. Location-less events (e.g. `session.idle` without `location`) are treated as own and absorbed by the content-hash guard (spurious no-op wakeups only).
+  invocation from the event's session location (`event.location?.directory`, fallback `ctx.location`), never captured once at load. Location-less `session.idle` is snapshotted only when the session is already known (existing `<projectID>/snapshot/<sessionID>` or `<projectID>/snapshotThrottle/<sessionID>` from the context-hook writer); otherwise it is dropped + debug-logged. This keeps the "drop foreign before any write" rule sound — otherwise a foreign location-less `idle` would mint a spurious handoff under a foreign session key.
 - **Idle snapshots (D-A).** `session.idle` (ephemeral, `data:{sessionID}`) and the
   `session.compaction.*` family are enumerated in `@opencode/schema` (G1 proven). Primary = handle
   `session.idle` when delivered, content-hash-guarded (`<projectID>/snapshot/<sessionID>`), newest-wins.
@@ -698,9 +700,7 @@ void (async () => {
   changed. It must tolerate concurrent `context` invocations (tool-driven continuations) without
   interleaving `handoffs/` writes.
 - **Compaction capture (D-B).** `session.compaction.ended.data` carries the produced summary as `text`
-  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer), guarded by ledger check-before-write on `<projectID>/seen/<event.id>` since `ended` is durable and `subscribe` replays redeliver it (same guard as snapshots via `<projectID>/snapshot/<sessionID>`, plus deterministic filename). When the event
-  is missing, write a pointer-only handoff (timestamp + branch +
-  "compaction occurred") — the durable pre-compaction state is already on disk.
+  (+ kept tail `recent`); persist `text` as a `handoffs/` file (with `recent` pointer), guarded by ledger check-before-write on `<projectID>/seen/<event.id>` since `ended` is durable and `subscribe` replays redeliver it (same guard as snapshots via `<projectID>/snapshot/<sessionID>`, plus deterministic filename). When the event is missing, no idle path invents one: the pointer-only handoff (timestamp + branch + "compaction occurred") is written on demand via `/memory-review` only — the durable pre-compaction state is already on disk.
 - Failure capture is **not** here; it is the tool hook (§5.3).
 - The stream is abortable and aborted on unload.
 
@@ -797,7 +797,7 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `architecture.md` | contracts, siblings, style-lock pointer (review-gated rewrite; rule text in `style.md`) | 60 lines |
 | `style.md` | independently quotable rules (review-gated rewrite; sole owner of rule text) | 60 lines |
 | `issues.md` | one line each: todo/doing/done + issue ref | 60 lines |
-| `handoffs/YYYY-MM-DD-HHmm.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
+| `handoffs/YYYY-MM-DD-HHmmss-<session6>ss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
 | Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); pruned via `scan({prefix:"<projectID>/seen/"})` to ≤500; 30s retry window | bounded |
 
@@ -907,7 +907,7 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
     `toolResult` (default `{ content }`; G2), asserted by a contract test against the installed package;
   - `memory_apply` approves **one candidate line per `ctx.permission.assert` call** with `action:"memory_write"`, `resources:[file]`, tool-context `sessionID/agent/source`, `save:[]` (untrusted lines
     cannot be bulk-approved), writes via `writeCapped` sequentially and propagates the first deny (no summary on deny), and resets via `candidates:[]`; the shipped `memory_write → ask` rule is installed so `assert` actually prompts instead of auto-allowing;
-  - `handoffs/` root vs `archive/` routing covered; `compaction.ended` replay guarded via ledger;
+  - `handoffs/` root vs `archive/` routing covered (collision-free `HHmmss-<session6>` names); `compaction.ended` replay guarded via ledger; a handler throwing on event N never stops event N+1 (per-dispatch catch, fault-injection test); location-less unknown-session `idle` dropped; VCS startup shape asserted; missing-`ask`-rule warning emitted;
   - `vcs`/`storage` adapters unwrap envelopes (`.data`), use `branch.list()` (never `branches()`), `diff({mode,base?,context?})` (no `maxOutputBytes`), and normalize the status/diff fallback before hashing; `scan` paginates via `after`/`next`;
   - `memory-manager` has **no `edit`, no `shell`, no `webfetch`, no `websearch`, no `skill`** (permission
     test) (P17); the `subagent` allow for `memory-manager` is present when the optional delegation path
