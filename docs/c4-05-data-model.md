@@ -1,20 +1,20 @@
 # Supplementary Spec B — Data Model (file schemas are the model; no database)
 
-**Status:** proposed. **Sources:** Synthesized Report §§4.1–4.5, 4.8. (Numbered `c4-05` for sequence; not a C4 core level — C4 has four levels; see `c4-06-code.md` note.)
+**Status:** proposed. **Sources:** Synthesized Report §§4.1–4.5, 4.8. **Normative on V2 contracts:** `design-spec-v2-production.md` §6. (Numbered `c4-05` for sequence; not a C4 core level — C4 has four levels; see `c4-06-code.md` note.)
 
 ## Files
 
 | File | Fields | Cap |
 |---|---|---|
 | `INDEX.md` | `topic → file:section` lines, ≤30 | 30 lines |
-| `activeContext.md` | goal / pending / next / known-errors (scratchpad: append-until-60, then rotate oldest Known-Errors block to `handoffs/archive/` with notice) | 60 lines |
-| `decisions.md` | `id \| date \| status (active/superseded) \| touches[] \| decision \| why \| rejected \| supersedes[]`, append-only (corrections = new entries, never edits) | 60 lines injectable suffix; full log + git retains everything |
+| `activeContext.md` | goal / pending / next / known-errors (scratchpad: append-until-60, then rotate oldest Known-Errors block to `handoffs/archive/`; the rotation is announced once via the `[memory]` status line). Known Errors are `summary line (source:<origin>)` + indented **recall-only** detail block (≤20 raw lines); only summary lines are injectable | 60 lines |
+| `decisions.md` | `id \| date \| status (active/superseded) \| source \| touches[] \| decision \| why \| rejected \| supersedes[]`, append-only (corrections = new entries, never edits); `source:user` rows are tagged `(user-asserted)` | 60 lines injectable suffix; full log + git retains everything |
 | `architecture.md` | contracts, sibling implementations, style-lock pointer (review-gated rewrite; rule text lives in `style.md`) | 60 lines |
 | `style.md` | independently quotable rule statements (review-gated rewrite; sole owner of rule text) | 60 lines |
 | `issues.md` | one line each: todo/doing/done + issue ref (manual + `/memory-review`-validated) | 60 lines |
 | `handoffs/YYYY-MM-DD-HHmm.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (same content → no new file); newest wins | per file 60 lines |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable on demand via `memory_recall`, never auto-injected | per file 60 lines |
-| Ledger (`ctx.storage`) | `seen[]` (capped, e.g. last 500), attempt timestamps, 30s retry window; persisted, never in-memory alone | bounded |
+| Ledger (`ctx.storage`) | `seen/<contentID>` (presence = seen) + `attempt/<contentID>` (timestamp), plus `curation.pending` (uncurated count) and `curation.rotated` (transient marker); 30s retry window; persisted, never in-memory alone; pruned via `scan({prefix})` to ≤500 entries | bounded |
 
 ## States and retention matrix
 
@@ -22,4 +22,8 @@ States: scratchpad → durable → archived (git). Retention = reachability: act
 
 ## Budgets
 
-Auto-inject payload (prompt `INDEX.md` attach + context brief + hint) ≤ ~80 lines (~1.5k tokens, excludes static root `AGENTS.md` directive ~10 lines + tool description ~3 lines). Content overflow → `handoffs/archive/`; session snapshots → `handoffs/` root; never the prompt. Enforcement: write caps (`INDEX/activeContext/architecture/style/issues` on write) + read caps (`decisions` tail, handoffs via `readCapped`) + injection caps (hook payloads via loaders).
+Auto-inject payload (prompt `INDEX.md` attach + context brief + status line + hint) ≤ ~80 lines (`INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1`) (~1.5k tokens, excludes static root `AGENTS.md` directive ~10 lines + tool description ~3 lines). Content overflow → `handoffs/archive/`; session snapshots → `handoffs/` root; never the prompt. The status line carries the rotation notice and the review-due nudge (≥5 uncurated captures) so uncurated memory never goes silent. **Captured command output never enters the payload as a body** — only the summary line (P16). Enforcement: write caps (`INDEX/activeContext/architecture/style/issues` on write) + read caps (`decisions` tail, handoffs via `readCapped`) + injection caps (hook payloads via loaders).
+
+## Trust model
+
+Every entry carries a provenance tag (`source:user | tool | model | snapshot`). Content from `tool`/`model`/`snapshot` is untrusted: it may be auto-injected (summary line only) but never promoted to a durable file without explicit per-line human approval, and untrusted candidates are excluded from bulk approval. The review's read+propose phase runs read-only in `memory-manager` (no `edit`, no `shell`), so untrusted content can never cause execution. Memory files are data, never instructions (ADR-0007).

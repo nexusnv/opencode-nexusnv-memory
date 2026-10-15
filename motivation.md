@@ -2,6 +2,8 @@
 
 **Status:** validated against the live OpenCode V2 docs on 2026-10-15 (plugins, build/plugins, instructions, config). Research claims below are self-contained (prior source papers since removed; their content is folded into this report). V1 plugin claims cite repo READMEs and issue numbers fetched same day.
 
+**Precedence:** ADRs are normative on decision intent. `docs/design-spec-v2-production.md` is normative on V2 contracts and implementation and supersedes this report on any V2-contract conflict. The background synthesis here is evidence, not API truth. **§4.6 is a superseded, non-normative sketch** kept only for the record; the authoritative implementation skeleton is `design-spec-v2-production.md` §§2–5.
+
 **Goal:** a memory plugin for *all* developers that is local-first, zero-subscription, zero-daemon, zero-embeddings by default — and remembers exactly the basics: project background, agent context, architectural decisions, last refactors, planned GitHub issues, and personal style (no tech-debt compounding, architecture-style lock across model swaps, contract-first implementation).
 
 **Non-goals:** remember-everything transcript capture, vector/semantic search, cloud sync/team server, knowledge graphs, background LLM dreaming. All deferred or rejected with reasons.
@@ -16,35 +18,35 @@
 
 | # | Claim | Verdict | V2-correct form |
 |---|-------|---------|-----------------|
-| 1 | Proposed hooks (`onSessionStart`, `onToolPostExecute`, `onSessionEnd`) | **Wrong names.** No such exports exist. | V2 uses `Plugin.define({ id, setup(ctx) })` with `ctx.session.hook("prompt" \| "context" \| "compaction" \| "generate" \| "title")`, `ctx.event.subscribe()` for the public event stream, `ctx.tool.transform`, `ctx.command.transform`. Passive capture = event stream + `prompt` hook; injection = `context` hook (`event.system.push`); compaction survival = `compaction` hook (can set `event.result` to record the summary yourself). |
+| 1 | Proposed hooks (`onSessionStart`, `onToolPostExecute`, `onSessionEnd`) | **Wrong names.** No such exports exist. | V2 uses `Plugin.define({ id, setup(ctx) })` with `ctx.session.hook("prompt" \| "context" \| "compaction" \| "generate" \| "title")`, `ctx.event.subscribe()` for the public event stream, `ctx.tool.transform`, `ctx.tool.hook`, `ctx.command.transform`. Passive capture = `ctx.tool.hook("execute.after")` for failures + the event stream; injection = `context` hook (`event.system.push`); compaction survival = `compaction` hook pushing priors only (**never set `event.result`** — the hook runs before the summary model call, so setting it skips the native summary). |
 | 2 | Early blueprint injects memory via `"instructions": ["…/INDEX.md", "…/activeContext.md"]` | **Silently does nothing on V2.** | V2 instructions doc: "The V2 config schema accepts an `instructions` array, but V2 does not currently resolve its files… This configuration does not add instructions to the model yet. Use `AGENTS.md` for active V2 instructions." Memory must ride `AGENTS.md`, not `instructions`. |
 | 3 | Claim: AGENTS.md edits live-reload into the active prompt | **Half-true.** | True for global/upward files: V2 detects the change and adds an instruction update before the next model request. False for already-loaded *nested* (below-workspace, lazily discovered) files: "Edits to a nested file are not detected automatically after it loads. Start a new session." Design must keep auto-written memory out of nested files the session already loaded, or accept new-session pickup. |
-| 4 | Blueprint config (`agents` plural, `system`, `permissions: [{action, resource, effect}]`, `default_agent`, `references`) | **Correct on V2** (an earlier v1-based objection was wrong). | V2 config docs confirm `agents`, `system`, ordered `permissions` array, `default_agent`, `references` with `path`/`repository`/`description`. Keep this shape; fix only the `instructions` entry (drop it) and add `plugins` registration. |
+| 4 | Blueprint config (`agents` plural, `system`, `permissions: [{action, resource, effect}]`, `default_agent`, `references`) | **Correct on V2** (an earlier v1-based objection was wrong). | V2 config docs confirm `agents`, `system`, ordered `permissions` array, `default_agent`, `references` with `path`/`repository`/`description`/`hidden`. Keep this shape; fix only the `instructions` entry (drop it) and add `plugins` registration. The plugin registers **no** `references` entry: references attach *directories* and are client-initiated, and `.opencode/memory` is in-project (ADR-0006). |
 | 5 | Proposed plugin key `plugin: [...]` / package declarations | **V1 spelling.** | V2 key is **`plugins`** (plural). Supports packages with versions/tags/ranges, Git specs, local dirs/files, and `{package, options}` objects. `.opencode/plugins/` auto-discovers direct `.ts`/`.js` files and immediate package dirs. Arrays merge across global → project → `.opencode` configs instead of replacing. |
 | 6 | Surveyed example plugin (`session.created`, `session.idle`, `tool:` key) | **V1 API; needs migration.** | Rewrite as `Plugin.define` + `ctx.event.subscribe` (capture) + `ctx.tool.transform(editor.add(…))` (tools) + `ctx.session.hook("compaction")`. Do not copy the snippet as-is. |
 | 7 | Surveyed default: SQLite + FTS + embeddings, RAG top-k + RRF, LLM ADD/UPDATE/DELETE/NOOP | **Valid engineering, rejected for MVP.** | V1 evidence (below) shows embeddings bring model downloads (100MB–2GB), RAM, re-embed migrations, lock files, single-session-on-Windows, no-Intel-Mac, plus per-token API cost. The adopted vector-failure analysis (exact binding vs. semantic closeness, chunking breaks scope, index drift; see §4.8) agrees. No-fuss default = markdown only, INDEX-first lazy read, no embeddings. |
 | 8 | TTL 30d + budgets vs. access-weighted decay $W_m(t) = W_0 e^{-\lambda(t-t_{\text{last}})}(1+\alpha C_{\text{access}})$, threshold $W_{\min}$ | **Both recorded; budgets win for MVP.** | Deterministic line/token caps + explicit `/memory-review` promotion beat time-decay for inspectability. The decay formula is preserved above as the phase-2 option, not the default. |
-| 9 | OpenCode has no native cross-session LTM; SQLite is session-scoped | **Confirmed.** | This is the gap the plugin fills. `ctx.storage` (durable JSON scoped to the plugin) exists, but memory itself stays in git-backed markdown so humans can read, edit, and revert it. |
+| 9 | OpenCode has no native cross-session LTM; SQLite is session-scoped | **Confirmed.** | This is the gap the plugin fills. `ctx.storage` (durable JSON scoped to the plugin; `get`/`set`/`remove`/**`scan`**) exists, but memory itself stays in git-backed markdown so humans can read, edit, and revert it. |
 
 ## 3. V1 lessons that shape this design
 
 - **Cloud fatigue is real.** Supermemory/Mem0/Hindsight all need API keys, servers, containers, SDK versions. Your stance (simple > robust-with-subscription) is the design constraint: no accounts, no keys, no daemon, no server in the default path.
 - **Vectors create support load.** `opencode-mem` documents embedding-model choice, dimension/pooling/prefix alignment, re-embed swaps with `.bak` files and locks, `multiprocess_wal` limits, platform exclusions. Users counter-propose exactly your ask: Obsidian/markdown-vault backend with the vault as source of truth (`tickernelz/opencode-mem#330`).
 - **Auto-capture must be idempotent.** `supermemoryai/opencode-supermemory#106` (same `customId` re-POSTed after a timeout → one fact stored 55×) mandates a capture ledger + check-before-write + short retry window. This report adopts all three.
-- **Never reimplement compaction.** `#69` (custom trigger overflows the smaller compaction model, session stuck on compaction model, `threshold: 0` can't disable, races native `compaction.auto`) plus `#85`/`#88` (premature compaction from model-limit fallback) → use V2's `compaction` hook only to inject priors and save the summary. No custom trigger, no synthetic Continue.
-- **Config sprawl kills adoption.** `#91`/`#97`/`#104` (ignored config file, stale README, per-location tool conflicts) → this plugin has ≤5 options, one config file, commented template generated on first run.
+- **Never reimplement compaction.** `#69` (custom trigger overflows the smaller compaction model, session stuck on compaction model, `threshold: 0` can't disable, races native `compaction.auto`) plus `#85`/`#88` (premature compaction from model-limit fallback) → use V2's `compaction` hook only to inject priors (`event.system.push`), and **never set `event.result`** (that skips the native summary). The produced summary is captured post-compaction from the public `session.compaction.*` events when available. No custom trigger, no synthetic Continue, no model override.
+- **Config sprawl kills adoption.** `#91`/`#97`/`#104` (ignored config file, stale README, per-location tool conflicts) → this plugin has ≤5 options, one config file, and emits a commented options snippet on first run (it never edits `opencode.jsonc`).
 - **Opaque stores get abandoned.** Hash-keyed shards/containers orphan on repo moves (`migrate`/`list-shards`/`export`/`import` ceremony) → markdown files at stable paths, directory-driven identity, no hashes.
 
 ## 4. Synthesis: the no-fuss architecture
 
-**One sentence:** git-backed markdown as the source of truth, passive zero-LLM hooks with hard budgets, injection via `prompt` hook (`INDEX.md` content) + `context` hook (brief + hint) with protocol + links in root `AGENTS.md`, survival through the `compaction` hook, curation by an explicit command — no embeddings, no server, no keys.
+**One sentence:** git-backed markdown as the source of truth, passive zero-LLM hooks with hard budgets, injection via `prompt` hook (`INDEX.md` content) + `context` hook (brief + one status line + hint) with protocol + links in root `AGENTS.md`, survival through the `compaction` hook, curation by an explicit command — no embeddings, no server, no keys.
 
 ```
 AGENTS.md (repo root)         # hand-owned, tiny, durable (protocol + links; never auto-written, never content)
 .opencode/
-├── opencode.jsonc             # location: .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; if repo-root opencode.jsonc → ["./.opencode/plugins/memory"]; plus agents: { memory-manager }, references: { memory } (shape per c4-04)
+├── opencode.jsonc             # location: .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; if repo-root opencode.jsonc → ["./.opencode/plugins/memory"]; plus agents: { memory-manager }; ≤5 plugin options; no references entry (ADR-0006)
 ├── agents/
-│   └── memory-manager.md      # background subagent (on-demand only)
+│   └── memory-manager.md      # read-only subagent (on-demand only; no edit, no shell — proposes, never writes)
 ├── plugins/
 │   └── memory/
 │       └── index.ts           # Plugin.define: prompt/context/compaction hooks, tools, commands
@@ -57,6 +59,8 @@ AGENTS.md (repo root)         # hand-owned, tiny, durable (protocol + links; nev
     ├── issues.md              # one line each: todo/doing/done + issue ref (manual + /memory-review-validated; see c4-04)
     └── handoffs/              # session snapshots: handoffs/YYYY-MM-DD-HHmm.md (immutable, newest wins); handoffs/archive/ for retired durable lines (see §4.3-7, §4.4)
 ```
+
+The memory directory is fixed at `.opencode/memory` (ADR-0006): the `readCapped`/`writeCapped` choke point and the recall allowlist depend on a stable root, and a static agent-permission glob cannot track a configurable path, so it is intentionally not configurable. Since ADR-0007 the `memory-manager` is read-only (no `edit`, no `shell`), so the fixed root is no longer an `edit`-scoping argument — it is a read-path and allowlist guarantee.
 
 ### 4.1 What is remembered (and what is not)
 
@@ -71,23 +75,24 @@ AGENTS.md (repo root)         # hand-owned, tiny, durable (protocol + links; nev
 
 ### 4.2 Budgets (anti-bloat, anti-context-rot)
 
-- `INDEX.md` ≤ 30 lines on disk; `activeContext/architecture/style/issues` ≤ 60 lines on disk; `decisions.md` unbounded on disk with ≤60-line injectable tail (full log + git retains everything); handoffs per-file ≤60 lines; auto-inject payload (prompt `INDEX.md` attach + context brief + hint) ≤ ~80 lines (~1.5k tokens, excludes static `AGENTS.md` directive ~10 lines + tool description ~3 lines).
+- `INDEX.md` ≤ 30 lines on disk; `activeContext/architecture/style/issues` ≤ 60 lines on disk; `decisions.md` unbounded on disk with ≤60-line injectable tail (full log + git retains everything); handoffs per-file ≤60 lines; auto-inject payload (prompt `INDEX.md` attach + context brief + status line + hint) ≤ ~80 lines (`INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1`) (~1.5k tokens, excludes static `AGENTS.md` directive ~10 lines + tool description ~3 lines).
 - Capture: failures only (truncated to 20 lines), session boundaries, explicit `remember` keyword. No per-turn LLM extraction.
-- Scratchpad (`activeContext.md`) is append-until-60 during work, then rotates: oldest Known-Errors block moves to `handoffs/archive/` with a notice, never into the prompt. Promotion to durable files happens only via `/memory-review` (human-approved) or the `memory-manager` subagent on demand.
+- Scratchpad (`activeContext.md`) is append-until-60 during work, then rotates: oldest Known-Errors block moves to `handoffs/archive/` and the rotation is announced once on a real channel — the `context` hook emits one `[memory] rotated <n> block(s) to handoffs/archive/` status line (never into the prompt). Promotion into the capped rule files (`architecture.md`/`style.md`/`issues.md`) happens only via `/memory-review`, human-approved; the `memory-manager` subagent only *proposes* (it is read-only). The one exception is a `source:user` directive, which appends straight to the append-only `decisions.md` (§4.3-1, ADR-0004). A second status line nudges review when uncurated captures reach ≥5, so forgetting to curate never degrades memory silently.
 - Root `AGENTS.md` stays tiny: it states the protocol and *links* memory; it never contains memory content itself. The `prompt` hook is the sole injector of `INDEX.md` content (deduped — skip if already attached; see §4.3-1/4). This directly answers the bloat fear: injection surface is bounded even as history grows.
+- The write caps are enforced on write (`writeCapped`). A file attachment cannot be truncated, so an over-cap `INDEX.md` (e.g. hand-edited) is simply **not attached**; `/memory-review` reports the violation instead.
 
 ### 4.3 File lifecycle: scratchpad → durable → archived
 
-Three states. Only scratchpad is written automatically; durable requires human approval; archived is git history, never deleted.
+Three states. Scratchpad is written automatically; `source:user` directives write `decisions.md` directly; all other durable writes require human approval; archived is git history, never deleted.
 
-- **0. Init (once).** Plugin creates the directory + templates + commented config. Root `AGENTS.md` (hand-owned, never auto-written) carries protocol + links only, never file content. Nothing injects beyond `INDEX.md` until content exists.
-- **1. Capture (automatic, zero-LLM).** `prompt` hook is the sole injector of `INDEX.md` content: attach (capped) to the current prompt only, retry-safe per V2 contract, and skip if an `INDEX.md` attachment is already present (dedup guard — root `AGENTS.md` never carries content, so no double injection). Event stream (`ctx.event.subscribe`; verify exact catalog names at P1 — see `c4-03-components.md` event-note) appends *failed* shell/build/test output (truncated to 20 lines, redacted) to `activeContext.md` under Known Errors. Keyword ("remember X") and explicit `remember` calls take the same scratchpad path, flagged for review — never auto-promoted.
-- **2. Deduplication.** Every capture passes a persisted ledger (`ctx.storage` — never an in-memory `Set` alone): check-before-write on content ID, persist attempt state, retry only inside a ~30s window. Restarts and session-end replays are no-ops. Direct fix for supermemory #106 (same batch re-POSTed → one fact stored 55×).
-- **3. Idle snapshots vs session end.** `session.idle` may fire N times per session; it is not session end. Handler is content-hash-guarded: compute hash of (branch + `ctx.vcs.status()` + pending); if unchanged since this session's last snapshot (hash stored in ledger), no-op; else write immutable `handoffs/YYYY-MM-DD-HHmm.md`: branch (via `ctx.vcs.status()`), open changes, completed vs. pending, next steps. Newest timestamped snapshot is the single source for "where did we leave off". "Idempotent per session" means same content → no new file.
-- **4. Next session start.** `prompt` hook attaches `INDEX.md` (capped, deduped) at the top; `context` hook pushes the active brief at the bottom (`event.system.push`). Root `AGENTS.md` contributes only the standing directive + links, never content. Anything deeper is lazy via `memory_recall` (one capped file per question).
-- **5. Promotion (only path to durable).** `/memory-review` command or `memory-manager` subagent (edit scoped to `.opencode/memory/**`, shell denied) proposes scratchpad → `decisions.md` / `architecture.md` / `style.md` / `issues.md` (scope-limited). Human approves before write. `issues.md` also accepts direct manual edits (one line per issue) but `/memory-review` validates format/caps/redaction. No per-turn LLM extraction, no silent durable rewrites.
-- **6. Compaction survival.** `compaction` hook injects priors into the summary context and saves the produced summary as a handoff. Shape-guard: if `event.system` exists, `push` priors (capped); always handle `event.result` (set it to record the summary yourself when supported, else save the produced summary as a handoff file). No custom threshold, no synthetic Continue, no model override (the #69/#85/#88 failure set). Pre-compaction state is already on disk, so a bad summary loses nothing durable.
-- **7. Aging.** Budgets enforced per enforcement point (§4.2, `c4-05-data-model.md`): `INDEX.md` ≤30 lines on disk; `activeContext/architecture/style/issues` ≤60 lines on disk; `decisions.md` unbounded on disk with ≤60-line injectable tail; handoffs per-file ≤60 lines; auto-inject payload ≤~80 lines; content overflow (retired durable lines, rotated scratchpad blocks) goes to `handoffs/archive/`, never into the prompt. Session snapshots go to `handoffs/` root. Phase-2 only: 30d TTL sweep or the recorded access-weighted decay ($W_m(t)$, $W_{\min}$) as an explicit command — off by default; applies only to unreachable episodic notes, never to reachable decisions (ADR-0005). `forget`/purge removes from active files; git retains history (restore = checkout).
+- **0. Init (once).** Plugin creates the directory + templates and emits a commented options snippet. Root `AGENTS.md` (hand-owned, never auto-written) carries protocol + links only, never file content. Nothing injects beyond `INDEX.md` until content exists.
+- **1. Capture (automatic, zero-LLM, provenance-tagged).** `prompt` hook is the sole injector of `INDEX.md` content: attach (capped) to the current prompt only, retry-safe per V2 contract, and skip if an `INDEX.md` attachment is already present (dedup guard — root `AGENTS.md` never carries content, so no double injection). `ctx.tool.hook("execute.after")` (`event.status === "error"`) appends *failed* shell/build/test output (truncated to 20 lines, redacted) to `activeContext.md` under Known Errors as a `source:tool` **summary line + recall-only detail block**; successes are ignored, and only the summary line is ever injected. Each real write increments `curation.pending`, and a rotation sets the `curation.rotated` marker for the status line. An explicit `remember` in the user's own message (documented form, outside code fences/quotes/pasted blocks) is classified `source:user` and appended straight to `decisions.md`; anything ambiguous or of tool/model origin takes the scratchpad path, flagged for review.
+- **2. Deduplication.** Every capture passes a persisted ledger (`ctx.storage` — never an in-memory `Set` alone): check-before-write on content ID, persist attempt state, retry only inside a ~30s window. Restarts and session-end replays are no-ops. Direct fix for supermemory #106 (same batch re-POSTed → one fact stored 55×). A real write increments `curation.pending`; a rotation sets `curation.rotated`; `/memory-review` resets both.
+- **3. Idle snapshots vs session end.** `session.idle` may fire N times per session; it is not session end. Handler is content-hash-guarded: compute hash of (branch + `ctx.vcs.status()` + pending); if unchanged since this session's last snapshot (hash stored in ledger), no-op; else write immutable `handoffs/YYYY-MM-DD-HHmm.md`: branch (via `ctx.vcs.status()`), open changes, completed vs. pending, next steps. Newest timestamped snapshot is the single source for "where did we leave off". "Idempotent per session" means same content → no new file. **P1 gate:** the exact event name is not enumerable from the docs; confirm `session.idle` via a runtime `event.type` log. Fallback if absent: a throttled hash-guarded writer in the `context` hook (≤ once per `snapshotThrottleMinutes` per session).
+- **4. Next session start.** `prompt` hook attaches `INDEX.md` (capped, deduped) at the top; `context` hook pushes the active brief at the bottom (`event.system.push`), plus one `[memory]` status line (rotation notice / review-due nudge) and, on an exact INDEX match, the hint line. Root `AGENTS.md` contributes only the standing directive + links, never content. Anything deeper is lazy via `memory_recall` (one capped file per question). The brief does **not** repeat the INDEX map, and Known Errors appear as summary lines only.
+- **5. Promotion (only path to durable, provenance-gated).** `/memory-review` runs its read+propose phase **read-only inside the `memory-manager` sandbox** (`edit` and `shell` denied) and returns a proposal table — target file, exact candidate line, `source:`, advisory injection flags, cap/redaction checks. The human approves specific lines; candidates not tagged `source:user` cannot be bulk-approved; application is deterministic via `writeCapped`. On completion it resets `curation.pending` to 0 and clears the rotation marker, so the status line stops nudging. `issues.md` also accepts direct manual edits (one line per issue) but `/memory-review` validates format/caps/redaction. No per-turn LLM extraction, no silent durable rewrites.
+- **6. Compaction survival.** `compaction` hook injects capped + redacted priors via `event.system.push`. It **never sets `event.result`**: the hook runs *before* the summary model call, so setting `event.result` skips the native summary entirely. The produced summary is captured post-compaction from the public `session.compaction.*` event family when the payload carries it; otherwise a pointer-only handoff (timestamp + branch + "compaction occurred") is written, since the pre-compaction state is already on disk. No custom threshold, no synthetic Continue, no model override (the #69/#85/#88 failure set).
+- **7. Aging.** Budgets enforced per enforcement point (§4.2, `c4-05-data-model.md`): `INDEX.md` ≤30 lines on disk; `activeContext/architecture/style/issues` ≤60 lines on disk; `decisions.md` unbounded on disk with ≤60-line injectable tail; handoffs per-file ≤60 lines; auto-inject payload ≤~80 lines; content overflow (retired durable lines, rotated scratchpad blocks) goes to `handoffs/archive/`, never into the prompt, and the rotation is announced once via the `[memory]` status line. Session snapshots go to `handoffs/` root. Phase-2 only: 30d TTL sweep or the recorded access-weighted decay ($W_m(t)$, $W_{\min}$) as an explicit command — off by default; applies only to unreachable episodic notes, never to reachable decisions (ADR-0005). `forget`/purge removes from active files; git retains history (restore = checkout).
 - **8. Invalidation.** Edited global/upward `AGENTS.md` applies before the next model request (V2 guarantee). Edited *already-loaded nested* files do not — which is why auto-written memory lives in `.opencode/memory/`, never in nested `AGENTS.md` files.
 
 ### 4.4 Long-past memory: the causal chain (why `d`/`e`, not the old names)
@@ -118,114 +123,90 @@ Long-past content is never auto-injected. What is always injected is a pointer s
 |---|---|---|
 | Directive | ~10 lines | every session |
 | Tool description | ~3 lines | every turn (tool list) |
+| Status line | 1 line | only on rotation or review-due (≥5 uncurated) |
 | Hint line | 1 line | only on exact INDEX match |
 | Full decision text | capped file | only after the model peeks |
+| INDEX attach | ≤30 lines | once per prompt (deduped) |
+| Brief (`context` hook) | ≤48 lines | every session with content |
+| Captured failure bodies | 20 lines on disk | **never** auto-injected (recall-only) |
 
-### 4.6 Minimal V2 skeleton (conforms to build/plugins)
+**Nothing raw is auto-injected.** Captured command output is untrusted data: the brief carries a one-line summary per known error and the 20-line body is `memory_recall`-only. Memory content is treated as data, never instructions — no component executes, fetches, or obeys text read from memory, and the review pass that reads it runs read-only (ADR-0007).
+
+### 4.6 Minimal V2 skeleton (SUPERSEDED — non-normative)
+
+> **Do not copy this sketch.** It is retained only to show the shape the design started from. The
+> authoritative, V2-verified implementation is `design-spec-v2-production.md` §§2–5; the corrected
+> behaviour in this section's prose (§§4.2–4.3) supersedes the code below on any conflict. Notable
+> deltas from this sketch: location comes from `ctx.location` (not `ctx.project`), the ledger uses
+> `scan` and content-ID keys, failures are captured by the tool hook (not the event stream), the
+> `compaction` hook only pushes priors and never touches `event.result`, `memory_recall` returns the
+> documented `{ type: "text", text }`, the prompt hook checks the write cap before attaching, and
+> every `Registration` is disposed on unload. Security deltas (ADR-0007): the `memory-manager` subagent
+> is **read-only** (the sketch below still shows a scoped `edit`), captured failure **bodies are never
+> auto-injected** (summary line only), entries carry a `source:` provenance tag, and a `source:user`
+> directive appends to `decisions.md` without a review cycle.
 
 ```ts
-// .opencode/plugins/memory/index.ts
-// Normative skeleton: allowlisted recall (incl. handoffs/archive, never auto-injected) + persisted ledger + deduped INDEX + shape-guarded compaction.
-// Event names ("tool.execute.after", "session.idle") MUST be verified against the live
-// /v2/docs/build/plugins/ event catalog at P1; gate merge on `opencode plugin list` + runtime log proving
-// failure-capture and idle-snapshot fire. Fallback if absent: capture on prompt-hook file diff.
 import { Plugin } from "@opencode/plugin"
 
-const ALLOWED_RECALL = new Set([
-  "INDEX.md", "activeContext.md", "decisions.md",
-  "architecture.md", "style.md", "issues.md",
-])
-
-function isHandoffPath(file: string): boolean {
-  return file.startsWith("handoffs/") && file.endsWith(".md") && !file.includes("..") && !file.includes("//")
-  // Covers handoffs/<name>.md + handoffs/archive/<name>.md; recallable on demand, never auto-injected.
-}
-
+// Authoritative version: design-spec-v2-production.md §5. Sketch only.
 export default Plugin.define({
   id: "memory",
   async setup(ctx) {
-    // Persisted ledger (ctx.storage) — never an in-memory Set alone (ADR-0004, supermemory #106).
-    const ledger = {
-      async has(id: string): Promise<boolean> {
-        const seen = ((await ctx.storage.get("ledger.seen")) as string[] | undefined) ?? []
-        return seen.includes(id)
-      },
-      async mark(id: string): Promise<void> {
-        const seen = ((await ctx.storage.get("ledger.seen")) as string[] | undefined) ?? []
-        if (!seen.includes(id)) await ctx.storage.set("ledger.seen", [...seen.slice(-500), id])
-        await ctx.storage.set(`ledger.attempt.${id}`, Date.now())
-      },
-    }
+    const registrations: { dispose(): unknown }[] = []
+    const controller = new AbortController()
+    const root = (ctx.location.project?.canonical ?? ctx.location.directory).replace(/\/+$/, "")
 
-    await ctx.command.transform((editor) => {
-      editor.add({
-        name: "memory-review",
-        description: "Promote scratchpad notes into durable memory (human-approved)",
-        execute: async ({ sessionID, prompt, delivery }) => {
-          await ctx.session.prompt({ sessionID, delivery,
-            text: `${prompt.text}\n\nRead .opencode/memory/INDEX.md and activeContext.md, propose promotions into decisions/architecture/style/issues (capped, redacted), and ask for approval before writing. Never write durable files without approval.` })
-        },
-      })
-    })
-
-    await ctx.tool.transform((editor) => {
+    registrations.push(await ctx.tool.transform((editor) => {
       editor.add({
         name: "memory_recall",
         description: "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone.",
         input: { type: "object", properties: { file: { type: "string" } }, required: ["file"], additionalProperties: false },
-        // Normative values per c4-04: INDEX.md | activeContext.md | decisions.md | architecture.md | style.md | issues.md | handoffs/<name>.md | handoffs/archive/<name>.md; enforced by ALLOWED_RECALL + isHandoffPath.
-        execute: async (input) => {
-          const file = (input as { file: string }).file
-          if (!ALLOWED_RECALL.has(file) && !isHandoffPath(file)) throw new Error(`unknown memory file: ${file}`)
-          return readCapped(`.opencode/memory/${file}`) // readCapped enforces cap + truncation notice + secrets/<private> strip
-        },
+        execute: async (input) => ({ type: "text", text: readCapped((input as { file: string }).file) }),
       })
-    })
+    }))
 
-    await ctx.session.hook("prompt", (event) => {
-      // Sole INDEX-content injector (root AGENTS.md carries protocol+links only). Dedup guard prevents double injection.
+    registrations.push(await ctx.session.hook("prompt", (event) => {
       event.prompt.files ??= []
-      const absIndex = `${ctx.project.root}/.opencode/memory/INDEX.md`
-      const already = event.prompt.files.some((f: { uri: string }) => f.uri.endsWith(".opencode/memory/INDEX.md"))
-      if (!already) event.prompt.files.push({ uri: `file://${absIndex}` })
-    })
+      const abs = `${root}/.opencode/memory/INDEX.md`
+      const already = event.prompt.files.some((f) => typeof f.uri === "string" && f.uri.endsWith(".opencode/memory/INDEX.md"))
+      if (!already && indexWithinCap(abs)) event.prompt.files.push({ uri: `file://${abs}` })
+    }))
 
-    await ctx.session.hook("context", (event) => {
-      event.system.push({ type: "text", text: loadBrief() }) // bottom position, capped
-      const hint = matchIndex(event) // exact INDEX symbol match only; undefined when absent
-      if (hint) event.system.push({ type: "text", text: hint }) // 1-line tell-tale, never content
-    })
+    registrations.push(await ctx.session.hook("context", (event) => {
+      const brief = loadBrief()
+      if (brief) event.system.push({ type: "text", text: brief })
+      const status = statusLine() // rotation notice / review-due nudge (≤1 line)
+      if (status) event.system.push({ type: "text", text: status })
+      const hint = matchIndex(event)
+      if (hint) event.system.push({ type: "text", text: hint })
+    }))
 
-    await ctx.session.hook("compaction", async (event: { system?: { push: (m: unknown) => void }; result?: unknown }) => {
-      // Shape-guard: compaction payload differs across V2 versions — handle both.
-      const priors = loadPriors() // capped + redacted
-      if (event.system) event.system.push({ type: "text", text: priors })
-      if ("result" in event) {
-        if (event.result !== undefined) {
-          await saveHandoffFromResult(event.result) // read path: record produced summary as handoff
-        } else {
-          (event as { result?: unknown }).result = priors // write path: record summary yourself when runtime supports set
-        }
-      } else {
-        await saveHandoffFromText(priors) // fallback: priors already on disk; post-compaction path saves produced summary
-      }
-      // Never change model/threshold/trigger here.
-    })
+    registrations.push(await ctx.session.hook("compaction", (event) => {
+      event.system.push({ type: "text", text: loadPriors() }) // priors only — NEVER set event.result
+    }))
 
-    const controller = new AbortController()
+    registrations.push(await ctx.tool.hook("execute.after", async (event) => {
+      if (event.status !== "error") return
+      await captureFailure(event, ledger)
+    }))
+
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        // P1 gate: confirm these strings in the live catalog; see c4-03 event-note.
-        if (event.type === "tool.execute.after" && isFailure(event)) await captureFailure(event, ledger)
-        if (event.type === "session.idle") await snapshotHandoff(event, ledger) // content-hash-guarded; same content → no-op
+        if (event.type === "session.idle") await snapshotHandoffIfChanged(event, ledger)      // P1 gate
+        else if (event.type.startsWith("session.compaction.")) await captureCompaction(event)  // P1 gate
       }
     })()
-    return () => controller.abort()
+
+    return () => {
+      controller.abort()
+      for (const r of registrations) void r.dispose()
+    }
   },
 })
 ```
 
-Permissions: `memory-manager` subagent gets `edit` scoped to `.opencode/memory/**`, `shell` denied; primary agents keep normal perms. Memory files are untrusted input: size-cap before inject, never execute from them.
+Permissions: `memory-manager` subagent gets `edit` scoped to `.opencode/memory/**` with a broad `edit *` deny listed **first** (V2 evaluates rules in order and the last match wins, so broad rules precede exceptions), `shell` denied; primary agents keep normal perms. Memory files are untrusted input: size-cap before inject, never execute from them.
 
 ### 4.7 Your style, encoded (the core ask)
 
@@ -251,7 +232,7 @@ Concretely: AST/symbol/dependency navigation where the harness offers it (`ctx.v
 ## 5. Roadmap (MVP-first)
 
 - **P0 — no code (1 day):** root `AGENTS.md` protocol + six memory files + manual `memory-manager` subagent. Acceptance: new session restores context from `INDEX.md` + `activeContext.md` without re-explaining.
-- **P1 — local plugin (2–4 days):** skeleton above, ledger-backed idempotent capture, budgets enforced, `/memory-review`, handoffs. Acceptance: zero LLM calls in default path; injection ≤ budget; no duplicates across restart; compaction preserves priors; event names verified against live V2 catalog (runtime log); redaction blocks secrets fixtures.
+- **P1 — local plugin (2–4 days):** corrected skeleton (`design-spec-v2-production.md` §§2–5), ledger-backed idempotent capture, budgets enforced, `/memory-review` (read-only sandbox), handoffs. Acceptance: zero LLM calls in default path; injection ≤ budget; no duplicates across restart; compaction preserves priors and never sets `event.result`; P1 runtime gates (G1–G5) resolved or fallbacks wired; redaction blocks secrets fixtures; captured bodies never auto-injected.
 - **P2 — hardening (1–2 weeks):** `<private>` redaction + secrets blocklist, multi-project isolation check, permission UX, evals (recall success vs. tokens injected), docs. Optional only: SQLite FTS mirror, 30d TTL sweep, recorded access-weighted decay as an explicit command — never automatic.
 
 Cost: $0 default (no API, no server, no embeddings). Latency: file reads only.
@@ -259,6 +240,6 @@ Cost: $0 default (no API, no server, no embeddings). Latency: file reads only.
 ## 6. Sources
 
 - Prior research (harness/Memory-Bank/context-rot analysis with minimalist markdown recipe and blueprint; storage/RAG/TTL survey with SQLite+embeddings roadmap) — source papers removed; content folded into §§2–4 above, including the recorded decay formula in §2 row 8.
-- V2 docs (2026-10-15): `/v2/docs/plugins/` (plural key, discovery, precedence), `/v2/docs/build/plugins/` (`Plugin.define`, transforms, `session.hook("prompt"|"context"|"compaction"|…)`, `event.subscribe`, `storage`, `tool`/`command` transforms), `/v2/docs/instructions/` (AGENTS.md hierarchy, nested lazy discovery, nested-edit caveat, `instructions` array not resolved), `/v2/docs/config/` (`agents`/`system`/`permissions`/`default_agent`/`references`/`compaction`).
+- V2 docs (2026-10-15): `/v2/docs/plugins/` (plural key, discovery, precedence), `/v2/docs/build/plugins/` (`Plugin.define`, transforms, `session.hook("prompt"|"context"|"compaction"|…)`, `event.subscribe`, `storage` incl. `scan`, `tool`/`command` transforms), `/v2/docs/instructions/` (AGENTS.md hierarchy, nested lazy discovery, nested-edit caveat, `instructions` array not resolved), `/v2/docs/config/` (`agents`/`system`/`permissions`/`default_agent`/`references`/`compaction`), `/v2/docs/agents/` (permission evaluation order: last matching rule wins), `/v2/docs/compaction/` (`session.compaction.*` events; hooks run before the summary model call).
 - V1 evidence: `tickernelz/opencode-mem` README + `#330` (vault request) + `#359` (Windows multiprocess); `supermemoryai/opencode-supermemory` README + `#106` (duplicate capture), `#69` (compaction races), `#85`/`#88` (premature compaction), `#91`/`#97`/`#104` (config/tool drift); `docs.mem0.ai/integrations/opencode`; `hindsight.vectorize.io/sdks/integrations/opencode` (superseded notice).
 - Design principle (§4.8): Gemini discovery supplied in-session (anti-biological-memory: determinism over fuzzy recall, immutable entries over reconstructive drift, explicit pruning over organic forgetting, git/ADR lineage over episodic timelines) — adopted as the governing constraint behind the no-embeddings, append-only, git-backed choices above.

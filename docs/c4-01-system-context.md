@@ -1,6 +1,6 @@
 # C4 Level 1 — System Context: No-Fuss Memory Plugin for OpenCode V2
 
-**Status:** proposed. **Sources:** Synthesized Report §§1–4; V2 instructions docs (AGENTS.md hierarchy); upstream privacy practice (per-project scoping).
+**Status:** proposed. **Sources:** Synthesized Report §§1–4; V2 instructions docs (AGENTS.md hierarchy); upstream privacy practice (per-project scoping). **Normative on V2 contracts:** `design-spec-v2-production.md`.
 
 ## System boundary
 
@@ -12,7 +12,7 @@ Inside: the memory plugin (`.opencode/plugins/memory/`) plus the memory file sto
 |---|---|
 | Developer | Owns durable memory; approves promotion via `/memory-review`; reads/edits markdown directly in git |
 | OpenCode agent (V2) | Reads `INDEX.md` (content via deduped `prompt` hook; protocol+links via root `AGENTS.md` only), calls `memory_recall`, follows the root `AGENTS.md` memory protocol |
-| OpenCode V2 server/runtime | Loads the plugin (`plugins` key / `.opencode/plugins/` discovery); provides hooks, events, transforms, `ctx.storage`, `ctx.vcs` (event names verified at P1 — see `c4-03-components.md` event-note) |
+| OpenCode V2 server/runtime | Loads the plugin (`plugins` key / `.opencode/plugins/` discovery); provides hooks, events, transforms, `ctx.storage`, `ctx.vcs` (event names verified at P1 — see the verification-note in `c4-03-components.md`) |
 | Local filesystem + git | Durable store and ultimate backbone: history, blame, undo/redo, restore |
 | GitHub issues | Manual source for `issues.md` lines (todo/doing/done), validated by `/memory-review`. No API dependency |
 

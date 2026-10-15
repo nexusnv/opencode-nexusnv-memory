@@ -8,18 +8,22 @@ Project background, architectural decisions + why + rejected options, last refac
 
 ## What it never does by default
 
-No transcripts, no embeddings/vector search, no cloud/server/API keys, no per-turn LLM extraction, no silent durable writes, no custom compaction triggers.
+No transcripts, no embeddings/vector search, no cloud/server/API keys, no per-turn LLM extraction, no silent durable writes, no custom compaction triggers. The `compaction` hook injects priors only and never sets `event.result` (ADR-0003).
+
+Memory content is treated as **untrusted data, never instructions** (ADR-0007). Raw captured command output is never auto-injected — the brief carries one tagged summary line per known error and the bodies stay recall-only. `/memory-review` reads and proposes in a **read-only, shell-denied sandbox**, and untrusted candidates are never bulk-approved. Prompt-injection *detection* is explicitly not a security boundary; isolation, provenance, minimisation, and per-line human approval are. The one write that is not review-gated is a `source:user` directive (an explicit "remember X" in your own message), which appends to the append-only `decisions.md` immediately (ADR-0004 revision).
 
 ## Layout
 
 ```
 AGENTS.md (repo root)         # hand-owned protocol + links only (never auto-written, never content)
 .opencode/
-├── opencode.jsonc             # .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; repo-root → ["./.opencode/plugins/memory"]; plus agents: { memory-manager }, references: { memory } (shape per c4-04)
-├── agents/memory-manager.md   # on-demand curator (edit: .opencode/memory/**, shell: deny)
-├── plugins/memory/index.ts    # prompt/context/compaction hooks, memory_recall, /memory-review
+├── opencode.jsonc             # .opencode/opencode.jsonc → plugins: ["./plugins/memory"]; repo-root → ["./.opencode/plugins/memory"]; plus agents: { memory-manager } and ≤5 plugin options (ADR-0006: no references entry)
+├── agents/memory-manager.md   # on-demand curator, read-only: no edit, no shell (proposes only; ADR-0007)
+├── plugins/memory/index.ts    # prompt/context/compaction hooks, execute.after capture, memory_recall, /memory-review
 └── memory/                    # six files (INDEX, activeContext, decisions, architecture, style, issues) + handoffs/ root (snapshots) + handoffs/archive/ (retired lines)
 ```
+
+The memory directory is fixed at `.opencode/memory` — not configurable — because the `readCapped`/`writeCapped` choke point, the recall allowlist, and the agent permission shape all depend on a stable root (ADR-0006). Since ADR-0007 the `memory-manager` subagent is read-only, so the fix is now load-bearing for the read path and the allowlist. The plugin never edits `opencode.jsonc` or `AGENTS.md`; it scaffolds templates and emits a commented options snippet.
 
 ## Try it without code (P0)
 
@@ -27,6 +31,10 @@ Create the six memory files by hand, add the protocol block to root `AGENTS.md`,
 
 ## Docs
 
-- `docs/c4-01-system-context.md` → `c4-06-code.md`: C4 Context, Container, Component, Code, plus supplementary specs A (interfaces, `c4-04`) and B (data model, `c4-05`). `c4-01–c4-06` are `proposed`; ADRs are `accepted`.
-- `docs/adr/0001–0005.md`: the five load-bearing decisions (normative on decision intent).
-- Root: `motivation.md` (normative overview + skeleton; file list, budgets, hook contracts, recall allowlist, and enforcement points defer to `c4-05`/`c4-04` on conflict; ADRs win on decision intent).
+- `docs/design-spec-v2-production.md`: **the design spec — normative on V2 contracts and implementation.** Self-contained: verified V2 contract (§1), package/options (§2–3), install/config (§4), component specs (§5), data model/budgets (§6), lifecycle (§7), deferrals (§8), build/test/release (§9), roadmap (§10). Supersedes the other documents on any V2-contract conflict.
+- `docs/c4-01-system-context.md` → `c4-06-code.md`: C4 Context, Container, Component, Code, plus supplementary specs A (interfaces, `c4-04`) and B (data model, `c4-05`). `c4-01–c4-06` are `proposed`; all are aligned to the design spec.
+- `docs/user-stories.md`: User (US-01–27), Agent (AS-01–09), and Harness (HS-01–11) stories with acceptance criteria.
+- `docs/adr/0001–0007.md`: the load-bearing decisions (normative on decision intent). `0003` was revised (compaction never sets `event.result`); `0004` was revised (provenance gate: user-asserted facts are durable immediately); `0006` is new (fixed memory location, minimal config, no `references` entry); `0007` is new (memory content is untrusted: minimisation, provenance, read-only review sandbox, per-line approval).
+- Root: `motivation.md` (background synthesis + the superseded §4.6 sketch; **not** normative on V2 contracts).
+
+**Precedence:** ADRs are normative on decision intent; `design-spec-v2-production.md` is normative on V2 contracts and implementation; the C4 docs and `user-stories.md` are descriptive and defer to the spec; `motivation.md` is background and its §4.6 skeleton is superseded and non-normative.
