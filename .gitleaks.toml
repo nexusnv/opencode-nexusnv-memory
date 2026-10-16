@@ -1,0 +1,23 @@
+# Gitleaks config for opencode-nexusnv-memory.
+#
+# Default rules apply everywhere EXCEPT the two documented canary sites:
+# 1. test/fixtures/secrets.txt — the canary corpus. Every entry uses
+#    EXAMPLE/FAKE/TEST keys ONLY; no live secret may ever land here.
+# 2. test/redact.test.ts — embeds one fake PEM block (its header alone
+#    trips the private-key rule). Scoped to that rule in that file only.
+#
+# Any finding outside these allowlists fails CI.
+
+title = "opencode-nexusnv-memory gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "canary corpus: EXAMPLE/FAKE/TEST keys only, never live secrets"
+paths = ['test/fixtures/secrets\.txt$']
+
+[[allowlists]]
+description = "redact unit test: fake PEM block header trips private-key rule"
+paths = ['test/redact\.test\.ts$']
+rules = ["private-key"]
