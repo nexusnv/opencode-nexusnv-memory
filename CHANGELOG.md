@@ -2,7 +2,7 @@
 
 ## 0.1.1 (2026-10-16)
 
-- Release automation: npm trusted publishing (OIDC) replaces the publish token; release workflow split into gated build and minimal publish jobs with tag-on-main and tag/manifest guards; first workflow-published release (validates the trusted-publisher configuration).
+- Release automation: npm trusted publishing (OIDC) replaces the default publish-token path (a token fallback remains to *stage* releases via manual dispatch); release workflow split into gated build and minimal publish jobs with tag-on-main and tag/manifest guards; first workflow-published release (validates the trusted-publisher configuration).
 - No plugin behavior changes since 0.1.0.
 
 ## 0.1.0 (P1-T10, 2026-10-15)
