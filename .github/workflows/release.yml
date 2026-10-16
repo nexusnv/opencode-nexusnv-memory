@@ -9,8 +9,12 @@ name: release
 #   auth entry referencing NODE_AUTH_TOKEN, which makes npm skip the OIDC
 #   exchange), pinned npm (OIDC needs >= 11.5.1; `latest` is mutable).
 #
+# Staged publishing only: the trusted publisher is registered stage-only,
+# so CI stages the asserted tarball and a maintainer approves it on
+# npmjs.com (with 2FA) before it goes live. Nothing direct-publishes.
+#
 # Break-glass: workflow_dispatch with token_fallback runs the same gates
-# but publishes with NPM_TOKEN instead of OIDC (see README "Releases").
+# but stages with NPM_TOKEN instead of OIDC (see README "Releases").
 
 permissions:
   contents: read
@@ -92,16 +96,34 @@ jobs:
           TARBALL=$(npm pack --silent)
           node scripts/assert-pack.mjs "$TARBALL"
           echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+      # Idempotent retry: a previous run may have submitted this version
+      # then lost the response (runner timeout). Re-submitting an already
+      # staged version fails, so treat a matching pending stage as success
+      # and point at it instead. Shape-agnostic: any stage entry mentioning
+      # this exact version counts (entries here are per-package versions).
+      - name: skip submit when this version is already staged
+        id: staged
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          LIST=$(npm stage list "$NAME" --json 2>/dev/null || echo "[]")
+          if LIST="$LIST" VER="$VER" node -e "let a; try { a = JSON.parse(process.env.LIST); } catch { process.exit(1); } if (!Array.isArray(a)) process.exit(1); process.exit(a.some((e) => JSON.stringify(e).includes(process.env.VER)) ? 0 : 1)"; then
+            echo "version $VER is already staged; skipping re-submission (approve it on npmjs.com)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: publish via OIDC
-        if: ${{ !inputs.token_fallback }}
-        run: npm publish "$TARBALL" --provenance --access public
-      - name: publish via token fallback (break-glass only)
-        if: ${{ inputs.token_fallback }}
+        if: ${{ !inputs.token_fallback && steps.staged.outputs.skip != 'true' }}
+        run: npm stage publish "$TARBALL" --provenance --access public
+      - name: stage via token fallback (break-glass only)
+        if: ${{ inputs.token_fallback && steps.staged.outputs.skip != 'true' }}
         # Bare NODE_AUTH_TOKEN does not configure registry-scoped auth on a
         # clean runner (and npm would try OIDC first), so write the entry
         # explicitly. No provenance here: attestation needs OIDC identity.
+        # Staged like the normal path: a maintainer still approves it.
         run: |
           npm config set '//registry.npmjs.org/:_authToken' "${NODE_AUTH_TOKEN}" --location=user
-          npm publish "$TARBALL" --access public
+          npm stage publish "$TARBALL" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

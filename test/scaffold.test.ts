@@ -20,7 +20,23 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     expect(existsSync(pkgPath), "package.json exists").toBe(true);
     const pkg = JSON.parse(read("package.json"));
     expect(pkg.name).toBe("opencode-nexusnv-memory");
-    expect(pkg.version).toBe("0.1.0");
+    // Semver shape + CHANGELOG entry, never a pinned value: every release
+    // bump must keep CI green, and the release workflow already enforces
+    // tag == manifest separately. Full SemVer 2.0.0 grammar (semver.org):
+    // no leading zeros, prerelease dot-identifiers without underscores,
+    // build metadata allowed.
+    expect(pkg.version).toMatch(
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/,
+    );
+    const headings = read("CHANGELOG.md")
+      .split("\n")
+      .map((l) => l.trimEnd());
+    expect(
+      headings.some(
+        (l) => l === `## ${pkg.version}` || l.startsWith(`## ${pkg.version} `),
+      ),
+      `CHANGELOG.md has an exact ## ${pkg.version} heading`,
+    ).toBe(true);
     expect(pkg.type).toBe("module");
     expect(pkg.exports?.["."]).toBe("./src/index.ts");
     expect(pkg.dependencies?.["@opencode/plugin"]).toBe("2.0.29");
