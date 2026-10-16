@@ -26,7 +26,11 @@ on:
         default: false
 
 jobs:
+  # Manual dispatches are main-only: the tag guards below run on release
+  # events, so without this gate a dispatch from any branch or tag could
+  # publish unreviewed code. Release tags bypass this (their own guards).
   build:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
@@ -93,6 +97,11 @@ jobs:
         run: npm publish "$TARBALL" --provenance --access public
       - name: publish via token fallback (break-glass only)
         if: ${{ inputs.token_fallback }}
-        run: npm publish "$TARBALL" --access public
+        # Bare NODE_AUTH_TOKEN does not configure registry-scoped auth on a
+        # clean runner (and npm would try OIDC first), so write the entry
+        # explicitly. No provenance here: attestation needs OIDC identity.
+        run: |
+          npm config set '//registry.npmjs.org/:_authToken' "${NODE_AUTH_TOKEN}" --location=user
+          npm publish "$TARBALL" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
