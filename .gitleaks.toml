@@ -1,0 +1,42 @@
+# Gitleaks config for opencode-nexusnv-memory.
+#
+# Default rules apply everywhere with NO path exemptions: this file must not
+# contain `paths` entries, because in gitleaks a path-matching allowlist
+# exempts the whole file (verified empirically on v8.28 — `paths` plus
+# `regexes` still suppresses findings whose secret matches nothing, so a
+# live credential appended to an allowlisted file would pass silently).
+#
+# Instead this allowlist suppresses ONLY the documented canary values from
+# the security review (PR #1: fixtures use EXAMPLE/FAKE keys only, no live
+# secrets): each `regexes` entry is an exact fake byte-run matched against
+# the finding's secret. A live credential — anywhere in the repo, including
+# inside test/fixtures/secrets.txt — contains none of these runs and still
+# fails CI. Deliberately absent: the bare `RSA PRIVATE KEY` header (that
+# would suppress real keys); the fake PEM block is covered by its fake
+# body bytes instead.
+
+title = "opencode-nexusnv-memory gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "documented canary values only; any other secret value fires"
+regexTarget = "secret"
+regexes = [
+  'AKIAIOSFODNN7EXAMPLE',
+  'EXAMPLEKEY',
+  '1234567890abcdef1234567890abcdef1234',
+  'dummy-signature-value',
+  'TESTFAKE',
+  'FAKETEST',
+  'SuperSecret123',
+  'correct-horse-battery-staple',
+  'abcdef1234567890ABCDEF1234567890ab',
+  'MIIEpAIBAAKCAQEA7bq2',
+  # Historical canary values (commit d966783, later replaced): Stripe's
+  # documented example key and a synthetic slack token. Fixtures use
+  # EXAMPLE/FAKE keys only — these runs appear nowhere else.
+  '4eC39HqLyjWDarjtT1zdp7dc',
+  'AbCdEfGhIjKlMnOpQrStUvWx',
+]
