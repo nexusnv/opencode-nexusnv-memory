@@ -1,5 +1,9 @@
 # No-Fuss Memory Plugin for OpenCode V2
 
+[![npm version](https://img.shields.io/npm/v/opencode-nexusnv-memory)](https://www.npmjs.com/package/opencode-nexusnv-memory)
+[![CI](https://github.com/nexusnv/opencode-nexusnv-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/nexusnv/opencode-nexusnv-memory/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Local-first, zero-subscription, zero-daemon, zero-embeddings memory for OpenCode V2. Git-backed markdown is the source of truth; hooks are passive and budget-capped; curation is human-approved.
 
 ## What it remembers
@@ -116,3 +120,14 @@ Supported range: OpenCode `2.0.x` with `@opencode/plugin` pinned to the exact `2
 ## Uninstall
 
 Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
+
+## Releases (maintainers)
+
+Published to npm as [`opencode-nexusnv-memory`](https://www.npmjs.com/package/opencode-nexusnv-memory) (MIT, see `LICENSE`). The tarball ships `src/` (the `exports` entrypoint), `agents/`, `commands/`, `README.md`, `LICENSE`, and `CHANGELOG.md` only — tests, docs, and CI internals stay out via the `files` allowlist, enforced by the pack gate (`scripts/assert-pack.mjs`).
+
+1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
+2. Merge to `main` (CI must be green: typecheck, tests + coverage, gitleaks, audit, pack).
+3. Publish a GitHub Release off `main` — the `release` workflow re-runs the gates and runs `npm publish --provenance`.
+4. Verify: fresh dir, `npm install opencode-nexusnv-memory@<version>`, `opencode plugin list` shows `memory`.
+
+One-time setup: create a granular access token at npmjs.com (publish-only, scoped to this package, short expiry) and store it as the repository secret `NPM_TOKEN`. Long-term: switch to npm trusted publishing (OIDC) and delete the token.
