@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-10-16)
+
+- Release automation: npm trusted publishing (OIDC) replaces the publish token; release workflow split into gated build and minimal publish jobs with tag-on-main and tag/manifest guards; first workflow-published release (validates the trusted-publisher configuration).
+- No plugin behavior changes since 0.1.0.
+
 ## 0.1.0 (P1-T10, 2026-10-15)
 
 - P1 acceptance gate (`test/acceptance.test.ts`, 21 tests): end-to-end proof of every §9 bullet — budgets on all write paths with an end-to-end ≤80-line payload check, over-cap INDEX unattached, no INDEX duplication in the brief, priors carry the decisions tail with no `event.result` assignment anywhere in `src/`, secrets + `<private>` (incl. unclosed) redaction on write and inject, recall traversal rejects via the `toolResult` envelope, apply asserts once per line with tool-context IDs under the shipped `memory_write → ask` rule, untrusted candidates excluded from bulk approval, `HHmmss-<session6>` handoff routing at `handoffs/` root, foreign events dropped before any write, single reused `AbortController`, rotation-once + nudge-at-≥5 + reset-via-`candidates:[]`, poison-fixture containment (summary-only brief), fence/quote provenance rejection, and the deploy-time `event.type` log confirming `session.idle` + `session.compaction.ended` delivery.
