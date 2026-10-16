@@ -1,12 +1,19 @@
 # Gitleaks config for opencode-nexusnv-memory.
 #
-# Default rules apply everywhere EXCEPT the two documented canary sites:
-# 1. test/fixtures/secrets.txt — the canary corpus. Every entry uses
-#    EXAMPLE/FAKE/TEST keys ONLY; no live secret may ever land here.
-# 2. test/redact.test.ts — embeds one fake PEM block (its header alone
-#    trips the private-key rule). Scoped to that rule in that file only.
+# Default rules apply everywhere with NO path exemptions: this file must not
+# contain `paths` entries, because in gitleaks a path-matching allowlist
+# exempts the whole file (verified empirically on v8.28 — `paths` plus
+# `regexes` still suppresses findings whose secret matches nothing, so a
+# live credential appended to an allowlisted file would pass silently).
 #
-# Any finding outside these allowlists fails CI.
+# Instead this allowlist suppresses ONLY the documented canary values from
+# the security review (PR #1: fixtures use EXAMPLE/FAKE keys only, no live
+# secrets): each `regexes` entry is an exact fake byte-run matched against
+# the finding's secret. A live credential — anywhere in the repo, including
+# inside test/fixtures/secrets.txt — contains none of these runs and still
+# fails CI. Deliberately absent: the bare `RSA PRIVATE KEY` header (that
+# would suppress real keys); the fake PEM block is covered by its fake
+# body bytes instead.
 
 title = "opencode-nexusnv-memory gitleaks config"
 
@@ -14,10 +21,22 @@ title = "opencode-nexusnv-memory gitleaks config"
 useDefault = true
 
 [[allowlists]]
-description = "canary corpus: EXAMPLE/FAKE/TEST keys only, never live secrets"
-paths = ['test/fixtures/secrets\.txt$']
-
-[[allowlists]]
-description = "redact unit test: fake PEM block header trips private-key rule"
-paths = ['test/redact\.test\.ts$']
-rules = ["private-key"]
+description = "documented canary values only; any other secret value fires"
+regexTarget = "secret"
+regexes = [
+  'AKIAIOSFODNN7EXAMPLE',
+  'EXAMPLEKEY',
+  '1234567890abcdef1234567890abcdef1234',
+  'dummy-signature-value',
+  'TESTFAKE',
+  'FAKETEST',
+  'SuperSecret123',
+  'correct-horse-battery-staple',
+  'abcdef1234567890ABCDEF1234567890ab',
+  'MIIEpAIBAAKCAQEA7bq2',
+  # Historical canary values (commit d966783, later replaced): Stripe's
+  # documented example key and a synthetic slack token. Fixtures use
+  # EXAMPLE/FAKE keys only — these runs appear nowhere else.
+  '4eC39HqLyjWDarjtT1zdp7dc',
+  'AbCdEfGhIjKlMnOpQrStUvWx',
+]
