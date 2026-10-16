@@ -157,6 +157,9 @@ function candidateAt(candidates: unknown, index: number): ApplyCandidate {
   if (typeof line !== "string") {
     throw new Error(`[memory] memory_apply candidate ${index}: line must be a string`);
   }
+  if (line.trim().length === 0) {
+    throw new Error(`[memory] memory_apply candidate ${index}: line must be a non-empty string`);
+  }
   if (!APPLY_SOURCES.includes(source as ApplySource)) {
     throw new Error(
       `[memory] memory_apply candidate ${index}: source must be one of ${APPLY_SOURCES.join("|")}`,
@@ -189,12 +192,15 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
  * Raw read for cap projection only (no cap, no redaction — the projection
  * replicates the `updateCapped` merge and counts redacted lines itself).
  * Resolves `""` when the file does not exist yet; other IO errors propagate
- * (fail-closed, like a deny).
+ * (fail-closed, like a deny). Validates the path (M-5 defense-in-depth: the
+ * caller already asserts, but the helper must never read outside the root
+ * on its own).
  */
 async function readRawForProjection(
   memoryRoot: string,
   file: string,
 ): Promise<string> {
+  assertAllowedPath(file);
   try {
     return await readFile(join(resolveMemoryRoot(memoryRoot), file), "utf8");
   } catch (error) {
@@ -206,11 +212,15 @@ async function readRawForProjection(
 /**
  * Batch cap preflight: project every target file's line count after the
  * whole batch and reject before the first prompt when a capped file would
- * overflow. Without this, a mid-batch `writeCapped` throw leaves earlier
- * candidates durable while the rest stay pending — and the next review
- * re-proposes the already-applied lines, duplicating them. `activeContext.md`
- * is exempt (rotation, not rejection) and `decisions.md` is unbounded; both
- * still go through the per-line prompts and atomic appends below.
+ * overflow. Advisory only (M-5): the projection reads outside `withWriteLock`
+ * and runs before the per-line `permission.assert` round-trips, so a
+ * concurrent grow (second batch, captureFailure append, hand-edit) or a
+ * rotation-exempt `activeContext.md` without a Known-errors block can still
+ * throw mid-batch. Callers surface the applied-count on failure so a retry
+ * can resume without blindly duplicating the already-durable prefix (which
+ * has no content-ID dedupe). `activeContext.md` is exempt (rotation, not
+ * rejection) and `decisions.md` is unbounded; both still go through the
+ * per-line prompts and atomic appends below.
  */
 async function preflightBatchCaps(
   parsed: readonly ApplyCandidate[],
@@ -279,40 +289,62 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
     const indexLines = deps.indexLines ?? DEFAULT_MEMORY_OPTIONS.indexLines;
     const fileLines = deps.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
     // Validate everything up front: shape, allowlist, then whole-batch caps.
-    // A batch that cannot fit is rejected before the first approval prompt,
-    // so a cap overflow can never leave a half-applied batch behind.
+    // A batch that cannot fit is rejected before the first approval prompt.
+    // The preflight is advisory under concurrency (see above): a mid-batch
+    // cap throw reports how many lines already landed so the operator can
+    // resume instead of re-applying the whole batch (which would duplicate).
     const parsed = candidates.map((_, i) => candidateAt(candidates, i));
     for (const candidate of parsed) assertAllowedPath(candidate.file);
     await preflightBatchCaps(parsed, deps, indexLines, fileLines);
     let applied = 0;
-    for (const candidate of parsed) {
-      await deps.permission.assert({
-        sessionID: context.sessionID,
-        agent: context.agent,
-        action: "memory_write",
-        resources: [candidate.file],
-        metadata: { line: candidate.line, source: candidate.source },
-        source: {
-          type: "tool",
-          messageID: context.messageID,
-          id: context.id,
-        },
-        save: [],
-      });
-      await updateCapped(
-        candidate.file,
-        {
-          memoryRoot: deps.memoryRoot,
-          indexLines,
-          fileLines,
-        },
-        (current) =>
-          current === ""
-            ? candidate.line
-            : current.endsWith("\n")
-              ? current + candidate.line
-              : `${current}\n${candidate.line}`,
-      );
+    for (let i = 0; i < parsed.length; i += 1) {
+      const candidate = parsed[i]!;
+      // Deny propagates as the SAME error object (identity-preserved:
+      // callers/tests rely on `rejects.toBe`), with the applied count
+      // attached so a denial after earlier writes is still resumable
+      // without blindly duplicating the durable prefix.
+      try {
+        await deps.permission.assert({
+          sessionID: context.sessionID,
+          agent: context.agent,
+          action: "memory_write",
+          resources: [candidate.file],
+          metadata: { line: candidate.line, source: candidate.source },
+          source: {
+            type: "tool",
+            messageID: context.messageID,
+            id: context.id,
+          },
+          save: [],
+        });
+      } catch (deny) {
+        try {
+          (deny as { memoryApplied?: number }).memoryApplied = applied;
+        } catch {
+          // Property attach is best-effort; the deny itself still propagates.
+        }
+        throw deny;
+      }
+      try {
+        await updateCapped(
+          candidate.file,
+          {
+            memoryRoot: deps.memoryRoot,
+            indexLines,
+            fileLines,
+          },
+          (current) =>
+            current === ""
+              ? candidate.line
+              : current.endsWith("\n")
+                ? current + candidate.line
+                : `${current}\n${candidate.line}`,
+        );
+      } catch (error) {
+        throw new Error(
+          `[memory] memory_apply failed at candidate ${i} after ${applied} applied (${candidate.file} over cap or concurrent grow); ${parsed.length - applied} candidate(s) remain pending and already-applied lines must not be re-applied blindly: ${(error as Error)?.message ?? error}`,
+        );
+      }
       applied += 1;
     }
     await resetPending(deps.storage, deps.projectID);

@@ -8,7 +8,14 @@
  *    `test/fixtures/secrets.txt`).
  */
 
-const PRIVATE_TAG = /<\s*(\/?)\s*private\s*>/gi;
+/**
+ * Opening `<private>` (attributes allowed: `<private note="x">`) vs exact
+ * closing `</private>` (no attributes). An attributed closer such as
+ * `</private note>` is NOT a close — inside a block it must not resume
+ * copying (fail-closed to EOF redaction); outside a block it is left as-is.
+ */
+const PRIVATE_TAG =
+  /<\s*(\/?)\s*private((?:\s+[^>]*)?)\s*>/gi;
 
 const REDACTED = "[redacted]";
 
@@ -27,6 +34,7 @@ function stripPrivateBlocks(text: string): string {
   // safe because the function is synchronous.
   while ((match = PRIVATE_TAG.exec(text)) !== null) {
     const isClose = match[1] === "/";
+    const hasAttrs = (match[2] ?? "").trim().length > 0;
     if (!isClose) {
       if (depth === 0) {
         result += text.slice(pos, match.index);
@@ -34,13 +42,16 @@ function stripPrivateBlocks(text: string): string {
       }
       depth += 1;
       pos = match.index + match[0].length;
-    } else {
+    } else if (!hasAttrs) {
       if (depth > 0) {
         depth -= 1;
         pos = match.index + match[0].length;
       } else {
         // Stray closer: leave it in the output (pos untouched).
       }
+    } else {
+      // Attributed closer (`</private ...>`): not a tag — leave the text in
+      // the output when outside a block; inside a block it stays redacted.
     }
   }
   if (depth > 0) {
@@ -83,13 +94,18 @@ const BLOCKLIST: readonly Pattern[] = [
   // Slack tokens.
   { re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: REDACTED },
   // Bearer tokens: keep the scheme so the header shape stays visible.
+  // Scheme is case-insensitive per RFC 7235 (M-1: `bearer`/`BEARER` in logs).
   {
-    re: /\bBearer\s+[A-Za-z0-9\-._~+/=]{20,}\b/g,
+    re: /\bBearer\s+[A-Za-z0-9\-._~+/=]{20,}\b/gi,
     replacement: "Bearer [redacted]",
   },
   // URL credentials (e.g. DATABASE_URL=postgres://user:pass@host/...).
+  // Empty user allowed (`redis://:pass@host`); password runs to the last `@`
+  // before `/`/whitespace so `user:p@ss@host` redacts `p@ss` (M-1). The
+  // username stops at the first colon so `user:alpha:bravo@db` masks the
+  // whole `alpha:bravo` instead of leaking `alpha:`.
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s/]+)(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\s:]*:)([^\s/]+)(@)/g,
     replacement: "$1[redacted]$3",
   },
   // AWS secret access key with label.
@@ -102,9 +118,12 @@ const BLOCKLIST: readonly Pattern[] = [
   // through their closing quote (so values containing spaces are fully
   // covered); quoted alternatives consume backslash escapes first, so an
   // escaped quote cannot end the match early and leak the remainder.
-  // Unterminated quotes match to end of line (fail-closed).
+  // Unterminated quotes match to end of line (fail-closed). Key coverage is
+  // intentionally broad (M-1: OPENAI_KEY/GITHUB_KEY/AUTH/ENCRYPTION_KEY via
+  // the generic KEY/AUTH/CREDENTIAL match — over-redaction like MONKEY= is
+  // accepted over a leak).
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
+    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];

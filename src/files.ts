@@ -197,13 +197,15 @@ function knownErrorBlocks(
     } else if (current) {
       // Continuation (indented detail, blank, or plain text): keep with block
       // unless a new ## section starts, which ends the Known-errors region.
-      if (/^##\s+/.test(line.trim())) {
+      // Column-0 only (H-1): capture stores detail 2-space indented, so a
+      // trimmed test would let `## Next` inside tool output split the block.
+      if (/^##\s+/.test(line)) {
         blocks.push(current);
         return blocks;
       }
       current.end = i + 1;
     } else {
-      if (/^##\s+/.test(line.trim())) return blocks;
+      if (/^##\s+/.test(line)) return blocks;
       // Leading blanks before the first bullet belong to no block; skip.
     }
   }
