@@ -4,8 +4,9 @@ name: release
 # starts as a publish-capable token for the FIRST release (npm cannot scope
 # a granular token to a package that does not exist yet), then is replaced
 # with a package-scoped granular token. This workflow runs the full gates
-# and publishes with provenance. Long-term upgrade path: switch to npm
-# trusted publishing (OIDC) and drop the token.
+# and publishes with provenance. UPGRADED: publishes via npm trusted
+# publishing (OIDC) — no token needed once the publisher is registered on
+# npmjs.com. Keep NPM_TOKEN only as a break-glass fallback.
 
 permissions:
   contents: read
@@ -44,6 +45,8 @@ jobs:
       - run: |
           TARBALL=$(npm pack --silent)
           node scripts/assert-pack.mjs "$TARBALL"
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; the runner-bundled
+      # npm is not guaranteed new enough, so upgrade first. No NODE_AUTH_TOKEN
+      # here by design: any token present makes npm skip the OIDC exchange.
+      - run: npm install -g npm@latest
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

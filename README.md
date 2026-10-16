@@ -130,7 +130,10 @@ Published to npm as [`opencode-nexusnv-memory`](https://www.npmjs.com/package/op
 3. Publish a GitHub Release off `main` with the tag `v<version>` matching the manifest — the `release` workflow refuses tags off other branches or mismatched versions, then re-runs the gates and runs `npm publish --provenance`.
 4. Verify: fresh dir, `npm install opencode-nexusnv-memory@<version>`, declare it in that project's config (`"plugins": ["opencode-nexusnv-memory"]`), then `opencode plugin list` shows `memory` (install alone does not register it).
 
-One-time token setup, in two phases (npm cannot scope a granular token to a package that does not exist yet):
-- **First release:** classic Automation token (able to publish new packages) as the repository secret `NPM_TOKEN`.
-- **After the package exists:** replace it with a granular token scoped to `opencode-nexusnv-memory` — permission **Read and write (publish and stage)** with **Bypass two-factor authentication** enabled (non-interactive CI publishes fail without both), short expiry.
-- Long-term: switch to npm trusted publishing (OIDC) and delete the token.
+One-time setup — trusted publishing (no long-lived token):
+1. Publish `0.1.0` once with the manual bootstrap below (the package must exist before npm lets you register a publisher — same chicken-and-egg as tokens).
+2. On npmjs.com, open the package → Settings → Trusted Publisher → GitHub Actions, and register org `nexusnv`, repository `opencode-nexusnv-memory`, workflow file `release.yml`. (`repository.url` in `package.json` already matches, which npm verifies.)
+3. From then on, releases publish via short-lived OIDC tokens minted per run (`id-token: write` in `release.yml`); the workflow pins npm to `@latest` because OIDC needs npm ≥ 11.5.1.
+4. Delete `NPM_TOKEN` once the first OIDC publish succeeds. Keep it only as a break-glass fallback for registry outages.
+
+Manual bootstrap (first publish only — requires your browser/OTP, CI cannot do it): `npm publish --access public --provenance=false` from green `main` (provenance needs CI OIDC, so the bootstrap version ships without the attestation; every CI release after it gets one).
