@@ -9,8 +9,12 @@ name: release
 #   auth entry referencing NODE_AUTH_TOKEN, which makes npm skip the OIDC
 #   exchange), pinned npm (OIDC needs >= 11.5.1; `latest` is mutable).
 #
+# Staged publishing only: the trusted publisher is registered stage-only,
+# so CI stages the asserted tarball and a maintainer approves it on
+# npmjs.com (with 2FA) before it goes live. Nothing direct-publishes.
+#
 # Break-glass: workflow_dispatch with token_fallback runs the same gates
-# but publishes with NPM_TOKEN instead of OIDC (see README "Releases").
+# but stages with NPM_TOKEN instead of OIDC (see README "Releases").
 
 permissions:
   contents: read
@@ -94,14 +98,15 @@ jobs:
           echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
       - name: publish via OIDC
         if: ${{ !inputs.token_fallback }}
-        run: npm publish "$TARBALL" --provenance --access public
-      - name: publish via token fallback (break-glass only)
+        run: npm stage publish "$TARBALL" --provenance --access public
+      - name: stage via token fallback (break-glass only)
         if: ${{ inputs.token_fallback }}
         # Bare NODE_AUTH_TOKEN does not configure registry-scoped auth on a
         # clean runner (and npm would try OIDC first), so write the entry
         # explicitly. No provenance here: attestation needs OIDC identity.
+        # Staged like the normal path: a maintainer still approves it.
         run: |
           npm config set '//registry.npmjs.org/:_authToken' "${NODE_AUTH_TOKEN}" --location=user
-          npm publish "$TARBALL" --access public
+          npm stage publish "$TARBALL" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
