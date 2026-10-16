@@ -1564,8 +1564,22 @@ export async function snapshotIfDue(
     // unchanged poll. The hash covers branch + changes + pending; an equal
     // stored hash means snapshotHandoffIfChanged would be a no-op, so return
     // before claiming. Errors fall through to the claim path (which handles
-    // them), preserving the known-session + stub-compatible behavior.
+    // them), preserving the known-session + stub-compatible behavior. The
+    // cheap throttle read comes first so throttled polls skip the VCS read
+    // entirely; the locked claim below re-checks for concurrent callers.
     if (options?.vcs !== undefined) {
+      try {
+        const last = await storage.get(throttleKey(projectID, sessionID));
+        if (
+          typeof last === "number" &&
+          Number.isFinite(last) &&
+          now - last < windowMs
+        ) {
+          return false;
+        }
+      } catch {
+        // Fall through to the claim path below.
+      }
       try {
         const { branch, changes } = await readVcsSnapshot(
           options.vcs,

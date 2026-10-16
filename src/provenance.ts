@@ -24,6 +24,10 @@ export type Provenance = "user" | "tool" | "model" | "snapshot";
 
 const REMEMBER_COLON = /^\s*remember\s*:\s*(\S.*)$/i;
 const REMEMBER_THAT = /^\s*remember\s+that\b\s*(\S.*)$/i;
+// Prefix-only forms: recognize the directive even when stripping inline code
+// leaves no fact text (e.g. `remember: `foo`` strips to a bare prefix).
+const REMEMBER_COLON_PREFIX = /^\s*remember\s*:\s*/i;
+const REMEMBER_THAT_PREFIX = /^\s*remember\s+that\b/i;
 const FENCE_TOGGLE = /^\s*(`{3,}|~{3,})/;
 const BLOCKQUOTE = /^\s*>/;
 const INLINE_CODE = /`[^`\n]*`/g;
@@ -47,12 +51,16 @@ function visibleLines(text: string): string[] {
 /** Directive fact(s) from one visible line, or `undefined` when no match.
  * Detection runs on the inline-code-stripped line (so `` `remember: x` ``
  * does not trigger), but the fact is extracted from the original line so
- * ``remember: `foo` bar`` keeps `` `foo` `` instead of dropping it (L-5). */
+ * ``remember: `foo` bar`` keeps `` `foo` `` instead of dropping it (L-5).
+ * The prefix check accepts an inline-code-only fact (stripped to a bare
+ * prefix); extraction from the original line still recovers `` `foo` ``. */
 function directiveFact(line: string): string | undefined {
   const stripped = line.replace(INLINE_CODE, "");
   const onStripped =
     stripped.match(REMEMBER_COLON)?.[1]?.trim() !== undefined ||
-    stripped.match(REMEMBER_THAT)?.[1]?.trim() !== undefined;
+    stripped.match(REMEMBER_THAT)?.[1]?.trim() !== undefined ||
+    REMEMBER_COLON_PREFIX.test(stripped) ||
+    REMEMBER_THAT_PREFIX.test(stripped);
   if (!onStripped) return undefined;
   return (
     line.match(REMEMBER_COLON)?.[1]?.trim() ||

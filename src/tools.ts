@@ -299,21 +299,32 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
     let applied = 0;
     for (let i = 0; i < parsed.length; i += 1) {
       const candidate = parsed[i]!;
-      // Deny propagates verbatim (identity-preserved): callers and tests
-      // rely on the original permission error surfacing unwrapped.
-      await deps.permission.assert({
-        sessionID: context.sessionID,
-        agent: context.agent,
-        action: "memory_write",
-        resources: [candidate.file],
-        metadata: { line: candidate.line, source: candidate.source },
-        source: {
-          type: "tool",
-          messageID: context.messageID,
-          id: context.id,
-        },
-        save: [],
-      });
+      // Deny propagates as the SAME error object (identity-preserved:
+      // callers/tests rely on `rejects.toBe`), with the applied count
+      // attached so a denial after earlier writes is still resumable
+      // without blindly duplicating the durable prefix.
+      try {
+        await deps.permission.assert({
+          sessionID: context.sessionID,
+          agent: context.agent,
+          action: "memory_write",
+          resources: [candidate.file],
+          metadata: { line: candidate.line, source: candidate.source },
+          source: {
+            type: "tool",
+            messageID: context.messageID,
+            id: context.id,
+          },
+          save: [],
+        });
+      } catch (deny) {
+        try {
+          (deny as { memoryApplied?: number }).memoryApplied = applied;
+        } catch {
+          // Property attach is best-effort; the deny itself still propagates.
+        }
+        throw deny;
+      }
       try {
         await updateCapped(
           candidate.file,
@@ -331,7 +342,7 @@ export function createMemoryApplyExecute(deps: ApplyDeps) {
         );
       } catch (error) {
         throw new Error(
-          `[memory] memory_apply failed at candidate ${i} after ${applied} applied (${candidate.file} over cap or concurrent grow); ${parsed.length - applied - 1} candidate(s) remain pending and already-applied lines must not be re-applied blindly: ${(error as Error)?.message ?? error}`,
+          `[memory] memory_apply failed at candidate ${i} after ${applied} applied (${candidate.file} over cap or concurrent grow); ${parsed.length - applied} candidate(s) remain pending and already-applied lines must not be re-applied blindly: ${(error as Error)?.message ?? error}`,
         );
       }
       applied += 1;
