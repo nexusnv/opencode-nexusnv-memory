@@ -1,5 +1,9 @@
 # No-Fuss Memory Plugin for OpenCode V2
 
+[![npm version](https://img.shields.io/npm/v/opencode-nexusnv-memory)](https://www.npmjs.com/package/opencode-nexusnv-memory)
+[![CI](https://github.com/nexusnv/opencode-nexusnv-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/nexusnv/opencode-nexusnv-memory/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Local-first, zero-subscription, zero-daemon, zero-embeddings memory for OpenCode V2. Git-backed markdown is the source of truth; hooks are passive and budget-capped; curation is human-approved.
 
 ## What it remembers
@@ -116,3 +120,17 @@ Supported range: OpenCode `2.0.x` with `@opencode/plugin` pinned to the exact `2
 ## Uninstall
 
 Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
+
+## Releases (maintainers)
+
+Published to npm as [`opencode-nexusnv-memory`](https://www.npmjs.com/package/opencode-nexusnv-memory) (MIT, see `LICENSE`). The tarball ships `src/` (the `exports` entrypoint), `agents/`, `commands/`, `README.md`, `LICENSE`, and `CHANGELOG.md` only — tests, docs, and CI internals stay out via the `files` allowlist, enforced by the pack gate (`scripts/assert-pack.mjs`).
+
+1. Bump the version with `npm version <x> --no-git-tag-version` (updates `package.json` **and** `package-lock.json` together — editing `package.json` by hand leaves the lockfile out of sync and the release's `npm ci` rejects it) and add a `CHANGELOG.md` entry.
+2. Merge to `main` (CI must be green: typecheck, tests + coverage, gitleaks, audit, pack).
+3. Publish a GitHub Release off `main` with the tag `v<version>` matching the manifest — the `release` workflow refuses tags off other branches or mismatched versions, then re-runs the gates and runs `npm publish --provenance`.
+4. Verify: fresh dir, `npm install opencode-nexusnv-memory@<version>`, declare it in that project's config (`"plugins": ["opencode-nexusnv-memory"]`), then `opencode plugin list` shows `memory` (install alone does not register it).
+
+One-time token setup, in two phases (npm cannot scope a granular token to a package that does not exist yet):
+- **First release:** classic Automation token (able to publish new packages) as the repository secret `NPM_TOKEN`.
+- **After the package exists:** replace it with a granular token scoped to `opencode-nexusnv-memory` — permission **Read and write (publish and stage)** with **Bypass two-factor authentication** enabled (non-interactive CI publishes fail without both), short expiry.
+- Long-term: switch to npm trusted publishing (OIDC) and delete the token.

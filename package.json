@@ -3,6 +3,34 @@
   "version": "0.1.0",
   "description": "Local-first, zero-subscription, zero-daemon, zero-embeddings memory for OpenCode V2. Git-backed markdown is the source of truth; hooks are passive and budget-capped; curation is human-approved.",
   "type": "module",
+  "license": "MIT",
+  "author": "nexusnv",
+  "homepage": "https://github.com/nexusnv/opencode-nexusnv-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nexusnv/opencode-nexusnv-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nexusnv/opencode-nexusnv-memory/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "memory",
+    "ai-agent",
+    "markdown"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src/",
+    "agents/",
+    "commands/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
@@ -21,6 +49,5 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
-  },
-  "license": "MIT"
+  }
 }
