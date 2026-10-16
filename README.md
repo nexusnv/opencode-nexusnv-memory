@@ -130,7 +130,12 @@ Published to npm as [`opencode-nexusnv-memory`](https://www.npmjs.com/package/op
 3. Publish a GitHub Release off `main` with the tag `v<version>` matching the manifest — the `release` workflow refuses tags off other branches or mismatched versions, then re-runs the gates and runs `npm publish --provenance`.
 4. Verify: fresh dir, `npm install opencode-nexusnv-memory@<version>`, declare it in that project's config (`"plugins": ["opencode-nexusnv-memory"]`), then `opencode plugin list` shows `memory` (install alone does not register it).
 
-One-time token setup, in two phases (npm cannot scope a granular token to a package that does not exist yet):
-- **First release:** classic Automation token (able to publish new packages) as the repository secret `NPM_TOKEN`.
-- **After the package exists:** replace it with a granular token scoped to `opencode-nexusnv-memory` — permission **Read and write (publish and stage)** with **Bypass two-factor authentication** enabled (non-interactive CI publishes fail without both), short expiry.
-- Long-term: switch to npm trusted publishing (OIDC) and delete the token.
+Version discipline: each published version may go out exactly once. The manual bootstrap consumed `0.1.0`, so the existing `v0.1.0` GitHub Release must never be re-run through the workflow (it would attempt the same version and fail) — the first workflow-published release must bump to a higher version first.
+
+One-time setup — trusted publishing (no long-lived token):
+1. Publish `0.1.0` once with the manual bootstrap below (the package must exist before npm lets you register a publisher — same chicken-and-egg as tokens).
+2. On npmjs.com, open the package → Settings → Trusted Publisher → GitHub Actions, and register org `nexusnv`, repository `opencode-nexusnv-memory`, workflow file `release.yml` — with **direct publishing enabled** (configurations created after 2026-09-03 default to stage-only, which this workflow does not use). (`repository.url` in `package.json` already matches, which npm verifies.)
+3. From then on, releases publish via short-lived OIDC tokens minted per run (`id-token: write` on a minimal publish job that runs no dependency code; the workflow pins npm because OIDC needs npm ≥ 11.5.1).
+4. Break-glass (OIDC down or misconfigured): Actions tab → run the `release` workflow manually from `main` with `token_fallback` enabled. It runs the same gates but publishes the asserted tarball with `NPM_TOKEN` instead of OIDC — keep that secret (granular, publish+stage, 2FA bypass, short expiry) for exactly this path, and out of the normal OIDC runs. Horizon: npm phases out direct publishing with granular tokens in January 2027 — if OIDC is still unusable then, switch this fallback to the staged flow (`npm stage publish` + maintainer approval) instead of renewing the token.
+
+Manual bootstrap (first publish only — requires your browser/OTP, CI cannot do it): `npm publish --access public --provenance=false` from green `main` (provenance needs CI OIDC, so the bootstrap version ships without the attestation; every CI release after it gets one).

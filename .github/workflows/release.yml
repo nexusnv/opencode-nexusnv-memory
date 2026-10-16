@@ -1,22 +1,36 @@
 name: release
 
-# Release bootstrap (see README "Releases"): repository secret NPM_TOKEN
-# starts as a publish-capable token for the FIRST release (npm cannot scope
-# a granular token to a package that does not exist yet), then is replaced
-# with a package-scoped granular token. This workflow runs the full gates
-# and publishes with provenance. Long-term upgrade path: switch to npm
-# trusted publishing (OIDC) and drop the token.
+# Two jobs by design (see Sourcery/CodeRabbit review on PR #11):
+# - build: full gates + tag guards. NO id-token here, so dependency
+#   lifecycle scripts can never run in a job that can mint publish
+#   credentials.
+# - publish: minimal OIDC-only job. No `npm ci` (no dependency code runs
+#   here at all), no registry-url (setup-node would otherwise write an
+#   auth entry referencing NODE_AUTH_TOKEN, which makes npm skip the OIDC
+#   exchange), pinned npm (OIDC needs >= 11.5.1; `latest` is mutable).
+#
+# Break-glass: workflow_dispatch with token_fallback runs the same gates
+# but publishes with NPM_TOKEN instead of OIDC (see README "Releases").
 
 permissions:
   contents: read
-  id-token: write
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      token_fallback:
+        description: "Break-glass: publish with NPM_TOKEN instead of OIDC"
+        type: boolean
+        default: false
 
 jobs:
-  publish:
+  # Manual dispatches are main-only: the tag guards below run on release
+  # events, so without this gate a dispatch from any branch or tag could
+  # publish unreviewed code. Release tags bypass this (their own guards).
+  build:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
@@ -27,12 +41,12 @@ jobs:
         with:
           node-version: 24.x
           cache: npm
-          registry-url: https://registry.npmjs.org
-      # A Release cut from a tag off another branch would publish unreviewed
-      # code: the tagged commit must be on main, and the tag (minus leading
-      # v) must equal the manifest version (npm cannot reuse a version, so a
-      # mismatch would either publish the wrong version or fail late).
+      # Release events only: a Release cut from a tag off another branch
+      # would publish unreviewed code, and a tag/manifest mismatch would
+      # publish the wrong version (npm cannot reuse versions). Manual
+      # dispatches run from main by procedure, so there is no tag to check.
       - name: assert release tag matches main and manifest
+        if: github.event_name == 'release'
         run: |
           TAG="${GITHUB_REF_NAME}"
           test "$(git rev-list -n1 "$TAG")" = "$(git rev-parse HEAD)" || { echo "release tag $TAG does not point at HEAD"; exit 1; }
@@ -41,9 +55,53 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test:coverage
-      - run: |
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.x
+      # Self-check: any configured token auth makes npm skip OIDC, so refuse
+      # to publish rather than fail late with an auth error. (Checked in
+      # the npmrc files directly: `npm config list` does not surface
+      # registry-scoped auth keys.)
+      - name: assert no token auth configured (OIDC path clear)
+        if: ${{ !inputs.token_fallback }}
+        run: |
+          hit=""
+          for f in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" .npmrc; do
+            if [ -n "$f" ] && [ -f "$f" ] && grep -qE '_authToken|_password' "$f"; then
+              hit="$f"
+            fi
+          done
+          if [ -n "$hit" ]; then
+            echo "token auth is configured in $hit; refusing OIDC publish"; exit 1
+          fi
+          echo "no token auth configured (OIDC path clear)"
+      - run: npm install -g npm@12.2.0
+      - name: pack and assert entry point
+        run: |
           TARBALL=$(npm pack --silent)
           node scripts/assert-pack.mjs "$TARBALL"
-      - run: npm publish --provenance --access public
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+      - name: publish via OIDC
+        if: ${{ !inputs.token_fallback }}
+        run: npm publish "$TARBALL" --provenance --access public
+      - name: publish via token fallback (break-glass only)
+        if: ${{ inputs.token_fallback }}
+        # Bare NODE_AUTH_TOKEN does not configure registry-scoped auth on a
+        # clean runner (and npm would try OIDC first), so write the entry
+        # explicitly. No provenance here: attestation needs OIDC identity.
+        run: |
+          npm config set '//registry.npmjs.org/:_authToken' "${NODE_AUTH_TOKEN}" --location=user
+          npm publish "$TARBALL" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
