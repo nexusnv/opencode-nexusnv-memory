@@ -13,12 +13,13 @@ import {
   optionsSnippet,
   permissionsSnippet,
 } from "../src/templates.js";
+import { MEMORY_METRICS_COMMAND_DESCRIPTION } from "../src/metrics.js";
 
 const root = resolve(import.meta.dirname!, "..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
 const pkgPath = resolve(root, "package.json");
 
-/** Minimal storage fake for the setup-wiring wiring test: setup only
+/** Minimal storage fake for the setup wiring test: setup only
  * constructs the bump adapter over it (bumps fire on hooks later). */
 const fakeStorageForSetup = {
   get: async (_key: string) => undefined,
@@ -208,11 +209,12 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
       },
     });
 
-    // Command editor received BOTH plugin commands (commands together in
-    // setup: /memory-review first, then /memory-metrics).
-    expect([...commands.keys()]).toContain("memory-review");
-    expect(commands.has("memory-metrics"), "memory-metrics registered").toBe(
-      true,
+    // Command editor received BOTH plugin commands, in setup order
+    // (memory-review first, then memory-metrics).
+    expect([...commands.keys()]).toEqual(["memory-review", "memory-metrics"]);
+    // And the registered description is exactly the plugin constant.
+    expect(commands.get("memory-metrics")).toBe(
+      MEMORY_METRICS_COMMAND_DESCRIPTION,
     );
     // The file-based metrics stub mirrors the review stub's contract.
     expect(

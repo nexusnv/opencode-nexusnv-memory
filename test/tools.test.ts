@@ -112,7 +112,12 @@ async function freshRoot(): Promise<string> {
  * Drain every queued fire-and-forget metrics write before asserting on
  * counter totals: `bump` schedules its locked body at call time, so one
  * extra lock body rides the chain strictly after every pending bump of
- * this test process.
+ * this test process. This drains the bump WRITE bodies only — it does NOT
+ * drain a piggyback prune whose removal phase enters the lock after its
+ * scan has resolved (the prune's scan runs outside the lock, so a prune
+ * scheduled from an earlier bump can still be mid-scan when this body
+ * riders past it; see the two-step `settle()` in metrics/hooks tests for
+ * the fuller drain pattern when prunes are in flight).
  */
 async function flushMetrics(): Promise<void> {
   await withWriteLock(async () => undefined);

@@ -818,10 +818,15 @@ describe("metrics taps (M-T3)", () => {
         await store.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
       ).toBe(1);
       expect(armWriteCount(store)).toBe(1);
-      // Total + day pair for every counter bumped this run (one UTC day).
+      // Total + day pair for every counter bumped this run. The expected
+      // stamp is derived from the data (the buckets the bumps themselves
+      // wrote), never from a re-read clock: a UTC midnight crossing between
+      // the bump and this assertion could otherwise desync the two and
+      // flake (same pattern as the tools test fix).
       const days = await readDays(store, PROJECT);
-      const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-      const bucket = days[stamp] ?? {};
+      const stamps = Object.keys(days);
+      expect(stamps.length).toBe(1);
+      const bucket = stamps[0] === undefined ? {} : days[stamps[0]]!;
       for (const [name, count] of Object.entries(totals)) {
         expect(bucket[name], `day pair for ${name}`).toBe(count);
       }

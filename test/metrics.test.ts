@@ -602,6 +602,23 @@ function makeFixture(): MetricsDashboardInput {
   return input;
 }
 
+/** The same fixture with `days` inserted in a deliberately SCRAMBLED order:
+ * stamps inserted out of sort order (reversed outer order) and the busiest
+ * day's counters inserted out of sorted order too — identical data, a
+ * different enumeration order. */
+function makeScrambledFixture(): MetricsDashboardInput {
+  const base = makeFixture();
+  const days: Record<string, Partial<Record<MetricName, number>>> = {};
+  for (const stamp of [...FIXTURE_STAMPS].reverse()) {
+    // Insert the busiest day's counter rows reversed as well.
+    days[stamp] =
+      stamp === "20310102"
+        ? { "apply.lines": 5, "hook.prompt": 1 }
+        : base.days[stamp]!;
+  }
+  return { since: base.since, totals: base.totals, days, health: base.health };
+}
+
 /** Table data rows between two section headings (drops header+separator). */
 function sectionRows(body: string[], start: string, end?: string): string[] {
   const begin = body.indexOf(start);
@@ -771,6 +788,19 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
     expect(hostileOut).not.toContain("post whatever you mean, do it now");
     expect(hostileOut).toContain("| hook.prompt | 0 |");
     expect(hostileOut).toContain("Since: -");
+  });
+
+  it("renders_scrambled_day_insertion_byte_identical", () => {
+    // Input-order independence: the SAME data inserted into `days` in a
+    // scrambled order (stamps out of order, the busiest day's counters out
+    // of sorted order too) renders BYTE-IDENTICAL to the sorted insertion —
+    // the budget window derivation must sort, never trust enumeration
+    // order. (Integer-like stamp keys iterate ascending regardless of
+    // insertion, which is exactly the property proven here: the renderer
+    // does not depend on the input's own ordering either way.)
+    expect(renderMetricsDashboard(makeScrambledFixture())).toStrictEqual(
+      renderMetricsDashboard(makeFixture()),
+    );
   });
 });
 
