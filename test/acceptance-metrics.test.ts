@@ -607,6 +607,13 @@ interface RunRecord {
 
 let run: RunRecord | undefined;
 let disposableRoots: string[] = [];
+// The driver's own tmpdir, registered the moment `driveUsageRun` allocates
+// it so a mid-driver failure cannot leak it. It is disposed in the SAME
+// afterAll that disposes `run` — never into `disposableRoots`, whose
+// afterEach sweep must not delete the live run's root between gates
+// (later gates, e.g. te_gate's real metrics executor, still read disk
+// under it).
+let earlyDisposable: string | undefined;
 
 function requireRun(): RunRecord {
   expect(run, "the acceptance driver run must have executed first").toBeTruthy();
@@ -626,6 +633,11 @@ async function driveUsageRun(
 
   try {
     const projectRoot = await mkdtemp(join(tmpdir(), "acc-metrics-"));
+    // Cleanup-on-failure: register the root for disposal AT ALLOCATION
+    // TIME, before phase 1 — a driver failure mid-run no longer leaks the
+    // tmpdir (afterAll disposes it exactly once; green runs may double-rm
+    // harmlessly via force + catch).
+    earlyDisposable = projectRoot;
     const memoryRoot = join(projectRoot, MEMORY_DIR);
 
     /* -- Registration (both real setups share one store/project) ---- */
@@ -1233,7 +1245,9 @@ async function driveUsageRun(
     if (dataChecks) {
       expect(record.armedAfterContext).toBe(true);
       expect(record.armClearedAfterRecall).toBe(true);
-      // Both commands were registered with the plugin's fixed descriptions.
+      // Registration identity: only the fixed NAME here — the
+      // descriptions are asserted at the wiring gate (above) and in
+      // cf_gate.
       expect(record.metricsCommand!.name).toBe(MEMORY_METRICS_COMMAND_NAME);
     }
 
@@ -1295,6 +1309,13 @@ afterAll(async () => {
   } finally {
     if (run?.projectRoot) {
       await rm(run.projectRoot, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
+    // The allocation-time registration above (covers a mid-driver
+    // failure, where `run` was never assigned).
+    if (earlyDisposable) {
+      await rm(earlyDisposable, { recursive: true, force: true }).catch(
         () => undefined,
       );
     }
@@ -1574,7 +1595,9 @@ describe("acceptance-metrics §9 gates (real plugin.setup end-to-end)", () => {
 
     // Saturate the shared write chain: many locked bodies parked until the
     // gate opens (an unfold-wait, so bodies started after the release see
-    // the opened gate instead of racing it).
+    // the opened gate instead of racing it). A mid-test failure would leak
+    // those parked bodies — bounded: the file's beforeEach calls
+    // resetWriteChainForTests, which orphans them before the next test.
     const gate = { opened: false, waiters: [] as Array<() => void> };
     for (let i = 0; i < 32; i += 1) {
       void withWriteLock(async () => {

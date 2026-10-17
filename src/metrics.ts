@@ -575,6 +575,13 @@ export interface MemoryHealth {
  * and every record **value** is a `number` (ADR-0008 numbers-only rule,
  * mirrored at the type level). `since` is the storage layer's ISO stamp —
  * the renderer validates it against the same ISO regex before emitting.
+ * Row-content safety does NOT follow from the loose outer key types alone
+ * (the `days` stamp keys are bare `string`s, and a cast can plant
+ * out-of-vocabulary names in a record): at runtime it holds via the
+ * `DAY_STAMP`/`ISO_TIMESTAMP` filters and the vocabulary-driven
+ * iteration — the hostile-input render inside
+ * `renders_deterministically_and_has_no_content_channels` (test/
+ * metrics.test.ts) is the standing guard.
  */
 export interface MetricsDashboardInput {
   readonly since: string | undefined;

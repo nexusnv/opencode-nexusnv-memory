@@ -211,6 +211,14 @@ export default Plugin.define({
           const rawBrief = brief === "" ? [] : brief.split("\n");
           let briefLines = rawBrief;
           let keepStatus = status !== undefined;
+          // Classifier flags, set at their true sites (M-T3 hygiene): the
+          // truncation classifier is "a budget branch ran" and the status
+          // drop classifier is "a computed status line was dropped below" —
+          // never a reference comparison against `rawBrief`
+          // (`truncateLinesWithNotice` returning a fresh array is not a
+          // documented contract to lean on).
+          let briefTruncated = false;
+          let statusDroppedByBudget = false;
           const hintKept = hint !== undefined;
           const hintCount = hintKept ? 1 : 0;
           const total = () =>
@@ -220,20 +228,27 @@ export default Plugin.define({
               rawBrief,
               Math.max(0, budget - (keepStatus ? 1 : 0) - hintCount),
             );
+            briefTruncated = true;
           }
           if (total() > budget) {
+            // Only a COMPUTED status line counts as dropped by the budget:
+            // with no status, keepStatus is false from the start and there
+            // is nothing to drop.
+            if (keepStatus) statusDroppedByBudget = true;
             keepStatus = false;
             briefLines = truncateLinesWithNotice(
               rawBrief,
               Math.max(0, budget - hintCount),
             );
+            briefTruncated = true;
           }
 
-          // M-T3 taps below: classification uses only these in-scope
-          // variables. Truncation = a budget branch ran and actually cut
-          // brief content (a vacuous `truncateLinesWithNotice` on an empty
-          // brief must not claim `brief.truncated`).
-          if (rawBrief.length > 0 && briefLines !== rawBrief) {
+          // M-T3 taps below: classification uses only these flags and
+          // in-scope variables. Truncation = a budget branch ran
+          // (briefTruncated) and actually cut brief content
+          // (`rawBrief.length > 0`): a vacuous `truncateLinesWithNotice`
+          // on an empty brief must not claim `brief.truncated`.
+          if (briefTruncated && rawBrief.length > 0) {
             bump("brief.truncated");
           }
 
@@ -247,9 +262,10 @@ export default Plugin.define({
           if (keepStatus && status !== undefined) {
             event.system.push({ type: "text", text: status });
             bump("status.shown");
-          } else if (status !== undefined) {
-            // A computed status line dropped by the budget (keepStatus is
-            // only ever set false above): never dropped on a hint hit.
+          } else if (statusDroppedByBudget) {
+            // A computed status line dropped by the budget
+            // (statusDroppedByBudget is set exactly where keepStatus
+            // flips false above): never dropped on a hint hit.
             bump("status.dropped");
           }
           if (hint !== undefined) {
@@ -338,6 +354,16 @@ export default Plugin.define({
             case "skipped":
               // No counter for a skip (non-error/disable paths).
               break;
+            default: {
+              // Exhaustiveness guard: a new CaptureReason must extend
+              // this mapping explicitly (TS narrows an unhandled reason
+              // to `never` here, so the addition fails to compile
+              // instead of bumping nothing forever). Unreachable with
+              // the current union — and this hook body's try/catch
+              // catches any belt-and-braces throw anyway.
+              const never: never = outcome.reason;
+              throw new Error(`unreachable outcome reason: ${String(never)}`);
+            }
           }
         } catch (error) {
           logDiagnostic(error);

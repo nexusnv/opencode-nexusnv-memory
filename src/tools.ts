@@ -201,15 +201,20 @@ export interface ApplyDeps extends CappedFileOptions {
  * documents the classification contract). Any other successful read is a
  * `handoffs/…` path (the only allowlist remainder) → the handoff aggregate.
  */
+// Null-prototype lookup keyed dictionary: a bare `constructor` probe
+// returns undefined, never the inherited `Object` function — unmapped
+// names must keep classifying to the handoff aggregate, fail-closed.
 const RECALL_FILE_COUNTERS: Readonly<Record<string, MetricName | undefined>> =
-  {
-    "INDEX.md": "recall.INDEX.md",
-    "activeContext.md": "recall.activeContext.md",
-    "decisions.md": "recall.decisions.md",
-    "architecture.md": "recall.architecture.md",
-    "style.md": "recall.style.md",
-    "issues.md": "recall.issues.md",
-  };
+  Object.freeze(
+    Object.assign(Object.create(null), {
+      "INDEX.md": "recall.INDEX.md",
+      "activeContext.md": "recall.activeContext.md",
+      "decisions.md": "recall.decisions.md",
+      "architecture.md": "recall.architecture.md",
+      "style.md": "recall.style.md",
+      "issues.md": "recall.issues.md",
+    }),
+  );
 
 function candidateAt(candidates: unknown, index: number): ApplyCandidate {
   const raw = (candidates as readonly unknown[])[index] as Record<
@@ -258,36 +263,44 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
     context: ApplyToolContext,
   ): Promise<{ content: string }> => {
     const file = (input as { file?: unknown }).file as string;
+    // The catch scope is exactly the readCapped rejection: `recall.error`
+    // marks a failed READ only, then the SAME error object propagates
+    // unchanged (identity preserved — metrics never mask a failure). All
+    // success bookkeeping lives outside the try so the failure counter's
+    // meaning cannot widen to bookkeeping throws.
+    let content: string;
     try {
-      const content = await readCapped(file, {
+      content = await readCapped(file, {
         memoryRoot: deps.memoryRoot,
         indexLines: deps.indexLines,
         fileLines: deps.fileLines,
       });
-      // Success counter: the six-name classifier → literal name, else the
-      // handoff aggregate.
-      deps.bump?.(RECALL_FILE_COUNTERS[file] ?? "recall.handoff");
-      // Hint→recall conversion (§5.12). Clear is awaited BEFORE the bump
-      // so a crashed process replays at most one uncounted flag, never a
-      // double count.
-      if (deps.arm) {
-        try {
-          const armed = await deps.arm.readArmed(context.sessionID);
-          if (armed) {
-            await deps.arm.clearArm(context.sessionID);
-            deps.bump?.("hint.recall");
-          }
-        } catch {
-          // Best-effort conversion: an arm read/clear failure must never
-          // fail a recall that already succeeded.
-        }
-      }
-      return toolResult(content);
     } catch (error) {
-      // Rejection counter, then the SAME error object propagates unchanged.
       deps.bump?.("recall.error");
       throw error;
     }
+    // Success counter: the six-name classifier → literal name, else the
+    // handoff aggregate.
+    deps.bump?.(RECALL_FILE_COUNTERS[file] ?? "recall.handoff");
+    // Hint→recall conversion (§5.12). Clear is awaited BEFORE the bump
+    // so a crashed process replays at most one uncounted flag, never a
+    // double count.
+    if (deps.arm) {
+      try {
+        const armed = await deps.arm.readArmed(context.sessionID);
+        if (armed) {
+          await deps.arm.clearArm(context.sessionID);
+          deps.bump?.("hint.recall");
+        }
+      } catch {
+        // Best-effort conversion: an arm read/clear failure must never
+        // fail a recall that already succeeded. The inner catch defends
+        // the *port* contract — `readArmed` is a plain get that can
+        // reject, while `clearArm` is already never-throw at the impl
+        // layer (ADR-0008 §3) — belt-and-braces, not duplication.
+      }
+    }
+    return toolResult(content);
   };
 }
 

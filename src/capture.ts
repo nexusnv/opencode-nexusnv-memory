@@ -1453,6 +1453,16 @@ function bumpSnapshotMetrics(
       break;
     case "skipped":
       break;
+    default: {
+      // Exhaustiveness guard: a new SnapshotReason must extend this
+      // mapping explicitly — TS narrows an unhandled reason to `never`
+      // here, so the addition fails to compile instead of bumping nothing
+      // forever. Unreachable with the current union; the call sites sit
+      // inside never-throw envelopes regardless (dispatchEvent's own
+      // try/catch, snapshotIfDue's outer catch).
+      const never: never = reason;
+      throw new Error(`unreachable outcome reason: ${String(never)}`);
+    }
   }
 }
 
@@ -1476,6 +1486,14 @@ function bumpCompactionCaptureMetrics(
       break;
     case "skipped":
       break;
+    default: {
+      // Exhaustiveness guard: a new CompactionReason must extend this
+      // mapping explicitly (same never-assignment compile error as the
+      // snapshot mapper above); unreachable with the current union — and
+      // its call site sits inside dispatchEvent's own try/catch anyway.
+      const never: never = reason;
+      throw new Error(`unreachable outcome reason: ${String(never)}`);
+    }
   }
 }
 
