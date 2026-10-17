@@ -22,7 +22,7 @@ import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
 import { registerMemoryTools } from "./tools.js";
-import { createBump, setArm } from "./metrics.js";
+import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
@@ -350,8 +350,15 @@ export default Plugin.define({
     registrations.push(await registerMemoryTools(ctx));
 
     // /memory-review command: read+propose phase only — writes nothing,
-    // never resets counters (only memory_apply resets, incl. []).
+    // never resets counters (only memory_apply resets, incl. []); its one
+    // §5.12 exception is the count-only `review.invoked` metrics bump
+    // (ADR-0008: diagnostics, never content, never a memory write).
     registrations.push(await registerMemoryReview(ctx));
+
+    // /memory-metrics command: local-only count dashboard — never writes a
+    // memory file (wipes counter keys only on `reset`); deps resolve per
+    // call from the live context (spec P22).
+    registrations.push(await registerMetricsCommand(ctx));
 
     // Event subscriber: idle/compaction capture + sampled diagnostics
     // (spec §§5.7, 5.9). Fire-and-forget on the ONE setup controller: the

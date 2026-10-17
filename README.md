@@ -103,6 +103,16 @@ Recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
 - **per-prompt with content = 90 lines** — static + `INDEX` ≤30 (once per prompt) + brief ≤48 + hint ≤1 + status ≤1. The injectable portion (INDEX + brief + hint + status) is capped at `injectBudgetLines` = 80.
 - **session-total = per-prompt × model steps** — the `context` hook re-emits brief + status on every model call including tool-driven continuations, so 4 model steps ≈ 360 lines. The hint is throttled to once per prompt/session (`<projectID>/hint/<sessionID>/<promptHash>`).
 
+## Metrics (local-only)
+
+The plugin measures its own intervention for your eyes only — count-only, on-machine, never sent anywhere (ADR-0008). Explicit calls counted: `memory_recall`/`memory_apply`/`memory_metrics` tool calls, `/memory-review` invocations, and `/memory-metrics` renders/resets. Behind the scenes: hook activity (prompt, context, compaction, event-driven capture), budget-cascade outcomes (brief truncation, status sacrifice), capture results (captured/duplicate/retry/failed), and the hint→recall conversion. Every stored value is a plain number — no prompt text, no tool output, no captured paths, no identities, ever — and the dashboards report on-disk health as line/entry counts only.
+
+The `ctx.storage` namespace stays in the plugin-scoped storage under the OpenCode user data dir (e.g. `~/.local/share/opencode/storage/<plugin>/…`), inside the `<projectID>/metrics/…` keys: monotonic totals, UTC day buckets pruned after 90 days, and a lazy first-write `since` stamp. Collection is always on — deliberately no sixth option (ADR-0006's five-option contract stands; ADR-0008) — and the control is:
+
+- `/memory-metrics` — renders the dashboard (`Since`, *Explicit calls*, *Behind the scenes*, *Memory health*, *Budget pressure*) and posts it into the session with no model turn; on a post failure it degrades to one `memory_metrics` echo turn (spec §5.5 fallback).
+- `/memory-metrics reset` — wipes the `<projectID>/metrics/…` keys and re-opens a fresh `since` window.
+- `memory_metrics` — the same read-only table as a tool (nothing on-disk changes to serve it).
+
 ## Deploy check (event delivery)
 
 `session.idle` and the `session.compaction.*` family are type-proven against `@opencode/schema` (G1); delivery still needs a runtime confirmation. At deploy, log observed `event.type` values once from the subscriber loop and confirm both `session.idle` and `session.compaction.ended` arrive:
@@ -113,13 +123,21 @@ Recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
 
 If either primary type is missing, the resilience fallbacks still hold (throttled `context`-hook snapshot writer for idle; pointer-only handoff via `/memory-review` for a missing produced summary — pre-compaction state is already durable on disk). The VCS startup shape check is warn-only and never throws, so a missing/odd `ctx.vcs` surface degrades to `{ branch: "unknown", changes: [] }` instead of breaking load.
 
+`/memory-metrics` has its own deploy check (G-M1): whether the TUI renders a synthetic post without spawning a model turn is not type-provable, so the first resolved post of the process logs one line — confirm the table rendered without a model turn:
+
+```
+[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn
+```
+
+A rejected post logs nothing (the line claims "posted"); the command then degrades to the one-model-turn `memory_metrics` echo fallback.
+
 ## Compatibility
 
 Supported range: OpenCode `2.0.x` with `@opencode/plugin` pinned to the exact `2.0.29` in `package.json` (never `latest`). The published package form (`"plugins": ["opencode-nexusnv-memory"]`) loads the same `Plugin.define({ id: "memory", setup })` entrypoint as the drop-in; verify with `opencode plugin list` (shows `memory`). Bump the pin deliberately when adopting a newer API contract and re-run the §9 gates (`npx tsc --noEmit`, `npx vitest run`).
 
 ## Uninstall
 
-Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
+Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The `ctx.storage` ledger is harmlessly orphaned; the metrics counters (`<projectID>/metrics/…`) are orphaned like the ledger — harmless, on-disk numbers only — and running `/memory-metrics reset` before uninstalling clears them if you want. No daemon, server, keys, or index to purge. Acceptance: `opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
 
 ## Releases (maintainers)
 
