@@ -21,6 +21,7 @@ import {
   readTotals,
   renderMetricsDashboard,
   resetMetricsStateForTests,
+  scanAll,
   setArm,
   sinceKey,
   totalKey,
@@ -838,6 +839,36 @@ describe("collectHealth (§5.12 renderer contract: counts, never bodies)", () =>
     expect(health.seen).toBe(7);
     expect(health.decisionsLines).toBe(5);
 
+    // Caps are the configured writer caps, not dashboard defaults: a user
+    // with indexLines: 10 / fileLines: 2 must see those numbers, and the
+    // unbounded file keeps omitting its cap either way.
+    const overridden = await collectHealth(root, storage, PROJECT, {
+      indexLines: 10,
+      fileLines: 2,
+    });
+    const overriddenByName = new Map(
+      overridden.files.map((file) => [file.file, file]),
+    );
+    expect(overriddenByName.get("INDEX.md")).toEqual({
+      file: "INDEX.md",
+      lines: 3,
+      cap: 10,
+    });
+    expect(overriddenByName.get("activeContext.md")).toEqual({
+      file: "activeContext.md",
+      lines: 7,
+      cap: 2,
+    });
+    expect(overriddenByName.get("style.md")).toEqual({
+      file: "style.md",
+      lines: 0,
+      cap: 2,
+    });
+    expect(overriddenByName.get("decisions.md")).toEqual({
+      file: "decisions.md",
+      lines: 5,
+    });
+
     // Counts only: no file body or content string can appear anywhere.
     const serialized = JSON.stringify(health);
     expect(serialized).not.toContain("SECRET-CONTENT-MARKER");
@@ -881,5 +912,18 @@ describe("collectHealth (§5.12 renderer contract: counts, never bodies)", () =>
     expect(health.seen).toBe(500);
     expect(health.handoffs).toBe(0);
     expect(health.decisionsLines).toBe(0);
+
+    // The scan result itself honors its limit across page granularity: the
+    // suite's fake pages in 3-entry steps, so a limit of 7 stops at the
+    // 9th collected entry and must resolve exactly the first 7 keys — 9
+    // would mean a full extra page slipped past the bound.
+    const nineSeen = new FakeStorage();
+    for (let i = 0; i < 9; i += 1) {
+      await nineSeen.set(`${PROJECT}/seen/id-${i}`, i);
+    }
+    const sliced = await scanAll(nineSeen, `${PROJECT}/seen/`, 7);
+    expect(sliced).toHaveLength(7);
+    expect(sliced[0]?.key).toBe(`${PROJECT}/seen/id-0`);
+    expect(sliced[6]?.key).toBe(`${PROJECT}/seen/id-6`);
   });
 });

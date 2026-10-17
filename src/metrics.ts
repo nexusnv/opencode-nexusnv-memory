@@ -35,7 +35,7 @@ import {
   resolveMemoryRoot,
   withWriteLock,
 } from "./files.js";
-import { getPending, type LedgerStorage } from "./capture.js";
+import { getPending, SEEN_LIMIT, type LedgerStorage } from "./capture.js";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import type { Plugin } from "@opencode/plugin";
 
@@ -272,9 +272,16 @@ function sortRecord(record: Record<string, number>): Record<string, number> {
   return out;
 }
 
-/** Drain a paginated scan via `after`/`next` (modeled on the seen prune),
- * collecting at most `limit` entries when given (hard cap mid-pagination). */
-async function scanAll(
+/**
+ * Drain a paginated scan via `after`/`next` (modeled on the seen prune),
+ * collecting at most `limit` entries when given. The RESULT never exceeds
+ * `limit`, even when one page spans past it (a port pages in
+ * page-size steps — the trailing slice enforces the bound); the loop
+ * merely stops early where it can. Exported as the module's shared
+ * fail-closed scan walker so the page-granular slice contract is
+ * directly testable.
+ */
+export async function scanAll(
   storage: LedgerStorage,
   prefix: string,
   limit = Number.POSITIVE_INFINITY,
@@ -295,7 +302,9 @@ async function scanAll(
     if (all.length >= limit) break;
     after = page.next;
   }
-  return all;
+  // The hard cap: a page-granular port can overshoot the loop break by up
+  // to one whole page, so trim the result to the limit regardless.
+  return all.length > limit ? all.slice(0, limit) : all;
 }
 
 /** Total counters (`Record<name, int>`); unknown names dropped, name-sorted. */
@@ -521,9 +530,6 @@ const BEHIND_THE_SCENES_NAMES: ReadonlyArray<MetricName> =
 /** Last 7 UTC day stamps surface in the budget-pressure view (§5.12). */
 const BUDGET_WINDOW_DAYS = 7;
 
-/** Seen-set size is reported at the ledger's ≤500 bound (§6 data model). */
-const SEEN_SCAN_CAP = 500;
-
 /**
  * A pure, deterministic markdown dashboard over `{since, totals, days,
  * health}` — §5.12 renderer contract: no fs, no storage, no clock inside
@@ -653,16 +659,18 @@ async function countDirEntries(root: string, dir: string): Promise<number> {
 
 /**
  * Seen-set size via paginated `scan` (same `after`/`next` walk the readers
- * use), rendered as min(true size, 500): the ledger already prunes to 500
- * (§6), so the dashboard never needs to page past the bound.
+ * use), bounded by the ledger's own `SEEN_LIMIT` (§6: the seen set prunes
+ * to 500, so the dashboard never needs to page past that bound).
  */
 async function countSeen(
   storage: LedgerStorage,
   projectID: string,
 ): Promise<number> {
   const prefix = `${projectPrefix(projectID)}seen/`;
-  const entries = await scanAll(storage, prefix, SEEN_SCAN_CAP);
-  return Math.min(entries.length, SEEN_SCAN_CAP);
+  // `scanAll`'s contract keeps the result at `SEEN_LIMIT` even when the
+  // port's final page would span past it — no second clamp needed here.
+  const entries = await scanAll(storage, prefix, SEEN_LIMIT);
+  return entries.length;
 }
 
 /**
@@ -673,25 +681,32 @@ async function countSeen(
  * no file content ever leaves this function. Storage errors propagate the
  * same way `readTotals`/`readDays` do (the executor wraps them); fs misses
  * resolve to zero counts rather than failing the render.
+ *
+ * `caps` are the line caps the writers actually enforce: callers that
+ * parse user options pass `parseMemoryOptions(ctx.options)` so the health
+ * rows report the user's `indexLines`/`fileLines` — a configured cap is a
+ * fact about this install, not a dashboard default. The config defaults
+ * apply when omitted.
  */
 export async function collectHealth(
   memoryRoot: string,
   storage: LedgerStorage,
   projectID: string,
+  caps?: { indexLines: number; fileLines: number },
 ): Promise<MemoryHealth> {
   const root = resolveMemoryRoot(memoryRoot);
+  // Defaults match `capsOf`'s fallback in `files.ts` — the same values the
+  // writers run with when no user option overrides them.
+  const indexLines = caps?.indexLines ?? DEFAULT_MEMORY_OPTIONS.indexLines;
+  const fileLines = caps?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
   let decisionsLines = 0;
   const files: MemoryHealthFileLine[] = [];
   for (const file of MEMORY_HEALTH_FILES) {
     const lines = await readFileLineCount(root, file);
     if (file === "decisions.md") decisionsLines = lines;
-    // Same caps the writers enforce: the config defaults through
-    // `files.ts`'s own cap resolver (decisions.md → Infinity → omitted).
-    const cap = getCapForFile(
-      file,
-      DEFAULT_MEMORY_OPTIONS.indexLines,
-      DEFAULT_MEMORY_OPTIONS.fileLines,
-    );
+    // Same caps the writers enforce, through `files.ts`'s own cap resolver
+    // (decisions.md → Infinity → cap omitted).
+    const cap = getCapForFile(file, indexLines, fileLines);
     files.push(
       Number.isFinite(cap) ? { file, lines, cap } : { file, lines },
     );
