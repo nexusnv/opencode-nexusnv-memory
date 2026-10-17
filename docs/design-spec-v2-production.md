@@ -92,6 +92,7 @@ These are now fixed across the document set; listed so reviewers can see what ch
 | P21 | `source:user` fast path had no execution site; the `prompt` hook was declared "pure (reads only)", and the `AGENTS.md` block told the agent to write | Assigned to the `prompt` hook as one bounded, serialized, never-throw, ledger-idempotent append; the plugin is the sole writer and the `AGENTS.md` block no longer instructs the agent to write | §5, §5.1, §5.11, ADR-0004 |
 | P22 | Memory root resolved once from `ctx.location`; event handlers had no location filter | `ctx.location` is instance-scoped, not per-session; resolve the root per invocation and drop foreign events from the server-wide stream | §5.7, §5.9, §7 |
 | P23 | "Application is deterministic via `writeCapped`" but the command cannot await approval | Added the plugin-owned `memory_apply` tool: one `ctx.permission.assert` per candidate line, then `writeCapped` | §5.5, §5.11 |
+| P24 | Absolutes now false after ADR-0008: "prompt hook … apart from **one** bounded side effect" / "context … read-only apart from its … writer to `handoffs/` only" / "review … writes nothing" / "read+propose phase performs no writes" | Carved out the count-only metrics bumps (§5.12: fire-and-forget, never-throw `ctx.storage` counters, numbers only — diagnostics, never memory content, never a memory file) at every abovementioned site; memory-write semantics of the underlying gates are unchanged | §5, §5.1, §5.5, §5.11, §9, ADR-0007, ADR-0008 |
 
 ### 1.3 P1 runtime-verification gates (must pass before merge)
 
@@ -138,9 +139,11 @@ runtime log remains a deployment sanity check.
   whether the TUI renders the post without spawning a model turn is not type-provable. The **first
   synthetic post of the process** (which is the deploy event) logs one line —
   `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn` —
-  mirroring the §1.3 event-type check. Until confirmed, or whenever the post rejects, the executor
-  falls back to the §5.5 `ctx.session.prompt` pattern asking the agent to call `memory_metrics` and
-  echo the table verbatim, so the feature degrades to one cheap model turn instead of breaking.
+  mirroring the §1.3 event-type check. G-M1 is a deploy-time **human** check, not a runtime branch
+  (no runtime state can represent "confirmed delivery"): whenever the post rejects at runtime, the
+  executor falls back to the §5.5 `ctx.session.prompt` pattern asking the agent to call
+  `memory_metrics` and echo the table verbatim, so the feature degrades to one cheap model turn
+  instead of breaking.
 
 ---
 
@@ -159,13 +162,15 @@ opencode-nexusnv-memory/
 │   ├── capture.ts                     # captureFailure, snapshotHandoffIfChanged, ledger
 │   ├── provenance.ts                  # classifyProvenance, rememberAsserted (source:user)
 │   ├── guard.ts                       # flagInjection (advisory), untrusted labelling, sanitizeForBrief
-│   ├── tools.ts                       # ctx.tool.transform: memory_recall, memory_apply
+│   ├── tools.ts                       # ctx.tool.transform: memory_recall, memory_apply, memory_metrics
 │   ├── files.ts                       # readCapped/writeCapped, budget enforcement, archive routing, write mutex
 │   ├── redact.ts                      # secrets blocklist + <private> strip
+│   ├── metrics.ts                     # count-only counters (bump via the write mutex), 90-day prune, dashboard renderer, /memory-metrics command (ADR-0008, §5.12)
 │   ├── config.ts                      # ≤5 options, defaults, validation (ctx.options)
 │   └── templates.ts                   # six-file scaffolds + AGENTS.md protocol block text
 ├── agents/memory-manager.md           # shipped; installed to .opencode/agents/
 ├── commands/memory-review.md          # optional file-based command (plugin command is normative)
+├── commands/memory-metrics.md         # optional file-based command (plugin command is normative; §5.12)
 ├── README.md, LICENSE, CHANGELOG.md
 └── test/                              # unit + contract + fixture tests (§9)
 ```
@@ -313,13 +318,15 @@ block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (neve
 
 All components are passive observers or hook transforms; zero network/LLM/embeddings in the default
 path (ADR-0001). Purity rule: the `prompt` hook is a read-only transform apart from **one** bounded
-side effect — a documented `source:user` directive appended to `decisions.md` (§5.11) — because it is
-the only hook that sees `event.prompt.text` before admission. That append is serialized (per-process
-mutex), ledger-idempotent by content ID, and never throws. The `context` hook's injection path is
-read-only apart from its explicitly exempted, throttled, fire-and-forget writer to `handoffs/` only
-(§5.9). **Every hook body is wrapped so it never throws**: a throwing `prompt` hook blocks prompt
-admission ("if preparation fails … OpenCode does not admit the prompt"), and a throwing `execute.after`
-hook can disturb tool-result delivery.
+memory side effect — a documented `source:user` directive appended to `decisions.md` (§5.11) — and
+the ADR-0008/§5.12 metrics bumps (count-only, fire-and-forget `ctx.storage` counter increments —
+diagnostics, never memory content) — because it is the only hook that sees `event.prompt.text`
+before admission. That append is serialized (per-process mutex), ledger-idempotent by content ID,
+and never throws. The `context` hook's injection path is read-only apart from its explicitly
+exempted, throttled, fire-and-forget writer to `handoffs/` only (§5.9) and the same §5.12 bumps.
+**Every hook body is wrapped so it never throws**: a throwing `prompt` hook blocks prompt admission
+("if preparation fails … OpenCode does not admit the prompt"), and a throwing `execute.after` hook
+can disturb tool-result delivery.
 
 ### 5.1 Prompt hook — sole INDEX injector (US-10, AS-01, HS-02, ADR-0002)
 
@@ -345,11 +352,12 @@ registrations.push(await ctx.session.hook("prompt", async (event) => {
   proposes a fix. This keeps "one injector, bounded payload" true (P8).
 - Dedup guard is mandatory; root `AGENTS.md` carries no content, so there is no double injection.
 - Retry-safe: concurrent admission may re-run the hook; the attachment is idempotent.
-- The hook also performs the one side effect §5 allows: a detected `source:user` directive is appended
-  to `decisions.md` (§5.11). That append is serialized (per-process mutex), ledger-idempotent by content
-  ID, and **never throws** — a throwing prompt hook blocks admission. "Read-only" above therefore means
-  *no side effect other than this append*. `classifyProvenance` (detection) is pure and stays
-  testable in isolation.
+- The hook also performs the memory side effect §5 allows: a detected `source:user` directive is
+  appended to `decisions.md` (§5.11). That append is serialized (per-process mutex), ledger-idempotent
+  by content ID, and **never throws** — a throwing prompt hook blocks admission. "Read-only" above
+  therefore means *no memory side effect other than this append and the ADR-0008 §5.12 count-only
+  metrics bumps (fire-and-forget `ctx.storage` counters — diagnostics, not memory content)*.
+  `classifyProvenance` (detection) is pure and stays testable in isolation.
 
 ### 5.2 Context hook — brief + status + tell-tale (US-10/12/25, AS-02/03, HS-02)
 
@@ -501,8 +509,10 @@ registrations.push(await ctx.command.transform((editor) => {
 ```
 
 - Spread `prompt` so `files`/`agents`/`skills` survive (P7). `PromptInput.Prompt` carries only `{text,files?,agents?,skills?}` — there is no `metadata` to preserve; `delivery` comes from the invocation.
-- Invocation `/memory-review [scope]`. **The read+propose phase performs no writes and proposes only** —
-  its sole output is a proposal table; nothing is applied until a human approves line by line (ADR-0007).
+- Invocation `/memory-review [scope]`. **The read+propose phase writes no memory and proposes only** —
+  its sole output is a proposal table; nothing memory-related is applied until a human approves line by
+  line (ADR-0007). Its only durable side effect is the §5.12 `review.invoked` metrics counter, which
+  carries no content and writes no memory file.
   It is **not** sandboxed: a plugin command cannot target a subagent (`CommandInvocation` has no agent
   selector), and a session-scoped permission lock would be time-scoped — the reviewed text stays in the
   transcript, so it defers `T1` rather than containing it, while denying the user's own concurrent
@@ -736,8 +746,9 @@ and would be a false boundary). It relies on four structural controls:
    per known error and the bodies stay `memory_recall`-only (§5.2, §5.3, P16).
 2. **Provenance** — every entry carries `source:user | tool | model | snapshot`; the tag follows the
    content into the review proposal and into durable entries (§5.3).
-3. **Isolation (optional, not load-bearing)** — the review's read+propose phase writes nothing and its
-   only output is a proposal table; when the `memory-manager` subagent is used, poisoned text stays in
+3. **Isolation (optional, not load-bearing)** — the review's read+propose phase writes no memory and its
+   only output is a proposal table (the §5.12 `review.invoked` counter is its only side effect, count
+   diagnostics, no content); when the `memory-manager` subagent is used, poisoned text stays in
    the child session rather than the user's transcript. Deliberately **no** session permission lock: it
    is time-scoped (the reviewed text persists after it releases) and would deny the user's own tools
    (§5.5, §5.8, retired G5).
@@ -776,7 +787,8 @@ Provenance classes and the routing they imply:
   "injection detected".
 - `captureFailures: false` disables tool-output capture entirely for users who want the smallest
   possible attack surface.
-- The proposal-only review means a poisoned file is never *acted on* by the review (it writes nothing),
+- The proposal-only review means a poisoned file is never *acted on* by the review (it writes no
+  memory; the §5.12 `review.invoked` counter is the only thing it bumps),
   and the provenance tags + per-line approval mean it cannot silently become durable. Together these are
   the containment, and they do not depend on detecting the injection.
 - Residual risk (stated honestly): a human can still approve a poisoned untrusted line, and the model
@@ -800,19 +812,20 @@ with a fail-closed guard):
 | `prompt` hook (§5.1) | `hook.prompt`; `index.already` / `index.overCap` / `index.attach` (the three attach branches); `remember.caught` when `rememberAsserted` appends (dedupe-vs-non-directive is not distinguished — deliberate, keeps `provenance.ts`'s boolean return untouched) |
 | `context` hook (§5.2) | `hook.context`; `brief.empty` / `brief.injected` (+ `brief.lines` by the injected line count) / `brief.truncated` (when the budget cascade trims); `status.shown` / `status.dropped` (budget sacrifice of a present status line); `hint.shown` on the ≤1 hit |
 | `compaction` hook (§5.6) | `hook.compaction`; `compaction.priors` (+ `priors.lines` by injected line count) |
-| `execute.after` capture (§5.3) | `failure.captured` / `failure.duplicate` / `failure.retry` / `failure.failed` from the `CaptureOutcome.reason` — only for `status === "error"` events; non-error events bump nothing (keeps per-tool-call overhead at zero for successes) |
-| event dispatch (§5.9) + throttled context-hook writer (§5.2) | `snapshot.written` / `snapshot.unchanged` / `snapshot.dropped` / `snapshot.failed` (`SnapshotOutcome.reason` — bumped at each site internally via an optional metrics tap: the direct `session.idle` handler and the `snapshotIfDue` throttle gate, whose boolean signature and behavior stay unchanged); `compactionCapture.captured` / `compactionCapture.duplicate` / `compactionCapture.dropped` / `compactionCapture.failed` (`CompactionOutcome.reason`, direct dispatch path) |
+| `execute.after` capture (§5.3) | `failure.captured` / `failure.duplicate` / `failure.retry` (← reason `retry-later`) / `failure.failed` from the `CaptureOutcome.reason` — only for `status === "error"` events; non-error events bump nothing (keeps per-tool-call overhead at zero for successes) |
+| event dispatch (§5.9) + throttled context-hook writer (§5.2) | `snapshot.written` / `snapshot.unchanged` / `snapshot.dropped` / `snapshot.failed` (`SnapshotOutcome.reason` — bumped at each site internally via an optional metrics tap: the direct `session.idle` handler and the `snapshotIfDue` throttle gate, whose boolean signature and behavior stay unchanged; the `skipped` reason — pre-VCS stub / throttle claim — bumps nothing); `compactionCapture.captured` / `compactionCapture.duplicate` / `compactionCapture.dropped` / `compactionCapture.failed` (`CompactionOutcome.reason`, direct dispatch path; `skipped` likewise uncounted) |
 | `memory_recall` (§5.4) | `recall.<structural-name>` for the six allowlisted files (`recall.INDEX.md`, `recall.activeContext.md`, `recall.decisions.md`, `recall.architecture.md`, `recall.style.md`, `recall.issues.md`), `recall.handoff` for any `handoffs/…` path, `recall.error` on rejection (the thrown error propagates unchanged — metrics never mask a failure) |
 | `memory_apply` (§5.4) | `apply.batch` (one per call); `apply.lines` (by candidate count); `apply.denied` (per line whose `permission.assert` rejected); `apply.partialError` (a mid-batch write failure after ≥1 applied); `apply.reset` on the completion reset incl. `candidates: []` |
-| commands | `review.invoked` (`/memory-review`); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
-| hint→recall correlation | `hint.shown` arms a boolean session flag (`<projectID>/metrics/arm/hint/<sessionID>`, consumed on first use); a successful `memory_recall` **in that session while armed** bumps `hint.recall` and clears the flag — the one boolean metric, carries no text |
+| commands | `review.invoked` (`/memory-review` — count diagnostics only, no memory write); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
+| hint→recall correlation | `hint.shown` arms a session flag (`<projectID>/metrics/arm/hint/<sessionID>`, stored as the int `1` — cleared on first use); a successful `memory_recall` **in that session while armed** bumps `hint.recall` and clears the flag — the one binary metric (numeric storage, no content, never any text) |
 
 Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
 
 - `<projectID>/metrics/total/<name>` → int, monotonic until `reset`.
 - `<projectID>/metrics/day/<YYYYMMDD>/<name>` → int per UTC day.
 - `<projectID>/metrics/since` → first-write timestamp (the dashboard "since" line).
-- `<projectID>/metrics/arm/hint/<sessionID>` → boolean arm flag (transient, described above).
+- `<projectID>/metrics/arm/hint/<sessionID>` → arm flag as the int `1` (transient, cleared on first
+  use; the number-only invariant above stays true for every metrics value).
 - Bounded state: day buckets pruned after **90 UTC days** via paginated
   `scan({prefix:"<projectID>/metrics/day/"})` + `remove` (modeled on the `seen` prune), piggybacked
   once per UTC day off the first bump after a day change (fire-and-forget). Total counter names are
@@ -846,8 +859,9 @@ registrations.push(await ctx.tool.transform((editor) => {
     → bump `dashboard.shown`. **G-M1:** the **first synthetic post of the process** (which is the
     deploy event — one line per deploy) logs
     `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn`
-    (§1.3). If the synthetic post rejects — or delivery is not confirmed on an installed build —
-    fall back to the §5.5 pattern: `ctx.session.prompt({ ...prompt, sessionID, delivery, text: metricsFallbackAsk })`,
+    (§1.3). If the synthetic post rejects at runtime, fall back — G-M1 is a deploy-time human
+    check, not a runtime branch (no runtime state can represent "confirmed delivery") — to the
+    §5.5 pattern: `ctx.session.prompt({ ...prompt, sessionID, delivery, text: metricsFallbackAsk })`,
     where the ask instructs the agent to call `memory_metrics` and **echo the table verbatim**. The
     executor never throws; a fallback failure degrades to `logDiagnostic` only.
   - The command writes no durable memory file and resets nothing except on `reset`.
@@ -916,7 +930,8 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
    + status line + hint (bottom); `AGENTS.md` protocol + links only; deeper content lazily via
    `memory_recall`. The status line surfaces a pending rotation notice and the review-due nudge so
    uncurated memory is surfaced to the model (relayed to the user by the agent). Known Errors restore as **summary lines only** (P16).
-5. **Promotion:** `/memory-review` produces a provenance-tagged proposal table and writes nothing; it
+5. **Promotion:** `/memory-review` produces a provenance-tagged proposal table and writes no memory
+   (only the §5.12 `review.invoked` counter bumps); it
    is **not** sandboxed (no lock — see retired G5). The human approves specific lines through the
    `memory_apply` tool (one `ctx.permission.assert` per line; untrusted lines cannot be bulk-approved);
    application is deterministic via `writeCapped`. The optional read-only `memory-manager` subagent can

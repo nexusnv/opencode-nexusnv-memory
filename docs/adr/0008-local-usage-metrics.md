@@ -18,7 +18,7 @@ fixtures — production usage is unmeasured. Nobody can answer today: does the t
 drive `memory_recall`? how often does the budget truncate, and which line gets sacrificed? how much
 is captured vs reviewed vs denied?
 
-At the same time the privacy posture is absolute (motivation.md §1, README): local-first,
+At the same time the privacy posture is absolute (motivation.md Goal, README): local-first,
 zero-subscription, zero-daemon. Anything that leaves the machine is not a trade-off to weigh — it is
 a contradiction of the product's premise.
 
@@ -35,7 +35,9 @@ ever collecting content?
    - Counter names are an **enumerated, fixed vocabulary** in `src/metrics.ts` — fail-closed: an
      unknown name is logged and dropped, never written, so the key space cannot grow unboundedly.
    - **No content, ever.** No prompt text, tool output, captured-path strings, identities, or prose
-     enters any metric key or value; every persisted metrics value is a JSON number. Wherever a file
+     enters any metric key or value; every persisted metrics value is a JSON number (the arm flag is
+     the int `1` when armed — binary semantics, numeric storage — so the number-only invariant is
+     testable as a literal gate). Wherever a file
      name appears it is one of the six allowlisted structural names (or the aggregate `handoff` /
      `error` bucket for the open-ended handoff set). The rule the ledger already applies to content
      IDs (opaque hashes, ADR-0004) extends to metrics by construction.
@@ -59,8 +61,9 @@ ever collecting content?
      executor posts the table via `ctx.session.synthetic({ sessionID, text })`, **type-proven
      against `@opencode/plugin` / `@opencode/client` 2.0.29**. The one property types cannot prove —
      that the TUI renders the post without triggering a model turn — gets a deploy-time
-     confirmation log (gate G-M1, same pattern as the §1.3 event-type check). Until it is confirmed
-     delivery, or whenever the post fails, the executor falls back to the §5.5 pattern
+     confirmation log (gate G-M1, same pattern as the §1.3 event-type check). G-M1 is a deploy-time
+     human check, not a runtime branch (no runtime state can represent "confirmed delivery");
+     whenever the post fails, the executor falls back to the §5.5 pattern
      (`ctx.session.prompt` spread) asking the agent to call `memory_metrics` and echo the table
      verbatim. That fallback also covers any later OpenCode build whose synthetic surface drifts.
 5. **Bounded state.** Daily buckets are pruned after **90 UTC days** (paginated
@@ -70,6 +73,12 @@ ever collecting content?
    (SolidJS + `@opentui`, live pages/slots/dialogs via `ui.router.register`/`ui.slot`) could render
    a real-time panel, but it is a second plugin type and a heavier install path for no additional
    fidelity over the markdown table. Revisit only on real demand.
+7. **Amendment of prior absolutes.** These metrics taps are diagnostics, not memory writes; this ADR
+   carves a documented exception into the letter of the read-only/no-side-effect absolutes (spec §5
+   and §5.1) and the review "writes nothing" absolute (spec §5.5, ADR-0007 §3) — count-only
+   `ctx.storage` counters never touch memory files and carry no content. Spec §1.2 (P24) records the
+   correction; the underlying memory-write gates (provenance, budgets, per-line approval) are
+   unchanged.
 
 ## Consequences
 
