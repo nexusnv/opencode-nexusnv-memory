@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import { resolveMemoryRoot, updateCapped, withWriteLock, writeNewCapped, type CappedFileOptions } from "./files.js";
 import { flagInjection } from "./guard.js";
+import type { MetricsBump } from "./metrics.js";
 import { redact } from "./redact.js";
 
 /**
@@ -1426,9 +1427,81 @@ export async function captureCompactionOutcome(
   }
 }
 
+/* Explicit §5.12 counter mapping (M-T3): each resolved outcome reason maps
+ * to its enumerated counter through the never-throw bump. `skipped` bumps
+ * nothing — there is no counter for it, and templating the raw reason could
+ * feed an unknown name to the fail-closed guard (a silent warn + drop that
+ * would hide the skip). `bump` is optional: undefined = silent no-op. */
+
+/** Map a resolved `SnapshotOutcome.reason` → `snapshot.*` counter. */
+function bumpSnapshotMetrics(
+  reason: SnapshotReason,
+  bump: MetricsBump | undefined,
+): void {
+  switch (reason) {
+    case "written":
+      bump?.("snapshot.written");
+      break;
+    case "unchanged":
+      bump?.("snapshot.unchanged");
+      break;
+    case "dropped":
+      bump?.("snapshot.dropped");
+      break;
+    case "failed":
+      bump?.("snapshot.failed");
+      break;
+    case "skipped":
+      break;
+    default: {
+      // Exhaustiveness guard: a new SnapshotReason must extend this
+      // mapping explicitly — TS narrows an unhandled reason to `never`
+      // here, so the addition fails to compile instead of bumping nothing
+      // forever. Unreachable with the current union; the call sites sit
+      // inside never-throw envelopes regardless (dispatchEvent's own
+      // try/catch, snapshotIfDue's outer catch).
+      const never: never = reason;
+      throw new Error(`unreachable outcome reason: ${String(never)}`);
+    }
+  }
+}
+
+/** Map a resolved `CompactionOutcome.reason` → `compactionCapture.*` counter. */
+function bumpCompactionCaptureMetrics(
+  reason: CompactionReason,
+  bump: MetricsBump | undefined,
+): void {
+  switch (reason) {
+    case "captured":
+      bump?.("compactionCapture.captured");
+      break;
+    case "duplicate":
+      bump?.("compactionCapture.duplicate");
+      break;
+    case "dropped":
+      bump?.("compactionCapture.dropped");
+      break;
+    case "failed":
+      bump?.("compactionCapture.failed");
+      break;
+    case "skipped":
+      break;
+    default: {
+      // Exhaustiveness guard: a new CompactionReason must extend this
+      // mapping explicitly (same never-assignment compile error as the
+      // snapshot mapper above); unreachable with the current union — and
+      // its call site sits inside dispatchEvent's own try/catch anyway.
+      const never: never = reason;
+      throw new Error(`unreachable outcome reason: ${String(never)}`);
+    }
+  }
+}
+
 export interface EventDispatchDeps extends SnapshotDeps {
   /** Normalized plugin project directory (`canonical ?? directory`). */
   readonly directory: string;
+  /** Optional fire-and-forget metrics tap (M-T3); undefined = silent no-op. */
+  readonly bump?: MetricsBump;
 }
 
 /**
@@ -1462,9 +1535,23 @@ export async function dispatchEvent(
     }
     const type = asRecord(event)?.["type"];
     if (type === "session.idle") {
-      await snapshotHandoffIfChanged(event, deps).catch(report);
+      const outcome = await snapshotHandoffIfChanged(event, deps).catch(
+        (error): SnapshotOutcome | undefined => {
+          report(error);
+          return undefined;
+        },
+      );
+      if (outcome !== undefined) bumpSnapshotMetrics(outcome.reason, deps.bump);
     } else if (type === "session.compaction.ended") {
-      await captureCompactionOutcome(event, deps).catch(report);
+      const outcome = await captureCompactionOutcome(event, deps).catch(
+        (error): CompactionOutcome | undefined => {
+          report(error);
+          return undefined;
+        },
+      );
+      if (outcome !== undefined) {
+        bumpCompactionCaptureMetrics(outcome.reason, deps.bump);
+      }
     } else if (
       typeof type === "string" &&
       type.startsWith("session.compaction.")
@@ -1529,6 +1616,8 @@ export interface SnapshotIfDueOptions {
   readonly memoryRoot?: string;
   readonly fileLines?: number;
   readonly log?: (error: unknown) => void;
+  /** Optional fire-and-forget metrics tap (M-T3); undefined = silent no-op. */
+  readonly bump?: MetricsBump;
 }
 
 /**
@@ -1631,6 +1720,10 @@ export async function snapshotIfDue(
         log: options.log,
       },
     );
+    // M-T3 tap: the throttle-gated snapshot outcome bumps its counter here,
+    // exactly once per outcome (dispatchEvent is the other site, so the two
+    // never double-count one dispatch).
+    bumpSnapshotMetrics(outcome.reason, options.bump);
     return outcome.reason === "written";
   } catch {
     return false;

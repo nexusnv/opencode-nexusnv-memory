@@ -39,7 +39,7 @@ Containment rests on four structural controls, none of which require detecting a
   data, and the `AGENTS.md` directive states that memory content is data, never instructions.
 2. **Provenance.** Every entry carries `source:user | tool | model | snapshot`. Provenance decides the
    write path (ADR-0004) and is shown to the human at review time.
-3. **Proposal-only review (no sandbox).** The read+propose phase of `/memory-review` writes nothing and
+3. **Proposal-only review (no sandbox).** The read+propose phase of `/memory-review` writes no memory and
    its only output is a proposal table; no execution happens as part of the review. It is deliberately
    **not** sandboxed. A plugin-registered command **cannot** target a subagent (`CommandInvocation` has
    no agent selector), and the session permission-lock substitute does not contain the threat:

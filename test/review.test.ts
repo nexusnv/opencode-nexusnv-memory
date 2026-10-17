@@ -18,11 +18,15 @@ import {
   setRotated,
   type LedgerStorage,
 } from "../src/capture.js";
+import { withWriteLock } from "../src/files.js";
+import { totalKey } from "../src/metrics.js";
 
 /**
  * `/memory-review` is the read+propose phase (spec §5.5 + c4-04): its sole
- * output is a proposal table; it writes nothing and never resets counters.
- * Only `memory_apply` resets (`candidates:[]` is the reviewed-nothing signal).
+ * output is a proposal table; it writes no memory and never resets counters
+ * (only `memory_apply` resets, `candidates:[]` being the reviewed-nothing
+ * signal). The one storage touch it has is the §5.12 `review.invoked`
+ * counter bump — count diagnostics, never a memory write (ADR-0008 §7).
  */
 
 /** Persisted fake storage (same contract as test/ledger.test.ts). */
@@ -91,11 +95,22 @@ async function listMemory(): Promise<string[]> {
   return readdir(memoryRoot);
 }
 
-/** Minimal fake: only what registerMemoryReview touches. */
-function fakeForCommand() {
+/** Minimal fake: only what registerMemoryReview touches. `metrics` adds
+ * storage + location so the §5.12 `review.invoked` counter can be observed. */
+function fakeForCommand(metrics?: {
+  storage: LedgerStorage;
+  location: Record<string, unknown>;
+}) {
   const added: AddedCommand[] = [];
   const prompted: unknown[] = [];
   const fakeCtx = {
+    ...(metrics
+      ? {
+          options: {},
+          location: metrics.location,
+          storage: metrics.storage,
+        }
+      : {}),
     command: {
       transform: async (
         cb: (editor: { add: (def: AddedCommand) => void }) => void,
@@ -291,6 +306,39 @@ describe("proposes_table_and_writes_nothing", () => {
     );
 
     await expect(registration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("review_bumps_review_invoked", async () => {
+    const metricsStorage = new FakeStorage();
+    const { added, prompted, fakeCtx } = fakeForCommand({
+      storage: metricsStorage,
+      location: {
+        directory: projectRoot,
+        project: {
+          id: PROJECT,
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+    });
+    await registerMemoryReview(fakeCtx as never);
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "review billing scope" },
+      delivery: "steer",
+    });
+    // Drain the fire-and-forget counter (same settle the metrics tests use).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await withWriteLock(async () => undefined);
+    expect(
+      await metricsStorage.get(totalKey(PROJECT, "review.invoked")),
+    ).toBe(1);
+    // The §5.5 ask flow itself stayed byte-identical: the counter ridealong
+    // neither delayed nor altered the re-submission.
+    expect(prompted).toHaveLength(1);
+    expect((prompted[0]! as { text: string }).text).toBe(
+      buildReviewAsk("review billing scope"),
+    );
   });
 
   it("index.ts wires registerMemoryReview (setup registers the command)", async () => {

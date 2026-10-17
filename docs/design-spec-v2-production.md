@@ -61,6 +61,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | References | `references` entries attach **directories** (`path`) or Git repos (`repository`/`branch`); attachment is a non-recursive root listing and is client-initiated. Designed for directories **outside** the project. | not used (§4.3) |
 | Instructions | V2 **does** resolve the `instructions` array (relative/glob, `~/`, absolute, `http(s)`), loading it after `AGENTS.md`. The design still injects via `AGENTS.md` + hooks — a deliberate choice (single-owner injection, no client config edit), **not** a platform limitation. | ADR-0002 |
 | AGENTS.md | Global + upward files live-reload before the next request; **edits to already-loaded nested files are not detected** (new session required). | ADR-0002 |
+| Session synthetic message | `ctx.session.synthetic({ sessionID, text, description?, metadata?, delivery? })` → `SessionInboxSynthetic`: posts a durable synthetic text message into a session — the one deterministic (no-model-turn) visible output channel for a plugin command's executor (`CommandDefinition.execute` returns `Promise<void>`, so there is no text-return surface). Verified against the installed `@opencode/client@2.0.29` types (`SessionSyntheticInput` / `SessionInboxSynthetic`; the method is in the plugin's `SessionDomain` Pick). Whether the TUI renders it without spawning a model turn is **not** type-provable → deploy-time delivery confirmation **G-M1** (§5.12) with the §5.5 prompt fallback. | `/memory-metrics` |
 
 ### 1.2 Corrections applied to earlier revisions of these documents
 
@@ -91,6 +92,7 @@ These are now fixed across the document set; listed so reviewers can see what ch
 | P21 | `source:user` fast path had no execution site; the `prompt` hook was declared "pure (reads only)", and the `AGENTS.md` block told the agent to write | Assigned to the `prompt` hook as one bounded, serialized, never-throw, ledger-idempotent append; the plugin is the sole writer and the `AGENTS.md` block no longer instructs the agent to write | §5, §5.1, §5.11, ADR-0004 |
 | P22 | Memory root resolved once from `ctx.location`; event handlers had no location filter | `ctx.location` is instance-scoped, not per-session; resolve the root per invocation and drop foreign events from the server-wide stream | §5.7, §5.9, §7 |
 | P23 | "Application is deterministic via `writeCapped`" but the command cannot await approval | Added the plugin-owned `memory_apply` tool: one `ctx.permission.assert` per candidate line, then `writeCapped` | §5.5, §5.11 |
+| P24 | Absolutes now false after ADR-0008: "prompt hook … apart from **one** bounded side effect" / "context … read-only apart from its … writer to `handoffs/` only" / "review … writes nothing" / "read+propose phase performs no writes" | Carved out the count-only metrics bumps (§5.12: fire-and-forget, never-throw `ctx.storage` counters, numbers only — diagnostics, never memory content, never a memory file) at every abovementioned site; memory-write semantics of the underlying gates are unchanged | §5, §5.1, §5.5, §5.11, §9, ADR-0007, ADR-0008 |
 
 ### 1.3 P1 runtime-verification gates (must pass before merge)
 
@@ -132,6 +134,16 @@ runtime log remains a deployment sanity check.
   sandbox: its only output is a **proposal table**, and every write requires **per-line human approval**
   through `memory_apply` (§5.11). `memory-manager` (read-only) remains available as an **optional**
   isolated venue when delegation is convenient. No runtime gate.
+- **G-M1 — synthetic delivery (runtime gate for `/memory-metrics`, ADR-0008).**
+  `ctx.session.synthetic({sessionID, text})` is proven via the installed 2.0.29 client types, but
+  whether the TUI renders the post without spawning a model turn is not type-provable. The **first
+  synthetic post of the process** (which is the deploy event) logs one line —
+  `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn` —
+  mirroring the §1.3 event-type check. G-M1 is a deploy-time **human** check, not a runtime branch
+  (no runtime state can represent "confirmed delivery"): whenever the post rejects at runtime, the
+  executor falls back to the §5.5 `ctx.session.prompt` pattern asking the agent to call
+  `memory_metrics` and echo the table verbatim, so the feature degrades to one cheap model turn
+  instead of breaking.
 
 ---
 
@@ -150,13 +162,15 @@ opencode-nexusnv-memory/
 │   ├── capture.ts                     # captureFailure, snapshotHandoffIfChanged, ledger
 │   ├── provenance.ts                  # classifyProvenance, rememberAsserted (source:user)
 │   ├── guard.ts                       # flagInjection (advisory), untrusted labelling, sanitizeForBrief
-│   ├── tools.ts                       # ctx.tool.transform: memory_recall, memory_apply
+│   ├── tools.ts                       # ctx.tool.transform: memory_recall, memory_apply, memory_metrics
 │   ├── files.ts                       # readCapped/writeCapped, budget enforcement, archive routing, write mutex
 │   ├── redact.ts                      # secrets blocklist + <private> strip
+│   ├── metrics.ts                     # count-only counters (bump via the write mutex), 90-day prune, dashboard renderer, /memory-metrics command (ADR-0008, §5.12)
 │   ├── config.ts                      # ≤5 options, defaults, validation (ctx.options)
 │   └── templates.ts                   # six-file scaffolds + AGENTS.md protocol block text
 ├── agents/memory-manager.md           # shipped; installed to .opencode/agents/
 ├── commands/memory-review.md          # optional file-based command (plugin command is normative)
+├── commands/memory-metrics.md         # optional file-based command (plugin command is normative; §5.12)
 ├── README.md, LICENSE, CHANGELOG.md
 └── test/                              # unit + contract + fixture tests (§9)
 ```
@@ -304,13 +318,15 @@ block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (neve
 
 All components are passive observers or hook transforms; zero network/LLM/embeddings in the default
 path (ADR-0001). Purity rule: the `prompt` hook is a read-only transform apart from **one** bounded
-side effect — a documented `source:user` directive appended to `decisions.md` (§5.11) — because it is
-the only hook that sees `event.prompt.text` before admission. That append is serialized (per-process
-mutex), ledger-idempotent by content ID, and never throws. The `context` hook's injection path is
-read-only apart from its explicitly exempted, throttled, fire-and-forget writer to `handoffs/` only
-(§5.9). **Every hook body is wrapped so it never throws**: a throwing `prompt` hook blocks prompt
-admission ("if preparation fails … OpenCode does not admit the prompt"), and a throwing `execute.after`
-hook can disturb tool-result delivery.
+memory side effect — a documented `source:user` directive appended to `decisions.md` (§5.11) — and
+the ADR-0008/§5.12 metrics bumps (count-only, fire-and-forget `ctx.storage` counter increments —
+diagnostics, never memory content) — because it is the only hook that sees `event.prompt.text`
+before admission. That append is serialized (per-process mutex), ledger-idempotent by content ID,
+and never throws. The `context` hook's injection path is read-only apart from its explicitly
+exempted, throttled, fire-and-forget writer to `handoffs/` only (§5.9) and the same §5.12 bumps.
+**Every hook body is wrapped so it never throws**: a throwing `prompt` hook blocks prompt admission
+("if preparation fails … OpenCode does not admit the prompt"), and a throwing `execute.after` hook
+can disturb tool-result delivery.
 
 ### 5.1 Prompt hook — sole INDEX injector (US-10, AS-01, HS-02, ADR-0002)
 
@@ -336,11 +352,12 @@ registrations.push(await ctx.session.hook("prompt", async (event) => {
   proposes a fix. This keeps "one injector, bounded payload" true (P8).
 - Dedup guard is mandatory; root `AGENTS.md` carries no content, so there is no double injection.
 - Retry-safe: concurrent admission may re-run the hook; the attachment is idempotent.
-- The hook also performs the one side effect §5 allows: a detected `source:user` directive is appended
-  to `decisions.md` (§5.11). That append is serialized (per-process mutex), ledger-idempotent by content
-  ID, and **never throws** — a throwing prompt hook blocks admission. "Read-only" above therefore means
-  *no side effect other than this append*. `classifyProvenance` (detection) is pure and stays
-  testable in isolation.
+- The hook also performs the memory side effect §5 allows: a detected `source:user` directive is
+  appended to `decisions.md` (§5.11). That append is serialized (per-process mutex), ledger-idempotent
+  by content ID, and **never throws** — a throwing prompt hook blocks admission. "Read-only" above
+  therefore means *no memory side effect other than this append and the ADR-0008 §5.12 count-only
+  metrics bumps (fire-and-forget `ctx.storage` counters — diagnostics, not memory content)*.
+  `classifyProvenance` (detection) is pure and stays testable in isolation.
 
 ### 5.2 Context hook — brief + status + tell-tale (US-10/12/25, AS-02/03, HS-02)
 
@@ -492,8 +509,10 @@ registrations.push(await ctx.command.transform((editor) => {
 ```
 
 - Spread `prompt` so `files`/`agents`/`skills` survive (P7). `PromptInput.Prompt` carries only `{text,files?,agents?,skills?}` — there is no `metadata` to preserve; `delivery` comes from the invocation.
-- Invocation `/memory-review [scope]`. **The read+propose phase performs no writes and proposes only** —
-  its sole output is a proposal table; nothing is applied until a human approves line by line (ADR-0007).
+- Invocation `/memory-review [scope]`. **The read+propose phase writes no memory and proposes only** —
+  its sole output is a proposal table; nothing memory-related is applied until a human approves line by
+  line (ADR-0007). Its only durable side effect is the §5.12 `review.invoked` metrics counter, which
+  carries no content and writes no memory file.
   It is **not** sandboxed: a plugin command cannot target a subagent (`CommandInvocation` has no agent
   selector), and a session-scoped permission lock would be time-scoped — the reviewed text stays in the
   transcript, so it defers `T1` rather than containing it, while denying the user's own concurrent
@@ -727,8 +746,9 @@ and would be a false boundary). It relies on four structural controls:
    per known error and the bodies stay `memory_recall`-only (§5.2, §5.3, P16).
 2. **Provenance** — every entry carries `source:user | tool | model | snapshot`; the tag follows the
    content into the review proposal and into durable entries (§5.3).
-3. **Isolation (optional, not load-bearing)** — the review's read+propose phase writes nothing and its
-   only output is a proposal table; when the `memory-manager` subagent is used, poisoned text stays in
+3. **Isolation (optional, not load-bearing)** — the review's read+propose phase writes no memory and its
+   only output is a proposal table (the §5.12 `review.invoked` counter is its only side effect, count
+   diagnostics, no content); when the `memory-manager` subagent is used, poisoned text stays in
    the child session rather than the user's transcript. Deliberately **no** session permission lock: it
    is time-scoped (the reviewed text persists after it releases) and would deny the user's own tools
    (§5.5, §5.8, retired G5).
@@ -767,13 +787,87 @@ Provenance classes and the routing they imply:
   "injection detected".
 - `captureFailures: false` disables tool-output capture entirely for users who want the smallest
   possible attack surface.
-- The proposal-only review means a poisoned file is never *acted on* by the review (it writes nothing),
+- The proposal-only review means a poisoned file is never *acted on* by the review (it writes no
+  memory; the §5.12 `review.invoked` counter is the only thing it bumps),
   and the provenance tags + per-line approval mean it cannot silently become durable. Together these are
   the containment, and they do not depend on detecting the injection.
 - Residual risk (stated honestly): a human can still approve a poisoned untrusted line, and the model
   does see untrusted text while drafting the proposal (handled by the approval gate and visible tool
   calls, not by a lock). The mitigations are the `source:` tag, the advisory flags, and the exclusion of
   untrusted lines from bulk approval — not a guarantee.
+
+### 5.12 Local usage metrics + `/memory-metrics` (US-28/29, HS-12, ADR-0008, G-M1)
+
+The plugin measures its own intervention for the user's eyes, count-only, entirely on-machine
+(ADR-0008: no content — every metrics value is a JSON number; the only names appearing in keys are
+the enumerated counter vocabulary and the six allowlisted structural file names / the `handoff` and
+`error` aggregates). Nothing here changes any hook outcome: bumps are fire-and-forget, never-throw,
+and dispatched off the awaited path; metrics are best-effort statistics, never the correctness channel.
+
+Counter vocabulary (normative — the implementation enumerates exactly these in `src/metrics.ts`
+with a fail-closed guard):
+
+| Outcome seam (existing code) | Counters bumped |
+|---|---|
+| `prompt` hook (§5.1) | `hook.prompt`; `index.already` / `index.overCap` / `index.attach` (the three attach branches); `remember.caught` when `rememberAsserted` appends (dedupe-vs-non-directive is not distinguished — deliberate, keeps `provenance.ts`'s boolean return untouched) |
+| `context` hook (§5.2) | `hook.context`; `brief.empty` / `brief.injected` (+ `brief.lines` by the injected line count) / `brief.truncated` (when the budget cascade trims); `status.shown` / `status.dropped` (budget sacrifice of a present status line); `hint.shown` on the ≤1 hit |
+| `compaction` hook (§5.6) | `hook.compaction`; `compaction.priors` (+ `priors.lines` by injected line count) |
+| `execute.after` capture (§5.3) | `failure.captured` / `failure.duplicate` / `failure.retry` (← reason `retry-later`) / `failure.failed` from the `CaptureOutcome.reason` — only for `status === "error"` events; non-error events bump nothing (keeps per-tool-call overhead at zero for successes) |
+| event dispatch (§5.9) + throttled context-hook writer (§5.2) | `snapshot.written` / `snapshot.unchanged` / `snapshot.dropped` / `snapshot.failed` (`SnapshotOutcome.reason` — bumped at each site internally via an optional metrics tap: the direct `session.idle` handler and the `snapshotIfDue` throttle gate, whose boolean signature and behavior stay unchanged; the `skipped` reason (arises on the direct dispatch path) bumps nothing); `compactionCapture.captured` / `compactionCapture.duplicate` / `compactionCapture.dropped` / `compactionCapture.failed` (`CompactionOutcome.reason`, direct dispatch path; `skipped` likewise uncounted) |
+| `memory_recall` (§5.4) | `recall.<structural-name>` for the six allowlisted files (`recall.INDEX.md`, `recall.activeContext.md`, `recall.decisions.md`, `recall.architecture.md`, `recall.style.md`, `recall.issues.md`), `recall.handoff` for any `handoffs/…` path, `recall.error` on rejection (the thrown error propagates unchanged — metrics never mask a failure) |
+| `memory_apply` (§5.4) | `apply.batch` (one per call); `apply.lines` (by candidate count); `apply.denied` (per line whose `permission.assert` rejected); `apply.partialError` (a mid-batch write failure after ≥1 applied); `apply.reset` on the completion reset incl. `candidates: []` |
+| commands | `review.invoked` (`/memory-review` — count diagnostics only, no memory write); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
+| hint→recall correlation | `hint.shown` arms a session entry (`<projectID>/metrics/arm/hint/<sessionID>`, a positive-int arming timestamp — armed for at most one UTC day after that stamp); a successful `memory_recall` **in that session while armed (and fresh)** bumps `hint.recall` and clears the entry — the one session-scoped flag (numeric storage, no content, never any text; stale hints never convert and the daily prune clears unaged-out leftovers) |
+
+Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
+
+- `<projectID>/metrics/total/<name>` → int, monotonic until `reset`.
+- `<projectID>/metrics/day/<YYYYMMDD>/<name>` → int per UTC day.
+- `<projectID>/metrics/since` → first-write timestamp (the dashboard "since" line).
+- `<projectID>/metrics/arm/hint/<sessionID>` → arm entry as a positive-int arming timestamp
+  (transient: armed only while that stamp is within one UTC day; cleared on first use (including a
+  stale consume), and unclaimed leftovers are pruned; the number-only invariant above stays true
+  for every metrics value).
+- Bounded state: day buckets pruned after **90 UTC days** via paginated
+  `scan({prefix:"<projectID>/metrics/day/"})` + `remove` (modeled on the `seen` prune), piggybacked
+  once per UTC day off the first bump after a day change (fire-and-forget); the same daily pass
+  also clears `metrics/arm/…` entries older than one UTC day.
+  Total counter names are capped by the enumeration above, so the namespace is small and flat.
+- Writes serialize through the existing per-process mutex (§5.7); each bump is a single locked body
+  writing the total + day pair (+ a lazy `since` set when absent). `reset` removes all
+  `<projectID>/metrics/…` keys (paginated scan + remove) and stamps a fresh `since`.
+
+```ts
+registrations.push(await ctx.tool.transform((editor) => {
+  editor.add({
+    name: "memory_metrics",
+    description: "Local usage metrics of the memory plugin: counters for explicit calls (recall/apply/review) and behind-the-scenes outcomes (captures, truncations, denials, hint→recall), plus memory-file health. Counts only — no content. Use when the user asks about the plugin's activity or its stored stats.",
+    input: { type: "object", properties: {}, required: [], additionalProperties: false },
+    execute: async () => toolResult(await collectAndRender(ctx)), // deps resolve per call (P22)
+  });
+}));
+```
+
+- **Renderer contract (normative):** `renderMetricsDashboard(input)` is a **pure** function over
+  `{ totals, days, health, since }` → one markdown table block; deterministic given inputs; the only
+  free text it can emit is counter names, structural file names, day stamps, and numbers — it has no
+  parameter carrying content. `health` reads on request: per-file line counts vs caps, `handoffs/`
+  and `handoffs/archive/` file counts, `pending`, `seen` set size (scan), decisions tail size — counts
+  only, obtained by `readFile` + line counting, never by rendering file bodies.
+- **Command (normative):** `ctx.command.transform` registers `memory-metrics` (invocation
+  `/memory-metrics [reset]`):
+  - `reset` argument (case-insensitive): removes all `<projectID>/metrics/…` keys, stamps a fresh
+    `since`, then reports via the same output channel that metrics restarted.
+  - otherwise: compute counts → render → `ctx.session.synthetic({ sessionID, text: table })`
+    → bump `dashboard.shown`. **G-M1:** the **first synthetic post of the process** (which is the
+    deploy event — one line per deploy) logs
+    `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn`
+    (§1.3). If the synthetic post rejects at runtime, fall back — G-M1 is a deploy-time human
+    check, not a runtime branch (no runtime state can represent "confirmed delivery") — to the
+    §5.5 pattern: `ctx.session.prompt({ ...prompt, sessionID, delivery, text: metricsFallbackAsk })`,
+    where the ask instructs the agent to call `memory_metrics` and **echo the table verbatim**. The
+    executor never throws; a fallback failure degrades to `logDiagnostic` only.
+  - The command writes no durable memory file and resets nothing except on `reset`.
 
 ---
 
@@ -796,6 +890,7 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
 | Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); pruned via `scan({prefix:"<projectID>/seen/"})` to ≤500; 30s retry window | bounded |
+| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient arm entry: a positive-int arming timestamp when armed, armed ≤ one UTC day, cleared on first use or the daily prune); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset` wipes the namespace | ≤ enumerated totals + ≤90 day buckets × bumped names + ≤ hinted sessions in the last UTC day |
 
 Retention = **reachability** (ADR-0005): active (retain + injectable suffix) / causal (one hop behind,
 follow-on-demand) / conditional (INDEX one-liner) / archived (`handoffs/archive/`, recallable, never
@@ -838,7 +933,8 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
    + status line + hint (bottom); `AGENTS.md` protocol + links only; deeper content lazily via
    `memory_recall`. The status line surfaces a pending rotation notice and the review-due nudge so
    uncurated memory is surfaced to the model (relayed to the user by the agent). Known Errors restore as **summary lines only** (P16).
-5. **Promotion:** `/memory-review` produces a provenance-tagged proposal table and writes nothing; it
+5. **Promotion:** `/memory-review` produces a provenance-tagged proposal table and writes no memory
+   (only the §5.12 `review.invoked` counter bumps); it
    is **not** sandboxed (no lock — see retired G5). The human approves specific lines through the
    `memory_apply` tool (one `ctx.permission.assert` per line; untrusted lines cannot be bulk-approved);
    application is deterministic via `writeCapped`. The optional read-only `memory-manager` subagent can
@@ -878,11 +974,19 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
   deny the user's own tools in that session. The review's only output is a proposal, and every write
   needs per-line human approval (§5.11), so it needs no sandbox. The read-only `memory-manager` subagent
   remains available as an optional isolated venue. No runtime gate.
+- **D-G — rich TUI metrics panel.** *Deferred by decision* (ADR-0008): a client-side
+  `@opencode/plugin/tui` plugin (SolidJS + `@opentui`; live pages via `ui.router.register`, slot
+  claims, dialogs, durable TUI `storage.store`) could render a real-time metrics page, but it is a
+  second plugin type with a heavier client-side install path for no fidelity gain over the markdown
+  dashboard. *Shipped:* the deterministic markdown dashboard via `memory_metrics` +
+  `/memory-metrics` (§5.12). *Exit:* only on real demand for a persistent panel.
 
 Nothing else defers: budgets, allowlisted recall (incl. `archive/`), exact-match tell-tale, ledger
 idempotency, human-gated promotion, the provenance gate, injection containment (summary-only
 injection + proposal-only review + per-line approval of untrusted lines), append-only lineage,
-per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/uninstall, and all
+per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/uninstall, the
+local usage metrics + `/memory-metrics` dashboard (§5.12, ADR-0008 — shipped with its G-M1
+delivery gate), and all
 `AGENTS.md`/`instructions`/config behaviors are implementable on the verified primitives above.
 
 ---
@@ -928,6 +1032,19 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
   - **G1–G4 type-proven and recorded in the PR**; deploy-time `event.type` log confirms `session.idle` /
     `session.compaction.ended` delivery; `scan` uses the `<projectID>/seen/` prefix with pagination;
     VCS branch comes from `vcs.get()` (status = changes). (G5 was **retired** — see §1.3.)
+  - **metrics (§5.12, ADR-0008):** the persisted metrics namespace contains **numbers only** — a
+    test enumerates every key/value written under `<projectID>/metrics/` during a simulated usage
+    run and asserts int values + enumerated names (fail-closed: an unknown name is logged and
+    dropped, never persisted); a bump against a rejecting fake `ctx.storage` never throws, never
+    alters any hook/tool outcome, and logs instead — the full suite (hooks/tools/isolation covered
+    by rejecting-storage fakes) keeps passing with metrics taps in the hot paths; the 90-day prune
+    removes only expired day buckets (paginated, never a total counter);
+    `memory_metrics` returns `{ content: <table> }` with a **deterministic** renderer (asserted from
+    a fixed fixture: same inputs → byte-identical table, no content parameters);
+    `/memory-metrics` posts via `ctx.session.synthetic` and its executor never throws; the post
+    failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
+    `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
+    first post in the deploy check.
 - **Evals (P2):** recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
   reported as **three** numbers: **static** (~13 lines: ~10 directive + ~3 tool description);
   **per-prompt with content** (static + `INDEX` ≤30 once + brief ≤48 + hint ≤1 + status ≤1);
@@ -949,4 +1066,8 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
   (types proven) with throttled fallback, redaction, provenance gate, config/install shapes. Acceptance: $0 default; ≤ budget injection; no duplicates across
   restart; priors survive compaction; G1–G4 type-proven with deploy log (G5 retired).
 - **P2 (1–2 weeks):** hardening (blocklist tuning, multi-project isolation check, per-line approval UX,
-  evals, docs) + explicit opt-ins only (FTS mirror, TTL/decay command). Never automatic.
+  evals, docs) + explicit opt-ins only (FTS mirror, TTL/decay command). Never automatic. P2 also lands
+  the **local usage metrics + `/memory-metrics` dashboard** (§5.12, ADR-0008): production counterpart
+  of the §9 evals — count-only counters in `ctx.storage`, deterministic dashboard via
+  `memory_metrics` + `/memory-metrics` with the G-M1 synthetic-delivery gate (prompt fallback shipped
+  and type-proven on `@opencode/plugin` 2.0.29).

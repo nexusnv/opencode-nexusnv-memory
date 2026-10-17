@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import plugin from "../src/index.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
@@ -10,10 +13,22 @@ import {
   optionsSnippet,
   permissionsSnippet,
 } from "../src/templates.js";
+import { MEMORY_METRICS_COMMAND_DESCRIPTION } from "../src/metrics.js";
 
 const root = resolve(import.meta.dirname!, "..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
 const pkgPath = resolve(root, "package.json");
+
+/** Minimal storage fake for the setup wiring test: setup only
+ * constructs the bump adapter over it (bumps fire on hooks later). */
+const fakeStorageForSetup = {
+  get: async (_key: string) => undefined,
+  set: async (_key: string, _value: unknown) => undefined,
+  remove: async (_key: string) => undefined,
+  scan: async (_options: { prefix: string; after?: string; limit?: number }) => ({
+    entries: [] as Array<{ key: string; value: unknown }>,
+  }),
+};
 
 describe("shows_memory_in_plugin_list_and_scaffolds", () => {
   it("manifest is a bootable memory plugin package", () => {
@@ -129,6 +144,91 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     expect(existsSync(resolve(root, "commands/memory-review.md"))).toBe(true);
     const md = read("commands/memory-review.md");
     expect(md).toMatch(/memory-review/);
+  });
+
+  it("registers_memory_metrics_and_review_commands", async () => {
+    // index.ts wires registerMetricsCommand beside registerMemoryReview.
+    const src = read("src/index.ts");
+    expect(src).toMatch(/registerMetricsCommand/);
+
+    // setupHooks-style fake ctx (M-T6): registration wiring only, not
+    // behavior — capture what the command + tool editors receive from
+    // plugin.setup. Tool adds are name-collected; command adds are
+    // name → description.
+    const commands = new Map<string, string>();
+    const tools: string[] = [];
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-scaffold-"));
+    const setup = plugin.setup as unknown as (
+      ctx: unknown,
+    ) => Promise<(() => Promise<void>) | void>;
+    const cleanup = await setup({
+      options: {},
+      location: {
+        directory: projectRoot,
+        project: {
+          id: "scaffold-wiring",
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+      storage: fakeStorageForSetup,
+      permission: { assert: async (_input: unknown) => undefined },
+      tool: {
+        transform: async (
+          cb: (editor: { add: (tool: { name: string }) => void }) => void,
+        ) => {
+          cb({ add: (tool) => tools.push(tool.name) });
+          return { dispose: async () => undefined };
+        },
+        hook: async (
+          _name: string,
+          _cb: (event: never) => Promise<void> | void,
+        ) => ({
+          dispose: async () => undefined,
+        }),
+      },
+      command: {
+        transform: async (
+          cb: (
+            editor: { add: (def: { name: string; description?: string }) => void },
+          ) => void,
+        ) => {
+          cb({ add: (def) => commands.set(def.name, def.description ?? "") });
+          return { dispose: async () => undefined };
+        },
+      },
+      session: {
+        hook: async (
+          _name: string,
+          _cb: (event: never) => Promise<void> | void,
+        ) => ({
+          dispose: async () => undefined,
+        }),
+        prompt: async (args: unknown) =>
+          ({ sessionID: (args as { sessionID?: string }).sessionID }) as never,
+      },
+    });
+
+    // Command editor received BOTH plugin commands, in setup order
+    // (memory-review first, then memory-metrics).
+    expect([...commands.keys()]).toEqual(["memory-review", "memory-metrics"]);
+    // And the registered description is exactly the plugin constant.
+    expect(commands.get("memory-metrics")).toBe(
+      MEMORY_METRICS_COMMAND_DESCRIPTION,
+    );
+    // The file-based metrics stub mirrors the review stub's contract.
+    expect(
+      read("commands/memory-metrics.md").startsWith(
+        "---\ndescription: Local usage metrics of the memory plugin (count-only, on-machine)\n---\n",
+      ),
+      "metrics stub frontmatter description is byte-exact",
+    ).toBe(true);
+
+    // Tool editor received the read-only metrics query besides
+    // memory_recall/memory_apply.
+    expect(tools).toContain("memory_metrics");
+
+    await cleanup?.();
   });
 });
 

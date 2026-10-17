@@ -9,9 +9,12 @@
  *
  * The ask text demands a PROPOSAL TABLE only (target file, exact candidate
  * line, provenance tag, advisory injection flags) with cap + redaction
- * checks, validates manual `issues.md` edits without overwriting, and writes
- * nothing. A human approves specific lines; application is deterministic
- * afterwards via the `memory_apply` tool.
+ * checks, and validates manual `issues.md` edits without overwriting; a
+ * human approves specific lines, and application is deterministic
+ * afterwards via the `memory_apply` tool. The runtime writes no memory —
+ * the one documented exception is the §5.12 `review.invoked` metrics
+ * counter (ADR-0008 §7 amendment: count diagnostics, never a memory write,
+ * no content).
  *
  * No sandbox, no permission lock (retired G5): a plugin command cannot
  * target a subagent (`CommandInvocation` has no agent selector), and a
@@ -26,9 +29,12 @@
  * The command never resets counters: only `memory_apply` resets
  * `<projectID>/curation.pending` → 0 and clears
  * `<projectID>/curation.rotated` (including `candidates: []` as the
- * reviewed-nothing signal). This module never touches storage.
+ * reviewed-nothing signal). Storage touches: none — except the one
+ * documented §5.12 counter, the fire-and-forget `review.invoked` bump
+ * (count diagnostics; never a memory write, no content — ADR-0008 §7).
  */
 import type { Plugin } from "@opencode/plugin";
+import { metricsBumpOf } from "./metrics.js";
 
 export const MEMORY_REVIEW_COMMAND_NAME = "memory-review";
 
@@ -63,11 +69,25 @@ export function registerMemoryReview(
       execute: async ({ sessionID, prompt, delivery }) => {
         const base =
           typeof prompt?.text === "string" ? prompt.text : "";
+        const ask = buildReviewAsk(base);
+        // §5.12 tap: the invocation is counted exactly when it happened —
+        // after the ask is built, before it is sent (the invocation is a
+        // fact regardless of the ask's send outcome). Fire-and-forget with
+        // the bump resolved per call (P22); the wrapper keeps a broken
+        // plugin context from ever introducing a NEW failure into this
+        // command — the bump never masks, delays, or alters a review error
+        // (ADR-0008 §3: counters never change a command's outcome).
+        try {
+          const bump = metricsBumpOf(ctx);
+          void bump("review.invoked");
+        } catch {
+          // Best-effort diagnostics; they must never break the ask flow.
+        }
         await ctx.session.prompt({
           ...prompt,
           sessionID,
           delivery,
-          text: buildReviewAsk(base),
+          text: ask,
         });
       },
     });

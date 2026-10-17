@@ -15,9 +15,10 @@ src/ (or .opencode/plugins/memory/)
     ├── capture.ts   # captureFailure, snapshotHandoffIfChanged, ledger helpers
     ├── provenance.ts# classifyProvenance, rememberAsserted (source:user fast path)
     ├── guard.ts     # flagInjection (advisory), untrusted labelling, sanitizeForBrief
-    ├── tools.ts     # ctx.tool.transform: memory_recall, memory_apply
+    ├── tools.ts     # ctx.tool.transform: memory_recall, memory_apply, memory_metrics
     ├── files.ts     # readCapped, writeCapped, budget enforcement, archive routing, write mutex
     ├── redact.ts    # secrets blocklist + <private> stripping
+    ├── metrics.ts   # count-only counters (bump via ledger mutex), 90-day prune, dashboard renderer, /memory-metrics command (ADR-0008, spec §5.12)
     ├── config.ts    # ≤5 options, defaults, validation (ctx.options)
     └── templates.ts # six-file scaffolds + AGENTS.md protocol block text
 ```
