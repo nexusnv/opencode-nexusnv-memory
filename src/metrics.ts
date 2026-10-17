@@ -12,14 +12,16 @@
  * `bump` is fire-and-forget (ADR-0008 §3): it validates the name against the
  * fail-closed `METRIC_NAMES` set (unknown/malformed → warn-once + drop,
  * never throw), then schedules ONE `withWriteLock` body that writes the
- * total + day pair (+ `since` when absent), with its own catch — bumps never
- * delay or alter a hook outcome, never throw, and never reject unhandled.
- * `setArm`/`clearArm` are still awaited at their call sites (hint hit +
- * recall success) but stay never-throw and inside the same mutex. Day
- * buckets prune after 90 UTC days, piggybacked once per UTC day off the
- * first bump after a day change (fire-and-forget, module-level last-prune
- * stamp per process). Best-effort statistics: losing a bump to a crash or
- * cross-process race is accepted, unlike the correctness ledger.
+ * total + day pair (+ `since` when absent or malformed), with its own catch
+ * — bumps never delay or alter a hook outcome, never throw, and never
+ * reject unhandled. `setArm`/`clearArm` are still awaited at their call
+ * sites (hint hit + recall success) but stay never-throw and inside the
+ * same mutex. Day buckets prune after 90 UTC days, piggybacked once per
+ * UTC day per project off the first bump after a day change (fire-and-
+ * forget; module-level last-prune stamps per process, keyed by projectID,
+ * so one project's first bump cannot advance the stamp for other projects
+ * in the same process). Best-effort statistics: losing a bump to a crash
+ * or cross-process race is accepted, unlike the correctness ledger.
  *
  * `metrics.ts` imports `LedgerStorage` as a type from `capture.ts` (the
  * reverse `MetricsBump` type import lands with Task 3); both sides are
@@ -107,12 +109,16 @@ function logDiagnostic(error: unknown): void {
   }
 }
 
-/** Unknown/malformed requests warn exactly once per label, then silently drop. */
+/** Unknown/malformed requests warn exactly once per label (the first
+ * `WARNED_LIMIT` labels per process, keeping the Set bounded under an
+ * adversarial flood), then silently drop. */
+const WARNED_LIMIT = 128;
 const warned = new Set<string>();
 
 function warnOnce(label: string): void {
   try {
     if (warned.has(label)) return;
+    if (warned.size >= WARNED_LIMIT) return;
     warned.add(label);
     console.warn(
       `[memory] metrics: dropping unknown or malformed counter request: ${label}`,
@@ -175,15 +181,34 @@ function dayStamp(now: number): string {
 /** Fire-and-forget counter bump; `void bump(...)` — callers never await. */
 export type MetricsBump = (name: MetricName, by?: number) => void;
 
-/** Last UTC day the once-per-UTC-day prune piggyback ran for (per process). */
-let lastPruneStamp: string | undefined;
+/**
+ * Last piggyback-pruned UTC day, keyed by projectID: the prune piggybacks
+ * at most once per UTC day per project per process, so one project's first
+ * bump cannot advance the day stamp for other projects sharing the process
+ * (and because these are module-level rather than closure fields, the
+ * per-execute context adapters cannot prune on every tool call either).
+ */
+const lastPruneStamps = new Map<string, string>();
+
+/**
+ * Test seam: clear the once-per-process metrics state (prune piggyback
+ * stamps + warned labels) between isolated suites, mirroring
+ * `resetWriteChainForTests` (files.ts) / `resetLedgerSingleFlightForTests`
+ * (capture.ts). No on-disk state; production code never calls this.
+ */
+export function resetMetricsStateForTests(): void {
+  lastPruneStamps.clear();
+  warned.clear();
+}
 
 /**
  * The metrics bump for one project: validates the counter name against
  * `METRIC_NAMES` fail-closed, then schedules one locked body writing the
- * total + day pair (+ lazy `since` when absent). First bump after a UTC day
- * change piggybacks a fire-and-forget `pruneDayBuckets`. Every failure path
- * is caught: this never throws synchronously and never rejects unhandled.
+ * total + day pair (+ `since` when absent or malformed — the write path
+ * self-heals whatever `readSince` would reject). The first bump after a
+ * UTC day change piggybacks a fire-and-forget `pruneDayBuckets`, at most
+ * once per UTC day per project. Every failure path is caught: this never
+ * throws synchronously and never rejects unhandled.
  */
 export function createBump(
   storage: LedgerStorage,
@@ -208,15 +233,19 @@ export function createBump(
         const dayCurrent = asCount(await storage.get(day));
         await storage.set(day, dayCurrent + by);
         const since = await storage.get(sinceKey(projectID));
-        if (typeof since !== "string" || since.length === 0) {
+        // Lazy first-write stamp; also self-heals a stored value that
+        // `readSince` would reject (non-string/malformed), so the next
+        // dashboard read always sees a valid ISO timestamp.
+        if (typeof since !== "string" || !ISO_TIMESTAMP.test(since)) {
           await storage.set(sinceKey(projectID), new Date().toISOString());
         }
       }).catch(logDiagnostic);
-      // Piggyback the bounded-state prune off the bump, once per UTC day,
-      // fire-and-forget — scheduled after the write body, so a synchronous
-      // throw here cannot delay the counter itself.
-      if (stamp !== lastPruneStamp) {
-        lastPruneStamp = stamp;
+      // Piggyback the bounded-state prune off the bump — at most once per
+      // UTC day per project (per-process map), fire-and-forget, scheduled
+      // after the write body so a synchronous throw here cannot delay the
+      // counter itself.
+      if (stamp !== lastPruneStamps.get(projectID)) {
+        lastPruneStamps.set(projectID, stamp);
         void pruneDayBuckets(storage, projectID).catch(logDiagnostic);
       }
     } catch (error) {
@@ -248,7 +277,9 @@ async function scanAll(
         ? await storage.scan({ prefix })
         : await storage.scan({ prefix, after });
     for (const entry of page.entries) all.push(entry);
-    if (page.next === undefined) break;
+    // No-progress guard: a broken/fake port repeating the same cursor must
+    // terminate, never hang the awaiting caller.
+    if (page.next === undefined || page.next === after) break;
     after = page.next;
   }
   return all;
@@ -279,9 +310,14 @@ export async function readDays(
   const out: Record<string, Record<string, number>> = {};
   for (const entry of await scanAll(storage, prefix)) {
     if (!entry.key.startsWith(prefix)) continue;
-    const [stamp, name] = entry.key.slice(prefix.length).split("/");
-    if (stamp === undefined || !DAY_STAMP.test(stamp)) continue;
-    if (name === undefined || !METRIC_NAMES.has(name)) continue;
+    // Exactly `<stamp>/<name>`: extra segments are not a counter we
+    // recognize, so the key is skipped (fail-closed reads).
+    const segments = entry.key.slice(prefix.length).split("/");
+    if (segments.length !== 2) continue;
+    const stamp = segments[0];
+    if (!DAY_STAMP.test(stamp)) continue;
+    const name = segments[1];
+    if (!METRIC_NAMES.has(name)) continue;
     if (out[stamp] === undefined) out[stamp] = {};
     out[stamp][name] = asCount(entry.value);
   }

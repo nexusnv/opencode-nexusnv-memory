@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Plugin } from "@opencode/plugin";
 import { withWriteLock } from "../src/files.js";
 import type { LedgerStorage } from "../src/capture.js";
@@ -15,6 +15,7 @@ import {
   readDays,
   readSince,
   readTotals,
+  resetMetricsStateForTests,
   setArm,
   sinceKey,
   totalKey,
@@ -108,6 +109,12 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await withWriteLock(async () => undefined);
 }
+
+beforeEach(() => {
+  // Each test starts from zero metrics state: the next bump is genuinely
+  // the process's first (prune piggyback fires, warned labels are fresh).
+  resetMetricsStateForTests();
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -228,6 +235,13 @@ describe("bump counters", () => {
     bump("hook.prompt");
     await settle();
     expect(await storage.get(sinceKey(PROJECT))).toBe(since);
+    // Self-heal: a tampered since is rewritten on the next bump.
+    storage.data.set(sinceKey(PROJECT), "garbage");
+    bump("hook.prompt");
+    await settle();
+    const healed = await readSince(storage, PROJECT);
+    expect(healed).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/);
+    expect(healed).not.toBe("garbage");
   });
 
   it("warns once and drops unknown counter names without writing", async () => {
@@ -267,6 +281,18 @@ describe("bump counters", () => {
     // The shared write chain must stay healthy after the failures.
     await expect(withWriteLock(async () => "ok")).resolves.toBe("ok");
   });
+
+  it("contains the first post-reset piggyback prune when storage is down", async () => {
+    // beforeEach already reset the metrics state, so this is genuinely the
+    // process's first bump: the piggyback prune fires against ThrowingStorage.
+    const bump = createBump(new ThrowingStorage(), PROJECT);
+    expect(() => {
+      bump("hook.prompt");
+    }).not.toThrow();
+    await settle();
+    // No unhandled rejection (vitest would fail the run) and the chain stays usable.
+    await expect(withWriteLock(async () => "ok")).resolves.toBe("ok");
+  });
 });
 
 describe("arm flag (hint→recall, binary as int 1)", () => {
@@ -304,6 +330,8 @@ describe("readers", () => {
     // Tampered keys (not writable through bump) are read-filtered fail-closed.
     storage.data.set(`${PROJECT}/metrics/total/rogue`, 5);
     storage.data.set(`${PROJECT}/metrics/day/badstamp/hook.prompt`, 1);
+    // Extra segments after `<stamp>/<name>` are not a recognized counter.
+    storage.data.set(`${PROJECT}/metrics/day/20260101/hook.prompt/extra`, 9);
     expect(await readTotals(storage, PROJECT)).toEqual({
       "hook.prompt": 1,
       "recall.INDEX.md": 2,
@@ -412,6 +440,36 @@ describe("once-per-UTC-day prune piggyback", () => {
     await settle();
     expect(await storage.get(dayKey(PROJECT, oldStamp, "hook.prompt"))).toBe(3);
     expect(await storage.get(totalKey(PROJECT, "hint.recall"))).toBe(1);
+  });
+
+  it("prunes per project: two projects each piggyback on the same UTC day", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const base = Date.UTC(2040, 0, 1); // fixed UTC day, never the real today
+    vi.setSystemTime(base);
+    const oldStamp = dayStampOf(base - 92 * DAY_MS);
+    const storageA = new FakeStorage();
+    const storageB = new FakeStorage();
+    await storageA.set(dayKey(PROJECT, oldStamp, "hook.prompt"), 4);
+    await storageB.set(dayKey("proj-other", oldStamp, "hook.prompt"), 4);
+    const bumpA = createBump(storageA, PROJECT);
+    const bumpB = createBump(storageB, "proj-other");
+
+    bumpA("hook.prompt");
+    await settle();
+    // Project A piggybacks: its expired bucket is gone.
+    expect(
+      await storageA.get(dayKey(PROJECT, oldStamp, "hook.prompt")),
+    ).toBeUndefined();
+    expect(await storageA.get(totalKey(PROJECT, "hook.prompt"))).toBe(1);
+
+    // Project B piggybacks too on the SAME UTC day: A's first bump must not
+    // advance the prune stamp for B (per-project, not global).
+    bumpB("hook.prompt");
+    await settle();
+    expect(
+      await storageB.get(dayKey("proj-other", oldStamp, "hook.prompt")),
+    ).toBeUndefined();
+    expect(await storageB.get(totalKey("proj-other", "hook.prompt"))).toBe(1);
   });
 });
 
