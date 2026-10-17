@@ -23,12 +23,20 @@
  * in the same process). Best-effort statistics: losing a bump to a crash
  * or cross-process race is accepted, unlike the correctness ledger.
  *
- * `metrics.ts` imports `LedgerStorage` as a type from `capture.ts` (the
- * reverse `MetricsBump` type import lands with Task 3); both sides are
- * erased at compile time, so there is no runtime cycle.
+ * `metrics.ts` imports `getPending` and the `LedgerStorage` type from
+ * `capture.ts`; `capture.ts` imports `MetricsBump` only as a type (Task 3),
+ * so both directions stay cycle-free at runtime.
  */
-import { withWriteLock } from "./files.js";
-import type { LedgerStorage } from "./capture.js";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  countLines,
+  getCapForFile,
+  resolveMemoryRoot,
+  withWriteLock,
+} from "./files.js";
+import { getPending, type LedgerStorage } from "./capture.js";
+import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import type { Plugin } from "@opencode/plugin";
 
 /**
@@ -264,10 +272,12 @@ function sortRecord(record: Record<string, number>): Record<string, number> {
   return out;
 }
 
-/** Drain a paginated scan via `after`/`next` (modeled on the seen prune). */
+/** Drain a paginated scan via `after`/`next` (modeled on the seen prune),
+ * collecting at most `limit` entries when given (hard cap mid-pagination). */
 async function scanAll(
   storage: LedgerStorage,
   prefix: string,
+  limit = Number.POSITIVE_INFINITY,
 ): Promise<Array<{ readonly key: string; readonly value: unknown }>> {
   const all: Array<{ key: string; value: unknown }> = [];
   let after: string | undefined;
@@ -280,6 +290,9 @@ async function scanAll(
     // No-progress guard: a broken/fake port repeating the same cursor must
     // terminate, never hang the awaiting caller.
     if (page.next === undefined || page.next === after) break;
+    // `limit` (health's seen count): stop paging once the bound is reached,
+    // no matter how many pages the port still offers.
+    if (all.length >= limit) break;
     after = page.next;
   }
   return all;
@@ -411,6 +424,286 @@ export async function pruneDayBuckets(
     }
   });
   return victims.length;
+}
+
+/* ------------------------------------------------------------------ */
+/* Health collectors + dashboard renderer (spec §5.12 renderer         */
+/* contract + ADR-0008; M-T2).                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The six structural file names whose line counts the health block always
+ * reports (ADR-0008: the only file names a metric may carry), listed in
+ * name-sorted order so the rows render sorted for free.
+ */
+export const MEMORY_HEALTH_FILES = [
+  "INDEX.md",
+  "activeContext.md",
+  "architecture.md",
+  "decisions.md",
+  "issues.md",
+  "style.md",
+] as const;
+
+/** One of the six structural file names above. */
+export type MemoryHealthFile = (typeof MEMORY_HEALTH_FILES)[number];
+
+/** One health line-count row; `cap` is omitted for the unbounded file
+ * (`decisions.md` keeps growing on disk per §6). */
+export interface MemoryHealthFileLine {
+  readonly file: MemoryHealthFile;
+  readonly lines: number;
+  readonly cap?: number;
+}
+
+/**
+ * Count-only memory-file health (§5.12 renderer contract): per-file line
+ * counts vs caps, `handoffs/` and `handoffs/archive/` file counts, pending,
+ * seen-set size, and the decisions.md line count. No body of any file is
+ * ever included — every field is a plain integer count.
+ */
+export interface MemoryHealth {
+  readonly files: readonly MemoryHealthFileLine[];
+  readonly handoffs: number;
+  readonly archive: number;
+  readonly pending: number;
+  readonly seen: number;
+  readonly decisionsLines: number;
+}
+
+/**
+ * Renderer input, typed so a content-bearing string cannot reach
+ * `renderMetricsDashboard`: counter names come only from the vocabulary,
+ * and every record **value** is a `number` (ADR-0008 numbers-only rule,
+ * mirrored at the type level). `since` is the storage layer's ISO stamp —
+ * the renderer validates it against the same ISO regex before emitting.
+ */
+export interface MetricsDashboardInput {
+  readonly since: string | undefined;
+  readonly totals: Readonly<Partial<Record<MetricName, number>>>;
+  readonly days: Readonly<
+    Record<string, Readonly<Partial<Record<MetricName, number>>>>
+  >;
+  readonly health: MemoryHealth;
+}
+
+/**
+ * §5.12 table partition: "explicit calls (recall/apply/review)" — the
+ * seams a user actually invokes (memory_recall, memory_apply, the
+ * review/metrics commands). Everything hook-triggered lands "behind the
+ * scenes", including the hint→recall correlation per the same §5.12
+ * sentence. Derived from the vocabulary (not hand-maintained) so no
+ * counter can be forgotten.
+ */
+function isExplicitCall(name: MetricName): boolean {
+  return (
+    name.startsWith("recall.") ||
+    name.startsWith("apply.") ||
+    name === "review.invoked" ||
+    name === "dashboard.shown" ||
+    name === "dashboard.reset"
+  );
+}
+
+/** Vocabulary in name-sorted order: the deterministic render order. */
+const COUNTER_NAMES_SORTED: ReadonlyArray<MetricName> = [
+  ...METRIC_NAME_LIST,
+].sort();
+
+/** Explicit-calls table rows (§5.12 "recall/apply/review (+ commands)"). */
+const EXPLICIT_CALL_NAMES: ReadonlyArray<MetricName> =
+  COUNTER_NAMES_SORTED.filter(isExplicitCall);
+
+/** Behind-the-scenes table rows (hook-triggered + hint→recall). */
+const BEHIND_THE_SCENES_NAMES: ReadonlyArray<MetricName> =
+  COUNTER_NAMES_SORTED.filter((name) => !isExplicitCall(name));
+
+/** Last 7 UTC day stamps surface in the budget-pressure view (§5.12). */
+const BUDGET_WINDOW_DAYS = 7;
+
+/** Seen-set size is reported at the ledger's ≤500 bound (§6 data model). */
+const SEEN_SCAN_CAP = 500;
+
+/**
+ * A pure, deterministic markdown dashboard over `{since, totals, days,
+ * health}` — §5.12 renderer contract: no fs, no storage, no clock inside
+ * (the 7-day budget window is derived purely from the input's day
+ * stamps). The only strings it can emit are the fixed furniture below,
+ * counter names, the six structural file names, UTC day stamps, integers,
+ * and the validated ISO `since` stamp — ADR-0008's numbers-only rule, with
+ * the dashboard as the one deliberate (constrained) text surface.
+ *
+ * Titles, tables, and rows:
+ * `# [memory] metrics (local-only)` + `Since: <ISO|->`; `## Explicit calls`
+ * and `## Behind the scenes` render the whole vocabulary (present-but-0
+ * rows for stability, §5.12 leaves the zero-row policy unspecified), name
+ * sorted; `## Memory health` renders the six structural file rows (cap
+ * column `-` where unbounded) then the §5.12 scalar block (handoffs,
+ * archive, pending, seen, decisionsLines) in §5.12's field order;
+ * `## Budget pressure` renders the last `BUDGET_WINDOW_DAYS` day stamps of
+ * the input (by sort order), one row per counter actually bumped that day,
+ * sorted (stamp, counter name).
+ */
+export function renderMetricsDashboard(input: MetricsDashboardInput): string {
+  const lines: string[] = [];
+  lines.push("# [memory] metrics (local-only)");
+  // The ISO check mirrors `readSince`: malformed values render as `-`,
+  // never as their raw text.
+  lines.push(
+    `Since: ${
+      typeof input.since === "string" && ISO_TIMESTAMP.test(input.since)
+        ? input.since
+        : "-"
+    }`,
+  );
+
+  const counterRows = (
+    names: ReadonlyArray<MetricName>,
+    record: Readonly<Partial<Record<MetricName, number>>>,
+  ): void => {
+    lines.push("| counter | count |");
+    lines.push("|---|---:|");
+    for (const name of names) {
+      lines.push(`| ${name} | ${asCount(record[name])} |`);
+    }
+  };
+
+  lines.push("");
+  lines.push("## Explicit calls");
+  counterRows(EXPLICIT_CALL_NAMES, input.totals);
+
+  lines.push("");
+  lines.push("## Behind the scenes");
+  counterRows(BEHIND_THE_SCENES_NAMES, input.totals);
+
+  lines.push("");
+  lines.push("## Memory health");
+  lines.push("| file | lines | cap |");
+  lines.push("|---|---:|---:|");
+  for (const file of input.health.files) {
+    const cap = file.cap;
+    lines.push(
+      `| ${file.file} | ${asCount(file.lines)} | ${
+        typeof cap === "number" && Number.isFinite(cap) ? asCount(cap) : "-"
+      } |`,
+    );
+  }
+  lines.push("");
+  lines.push("| name | count |");
+  lines.push("|---|---:|");
+  lines.push(`| handoffs | ${asCount(input.health.handoffs)} |`);
+  lines.push(`| archive | ${asCount(input.health.archive)} |`);
+  lines.push(`| pending | ${asCount(input.health.pending)} |`);
+  lines.push(`| seen | ${asCount(input.health.seen)} |`);
+  lines.push(`| decisionsLines | ${asCount(input.health.decisionsLines)} |`);
+
+  lines.push("");
+  lines.push("## Budget pressure");
+  lines.push("| day | counter | count |");
+  lines.push("|---|---|---:|");
+  for (const stamp of Object.keys(input.days)
+    .filter((candidate) => DAY_STAMP.test(candidate))
+    .sort()
+    .slice(-BUDGET_WINDOW_DAYS)) {
+    const day = input.days[stamp] ?? {};
+    for (const name of COUNTER_NAMES_SORTED) {
+      const value = day[name];
+      // Only counters bumped that day surface (§5.12 leaves this
+      // unspecified; present-in-bucket is the compact, deterministic
+      // choice). Unknown keys in the record are skipped by construction.
+      if (value === undefined) continue;
+      lines.push(`| ${stamp} | ${name} | ${asCount(value)} |`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** True for filesystem misses (ENOENT/ENOTDIR/EISDIR): expected zeros, not faults. */
+function isMissingEntry(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR";
+}
+
+/** File line count via `readFile` + `countLines`; missing/unreadable → 0. */
+async function readFileLineCount(root: string, file: string): Promise<number> {
+  try {
+    return countLines(await readFile(join(root, file), "utf8"));
+  } catch (error) {
+    if (!isMissingEntry(error)) logDiagnostic(error);
+    return 0;
+  }
+}
+
+/**
+ * File count of a health directory; missing/unreadable → 0. Directory
+ * entries that are directories themselves never count, so the nested
+ * `handoffs/archive/` is not mistaken for a handoff file (§5.12 counts
+ * `handoffs/` and `handoffs/archive/` file counts separately).
+ */
+async function countDirEntries(root: string, dir: string): Promise<number> {
+  try {
+    const entries = await readdir(join(root, dir), { withFileTypes: true });
+    return entries.filter((entry) => !entry.isDirectory()).length;
+  } catch (error) {
+    if (!isMissingEntry(error)) logDiagnostic(error);
+    return 0;
+  }
+}
+
+/**
+ * Seen-set size via paginated `scan` (same `after`/`next` walk the readers
+ * use), rendered as min(true size, 500): the ledger already prunes to 500
+ * (§6), so the dashboard never needs to page past the bound.
+ */
+async function countSeen(
+  storage: LedgerStorage,
+  projectID: string,
+): Promise<number> {
+  const prefix = `${projectPrefix(projectID)}seen/`;
+  const entries = await scanAll(storage, prefix, SEEN_SCAN_CAP);
+  return Math.min(entries.length, SEEN_SCAN_CAP);
+}
+
+/**
+ * Live memory health for the dashboard: line counts of the six structural
+ * files (`readFile` + `countLines`, never bodies), directory file counts,
+ * the stored `<projectID>/curation.pending` int (via `getPending`, the
+ * ledger's own coercion), and the seen-set size. Returns counts only —
+ * no file content ever leaves this function. Storage errors propagate the
+ * same way `readTotals`/`readDays` do (the executor wraps them); fs misses
+ * resolve to zero counts rather than failing the render.
+ */
+export async function collectHealth(
+  memoryRoot: string,
+  storage: LedgerStorage,
+  projectID: string,
+): Promise<MemoryHealth> {
+  const root = resolveMemoryRoot(memoryRoot);
+  let decisionsLines = 0;
+  const files: MemoryHealthFileLine[] = [];
+  for (const file of MEMORY_HEALTH_FILES) {
+    const lines = await readFileLineCount(root, file);
+    if (file === "decisions.md") decisionsLines = lines;
+    // Same caps the writers enforce: the config defaults through
+    // `files.ts`'s own cap resolver (decisions.md → Infinity → omitted).
+    const cap = getCapForFile(
+      file,
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.fileLines,
+    );
+    files.push(
+      Number.isFinite(cap) ? { file, lines, cap } : { file, lines },
+    );
+  }
+  return {
+    files,
+    handoffs: await countDirEntries(root, "handoffs"),
+    archive: await countDirEntries(root, join("handoffs", "archive")),
+    pending: await getPending(storage, projectID),
+    seen: await countSeen(storage, projectID),
+    decisionsLines,
+  };
 }
 
 /**
