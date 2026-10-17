@@ -812,11 +812,15 @@ describe("metrics taps (M-T3)", () => {
         "status.shown": 1,
         "hint.shown": 1,
       });
-      // The hint hit arms the flag: <projectID>/metrics/arm/hint/<sessionID>
-      // = 1, and exactly one arm write landed (awaited setArm).
-      expect(
-        await store.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
-      ).toBe(1);
+      // The hint hit arms the entry: <projectID>/metrics/arm/hint/<sessionID>
+      // stores a positive-int arming timestamp, and exactly one arm write
+      // landed (awaited setArm).
+      const armedValue = await store.get(
+        `${PROJECT}/metrics/arm/hint/${SESSION}`,
+      );
+      expect(typeof armedValue).toBe("number");
+      expect(Number.isInteger(armedValue)).toBe(true);
+      expect(armedValue).toBeGreaterThan(0);
       expect(armWriteCount(store)).toBe(1);
       // Total + day pair for every counter bumped this run. The expected
       // stamp is derived from the data (the buckets the bumps themselves
@@ -847,10 +851,14 @@ describe("metrics taps (M-T3)", () => {
         "status.dropped": 1,
         "hint.shown": 1,
       });
-      // The hint still fired, so the flag is armed even on a dropped status.
-      expect(
-        await store.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
-      ).toBe(1);
+      // The hint still fired, so the arm entry is set (a positive-int
+      // arming timestamp) even on a dropped status.
+      const armedValue = await store.get(
+        `${PROJECT}/metrics/arm/hint/${SESSION}`,
+      );
+      expect(typeof armedValue).toBe("number");
+      expect(Number.isInteger(armedValue)).toBe(true);
+      expect(armedValue).toBeGreaterThan(0);
     }
 
     // -- context hook: empty memory files → brief.empty only ---------------

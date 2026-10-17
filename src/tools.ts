@@ -159,19 +159,22 @@ export interface ApplyToolContext {
 
 /**
  * The arm transport `memory_recall` consults on success (§5.12 hint→recall
- * correlation): consume this session's hint flag
- * (`<projectID>/metrics/arm/hint/<sessionID>`, the int `1`) in one atomic
- * read+clear. The flag lives in the metrics namespace, which is why `bump`
- * alone can neither read nor clear it. Method shorthand keeps the shape
+ * correlation): consume this session's hint arm entry
+ * (`<projectID>/metrics/arm/hint/<sessionID>`, a positive-int arming
+ * timestamp) in one atomic read+clear. The entry lives in the metrics
+ * namespace, which is why `bump` alone can neither read nor clear it. The
+ * value arms the session only while the stamp is within one UTC day — a
+ * stale hint can no longer convert. Method shorthand keeps the shape
  * bivariant so both the real wiring and test fakes satisfy it (same pattern
  * as `PermissionAsserter`).
  */
 export interface MetricsArm {
   /**
-   * Atomically read and clear the armed flag (§5.12): resolves `true` only
-   * for the one consumer whose locked read+remove ran while the flag was
-   * still set — concurrent recalls in the same session can never both
-   * convert, and a cleared/unarmed session resolves `false` cleanly.
+   * Atomically read and clear the armed entry (§5.12): resolves `true` only
+   * for the one consumer whose locked read+remove ran while the entry was
+   * still armed and fresh (stamped within the last UTC day) — concurrent
+   * recalls in the same session can never both convert, and a
+   * cleared/unarmed/stale session resolves `false` cleanly.
    */
   consumeArm(sessionID: string): Promise<boolean>;
 }

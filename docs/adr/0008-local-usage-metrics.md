@@ -35,9 +35,9 @@ ever collecting content?
    - Counter names are an **enumerated, fixed vocabulary** in `src/metrics.ts` — fail-closed: an
      unknown name is logged and dropped, never written, so the key space cannot grow unboundedly.
    - **No content, ever.** No prompt text, tool output, captured-path strings, identities, or prose
-     enters any metric key or value; every persisted metrics value is a JSON number (the arm flag is
-     the int `1` when armed — binary semantics, numeric storage — so the number-only invariant is
-     testable as a literal gate). Wherever a file
+     enters any metric key or value; every persisted metrics value is a JSON number (the arm entry
+     is a positive-int arming timestamp when armed — session-flag semantics, numeric storage — so
+     the number-only invariant is testable as a literal gate). Wherever a file
      name appears it is one of the six allowlisted structural names (or the aggregate `handoff` /
      `error` bucket for the open-ended handoff set). The rule the ledger already applies to content
      IDs (opaque hashes, ADR-0004) extends to metrics by construction.
@@ -72,7 +72,11 @@ ever collecting content?
      verbatim. That fallback also covers any later OpenCode build whose synthetic surface drifts.
 5. **Bounded state.** Daily buckets are pruned after **90 UTC days** (paginated
    `scan` + `remove`, modeled on the `seen`-set prune) with a once-per-UTC-day piggyback check, so
-   the namespace stays small and the dashboard render stays `O(days × names)`.
+   the namespace stays small and the dashboard render stays `O(days × names)`. Arm entries age out
+   after **one UTC day**: the arming timestamp is the stored value, reads age it out live (a stale
+   hint can no longer convert — the piggyback prune cannot fire while OpenCode is not running, so
+   the consumer must not trust an old stamp), and the same daily pass clears entries the consumer
+   never touched, so hinted-but-never-recalled sessions do not accumulate keys.
 6. **Rich TUI panel deferred** (spec §8 D-G). A separate client-side `@opencode/plugin/tui` plugin
    (SolidJS + `@opentui`, live pages/slots/dialogs via `ui.router.register`/`ui.slot`) could render
    a real-time panel, but it is a second plugin type and a heavier install path for no additional
@@ -93,10 +97,10 @@ ever collecting content?
   status line only gestures at. All of it stays on the user's machine inside the plugin's storage
   namespace.
 - Negative: `ctx.storage` grows by one bounded set per project (≤ the enumerated counter names +
-  ≤ 90 day buckets × actually-bumped names); each bump writes two ints (total + day) fire-and-forget.
-  The never-throw/volume suite asserts a 1,000-bump burst with a saturated storage queue cannot
-  delay a hook — `bump` is a synchronous `void` that schedules at most one locked write body — so
-  hook latency is structurally unaffected.
+  ≤ 90 day buckets × actually-bumped names + ≤ hinted sessions within the last UTC day); each bump
+  writes two ints (total + day) fire-and-forget. The never-throw/volume suite asserts a 1,000-bump
+  burst with a saturated storage queue cannot delay a hook — `bump` is a synchronous `void` that
+  schedules at most one locked write body — so hook latency is structurally unaffected.
 - Residual risk, stated honestly: on-machine usage-pattern metadata (counts + timestamps) is still
   metadata; a user may not want it even locally. The mitigations are the same class the repo already
   trusts — on-machine residence inside the plugin's own namespace, a documented storage location, a

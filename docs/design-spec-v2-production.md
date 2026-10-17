@@ -817,19 +817,22 @@ with a fail-closed guard):
 | `memory_recall` (§5.4) | `recall.<structural-name>` for the six allowlisted files (`recall.INDEX.md`, `recall.activeContext.md`, `recall.decisions.md`, `recall.architecture.md`, `recall.style.md`, `recall.issues.md`), `recall.handoff` for any `handoffs/…` path, `recall.error` on rejection (the thrown error propagates unchanged — metrics never mask a failure) |
 | `memory_apply` (§5.4) | `apply.batch` (one per call); `apply.lines` (by candidate count); `apply.denied` (per line whose `permission.assert` rejected); `apply.partialError` (a mid-batch write failure after ≥1 applied); `apply.reset` on the completion reset incl. `candidates: []` |
 | commands | `review.invoked` (`/memory-review` — count diagnostics only, no memory write); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
-| hint→recall correlation | `hint.shown` arms a session flag (`<projectID>/metrics/arm/hint/<sessionID>`, stored as the int `1` — cleared on first use); a successful `memory_recall` **in that session while armed** bumps `hint.recall` and clears the flag — the one binary metric (numeric storage, no content, never any text) |
+| hint→recall correlation | `hint.shown` arms a session entry (`<projectID>/metrics/arm/hint/<sessionID>`, a positive-int arming timestamp — armed for at most one UTC day after that stamp); a successful `memory_recall` **in that session while armed (and fresh)** bumps `hint.recall` and clears the entry — the one session-scoped flag (numeric storage, no content, never any text; stale hints never convert and the daily prune clears unaged-out leftovers) |
 
 Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
 
 - `<projectID>/metrics/total/<name>` → int, monotonic until `reset`.
 - `<projectID>/metrics/day/<YYYYMMDD>/<name>` → int per UTC day.
 - `<projectID>/metrics/since` → first-write timestamp (the dashboard "since" line).
-- `<projectID>/metrics/arm/hint/<sessionID>` → arm flag as the int `1` (transient, cleared on first
-  use; the number-only invariant above stays true for every metrics value).
+- `<projectID>/metrics/arm/hint/<sessionID>` → arm entry as a positive-int arming timestamp
+  (transient: armed only while that stamp is within one UTC day; cleared on first use (including a
+  stale consume), and unclaimed leftovers are pruned; the number-only invariant above stays true
+  for every metrics value).
 - Bounded state: day buckets pruned after **90 UTC days** via paginated
   `scan({prefix:"<projectID>/metrics/day/"})` + `remove` (modeled on the `seen` prune), piggybacked
-  once per UTC day off the first bump after a day change (fire-and-forget). Total counter names are
-  capped by the enumeration above, so the namespace is small and flat.
+  once per UTC day off the first bump after a day change (fire-and-forget); the same daily pass
+  also clears `metrics/arm/…` entries older than one UTC day.
+  Total counter names are capped by the enumeration above, so the namespace is small and flat.
 - Writes serialize through the existing per-process mutex (§5.7); each bump is a single locked body
   writing the total + day pair (+ a lazy `since` set when absent). `reset` removes all
   `<projectID>/metrics/…` keys (paginated scan + remove) and stamps a fresh `since`.
@@ -887,7 +890,7 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
 | Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); pruned via `scan({prefix:"<projectID>/seen/"})` to ≤500; 30s retry window | bounded |
-| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient int arm flag: the `1` when armed, cleared on first use); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset` wipes the namespace | ≤ enumerated totals + ≤90 day buckets × bumped names |
+| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient arm entry: a positive-int arming timestamp when armed, armed ≤ one UTC day, cleared on first use or the daily prune); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset` wipes the namespace | ≤ enumerated totals + ≤90 day buckets × bumped names + ≤ hinted sessions in the last UTC day |
 
 Retention = **reachability** (ADR-0005): active (retain + injectable suffix) / causal (one hop behind,
 follow-on-demand) / conditional (INDEX one-liner) / archived (`handoffs/archive/`, recallable, never

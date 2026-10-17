@@ -323,12 +323,48 @@ describe("bump counters", () => {
 });
 
 describe("arm flag (hint→recall, binary as int 1)", () => {
-  it("stores the armed flag as the number 1 and reads it back per session", async () => {
+  it("stores the arming timestamp as a positive int and reads it back per session", async () => {
     const storage = new FakeStorage();
+    const before = Date.now();
     await setArm(storage, PROJECT, SESSION);
-    expect(await storage.get(armKey(PROJECT, SESSION))).toBe(1);
+    const stored = await storage.get(armKey(PROJECT, SESSION));
+    expect(typeof stored).toBe("number");
+    expect(Number.isInteger(stored)).toBe(true);
+    expect(stored as number).toBeGreaterThanOrEqual(before);
     expect(await readArmed(storage, PROJECT, SESSION)).toBe(true);
     expect(await readArmed(storage, PROJECT, "sess-other")).toBe(false);
+  });
+
+  it("ages the arm out after one UTC day (stale hints never convert)", async () => {
+    const storage = new FakeStorage();
+    await storage.set(armKey(PROJECT, SESSION), Date.now() - DAY_MS - 1);
+    // The stamp is session-shaped but outside the one-day arm lifetime.
+    expect(await readArmed(storage, PROJECT, SESSION)).toBe(false);
+    // A stale consume clears the entry (housekeeping) and converts nothing.
+    await expect(consumeArm(storage, PROJECT, SESSION)).resolves.toBe(false);
+    expect(await storage.get(armKey(PROJECT, SESSION))).toBeUndefined();
+    // A malformed arm value (0 / a text value) is never armed and never removed.
+    await storage.set(armKey(PROJECT, "sess-zero"), 0);
+    await storage.set(armKey(PROJECT, "sess-junk"), "1");
+    expect(await readArmed(storage, PROJECT, "sess-zero")).toBe(false);
+    expect(await readArmed(storage, PROJECT, "sess-junk")).toBe(false);
+    await expect(consumeArm(storage, PROJECT, "sess-zero")).resolves.toBe(false);
+    expect(await storage.get(armKey(PROJECT, "sess-zero"))).toBe(0);
+    expect(await storage.get(armKey(PROJECT, "sess-junk"))).toBe("1");
+  });
+
+  it("boundaries the one-day window exactly", async () => {
+    // Pin the clock so the half-open boundary is exact regardless of how
+    // long the test body takes to run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const now = Date.now();
+    const storage = new FakeStorage();
+    // Exactly one day old is still inside the window; one ms older is stale.
+    await storage.set(armKey(PROJECT, "sess-edge"), now - DAY_MS);
+    expect(await readArmed(storage, PROJECT, "sess-edge")).toBe(true);
+    await storage.set(armKey(PROJECT, "sess-past"), now - DAY_MS - 1);
+    expect(await readArmed(storage, PROJECT, "sess-past")).toBe(false);
+    vi.useRealTimers();
   });
 
   it("clears the flag and tolerates double clears", async () => {
@@ -470,6 +506,34 @@ describe("pruneDayBuckets", () => {
     await storage.set(sinceKey(PROJECT), "2026-10-17T00:00:00.000Z");
     expect(await pruneDayBuckets(storage, PROJECT)).toBe(0);
     expect(storage.data.size).toBe(3);
+  });
+
+  it("prunes arm entries past one UTC day; fresh and malformed values stay", async () => {
+    const storage = new FakeStorage();
+    const now = Date.now();
+    // One aged day bucket + one stale arm prove the combined removal count.
+    await storage.set(
+      dayKey(PROJECT, dayStampOf(now - (DAY_BUCKET_RETENTION_DAYS + 5) * DAY_MS), "hook.prompt"),
+      2,
+    );
+    await storage.set(armKey(PROJECT, "sess-stale"), now - DAY_MS - 1);
+    // In-lifetime arm entries survive, future stamps included.
+    await storage.set(armKey(PROJECT, "sess-fresh"), now - 1000);
+    await storage.set(armKey(PROJECT, "sess-future"), now + 1000);
+    // Malformed / foreign / unrelated keys stay untouched.
+    await storage.set(armKey(PROJECT, "sess-zero"), 0);
+    await storage.set(armKey(PROJECT, "sess-junk"), "1");
+    await storage.set("other-project/metrics/arm/hint/s", now - DAY_MS * 99);
+    await storage.set(totalKey(PROJECT, "hook.prompt"), 7);
+    expect(await pruneDayBuckets(storage, PROJECT)).toBe(2);
+    expect(await storage.get(armKey(PROJECT, "sess-stale"))).toBeUndefined();
+    for (const id of ["sess-fresh", "sess-future", "sess-zero", "sess-junk"]) {
+      expect(await storage.get(armKey(PROJECT, id))).toBeDefined();
+    }
+    expect(
+      await storage.get("other-project/metrics/arm/hint/s"),
+    ).toBeDefined();
+    expect(await storage.get(totalKey(PROJECT, "hook.prompt"))).toBe(7);
   });
 });
 

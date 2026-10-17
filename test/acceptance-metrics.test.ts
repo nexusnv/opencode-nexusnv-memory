@@ -795,8 +795,12 @@ async function driveUsageRun(
         "hint.shown": 1,
         "snapshot.written": 1,
       });
-      // The hint hit armed this session's flag (the awaited setArm).
-      expect(await store.get(armKey(PROJECT, SESSION))).toBe(1);
+      // The hint hit armed this session's entry (the awaited setArm): the
+      // value is a positive-int arming timestamp.
+      const armedValue = await store.get(armKey(PROJECT, SESSION));
+      expect(typeof armedValue).toBe("number");
+      expect(Number.isInteger(armedValue)).toBe(true);
+      expect(armedValue).toBeGreaterThan(0);
       expect(await readArmed(store, PROJECT, SESSION)).toBe(true);
       record.armedAfterContext = true;
     }

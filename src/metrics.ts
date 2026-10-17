@@ -3,9 +3,11 @@
  *
  * Count-only, on-machine self-measurement over the plugin-scoped storage
  * under `<projectID>/metrics/…`: monotonic total counters, UTC day buckets,
- * a lazy `since` first-write stamp, and the one binary arm flag (stored as
- * the int `1` so the number-only invariant holds; `since` is the sole
- * ISO-8601 timestamp string). Nothing free-text is ever stored — counter
+ * a lazy `since` first-write stamp, and the one per-session arm flag
+ * (stored as its arming timestamp — a positive int, epoch ms — so the
+ * number-only invariant holds; the flag arms at most one UTC day, and the
+ * daily prune clears aged entries; `since` is the sole ISO-8601 timestamp
+ * string). Nothing free-text is ever stored — counter
  * names come only from the enumerated §5.12 vocabulary, so `redact` is
  * deliberately not applied.
  *
@@ -189,7 +191,7 @@ export function sinceKey(projectID: string): string {
   return `${projectPrefix(projectID)}metrics/since`;
 }
 
-/** `<projectID>/metrics/arm/hint/<sessionID>` → armed flag (int `1`). */
+/** `<projectID>/metrics/arm/hint/<sessionID>` → arming timestamp (positive int). */
 export function armKey(projectID: string, sessionID: string): string {
   return `${projectPrefix(projectID)}metrics/arm/hint/${requireNonEmpty("sessionID", sessionID)}`;
 }
@@ -408,18 +410,45 @@ export async function readSince(
     : undefined;
 }
 
-/** True when the session's hint arm flag is currently set (the int `1`). */
+/**
+ * Arm-value semantics (§5.12 hint→recall): the stored value is a positive
+ * integer — the arming timestamp in epoch milliseconds (`setArm` stores
+ * `Date.now()`). The value arms the session only while it is FRESH, i.e.
+ * within one UTC day of its stamp (`ARM_LIFETIME_MS`): a hint that has aged
+ * out can no longer convert, so a recall in a dormant session never counts
+ * a days-old hint (the in-process piggyback prune cannot fire while
+ * OpenCode is not running, so the consumer must age the value itself).
+ * A legacy `1` from an older build is a decisive "no" (ancient in epoch
+ * terms) and is discarded on the next arm-touch or daily prune.
+ */
+const ARM_LIFETIME_MS = DAY_MS;
+
+/** Positive-int arm stamp (any age): malformed → false, values → `true`. */
+function isArmStamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+/** True when the stamp is a positive int still inside its one-day window. */
+function isArmedValue(value: unknown, now: number): boolean {
+  return isArmStamp(value) && value >= now - ARM_LIFETIME_MS;
+}
+
+/** True when the session's hint arm entry is currently armed. */
 export async function readArmed(
   storage: LedgerStorage,
   projectID: string,
   sessionID: string,
 ): Promise<boolean> {
-  return (await storage.get(armKey(projectID, sessionID))) === 1;
+  return isArmedValue(
+    await storage.get(armKey(projectID, sessionID)),
+    Date.now(),
+  );
 }
 
 /**
- * Arm the hint→recall correlation for the session (arm value = int `1`).
- * Awaited at its call site (never-throw, same mutex as bumps).
+ * Arm the hint→recall correlation for the session (arm value = arming
+ * timestamp, epoch ms). Awaited at its call site (never-throw, same mutex
+ * as bumps).
  */
 export async function setArm(
   storage: LedgerStorage,
@@ -428,7 +457,7 @@ export async function setArm(
 ): Promise<void> {
   try {
     await withWriteLock(async () => {
-      await storage.set(armKey(projectID, sessionID), 1);
+      await storage.set(armKey(projectID, sessionID), Date.now());
     });
   } catch (error) {
     logDiagnostic(error);
@@ -455,9 +484,9 @@ export async function clearArm(
  * conversion): the read and the clear run in ONE locked body, so two
  * concurrent recall consumers of the same session resolve mutually exclusive
  * results — the winner removes the flag and gets `true`, the loser observes
- * the removal and gets `false` (at-most-once conversion; `readArmed` +
- * `clearArm` as two separate calls could both see `1` before either remove
- * landed, double-counting `hint.recall`). The bump after a `true` result
+ * the removal and gets `false` (at-most-once conversion; a plain read +
+ * `clearArm` as two separate calls could both see the armed value before
+ * either remove landed, double-counting `hint.recall`). The bump after a `true` result
  * stays clear-after-read by construction: the flag is already gone when the
  * caller counts, so a crash between consume and count replays uncounted,
  * never doubled. Never rejects like `setArm`/`clearArm` (the executor wraps
@@ -471,9 +500,15 @@ export async function consumeArm(
   try {
     return await withWriteLock(async () => {
       const key = armKey(projectID, sessionID);
-      if ((await storage.get(key)) === 1) {
+      const value = await storage.get(key);
+      if (isArmedValue(value, Date.now())) {
         await storage.remove(key);
         return true;
+      }
+      // A stale (positive-int) arm entry cannot convert — clear it here so
+      // a dormant session's fully-aged entry is not left for the daily prune.
+      if (isArmStamp(value)) {
+        await storage.remove(key);
       }
       return false;
     });
@@ -530,26 +565,47 @@ export async function resetMetrics(
 }
 
 /**
- * Bound the day buckets to the last `DAY_BUCKET_RETENTION_DAYS` UTC days:
- * paginate `scan` via `after`/`next` over `<projectID>/metrics/day/`,
- * remove every bucket whose day stamp has fully aged out, and touch nothing
- * else — malformed day keys and other namespaces are left alone. Resolves
- * the number of keys removed.
+ * Bound the metrics namespace's aged keys to their retention windows
+ * (ADR-0008 §5): paginate over `<projectID>/metrics/day/` and remove every
+ * day bucket older than `DAY_BUCKET_RETENTION_DAYS` UTC days, and over
+ * `<projectID>/metrics/arm/` and remove every arm entry whose arming
+ * timestamp is older than one UTC day (`ARM_LIFETIME_MS`) — a hint that
+ * has aged out cannot convert anymore (`isArmedValue` inside
+ * `readArmed`/`consumeArm` ages the value itself), so the key is pure
+ * housekeeping and a hinted session that never recalls would otherwise
+ * leave it behind forever, making the namespace unbounded in the number
+ * of hinted sessions.
+ * Touch nothing else — malformed day keys and malformed/non-positive arm
+ * values are left alone, never another project's namespace, and no key
+ * outside either namespace. One locked body removes everything, so the
+ * sweep never races a bump's own remove; resolves the number of keys
+ * removed (day buckets + arm entries combined).
  */
 export async function pruneDayBuckets(
   storage: LedgerStorage,
   projectID: string,
 ): Promise<number> {
-  const prefix = `${projectPrefix(projectID)}metrics/day/`;
+  const dayPrefix = `${projectPrefix(projectID)}metrics/day/`;
+  const armPrefix = `${projectPrefix(projectID)}metrics/arm/`;
   const cutoff = dayStamp(Date.now() - DAY_BUCKET_RETENTION_DAYS * DAY_MS);
+  const armCutoff = Date.now() - DAY_MS;
   const victims: string[] = [];
-  for (const entry of await scanAll(storage, prefix)) {
-    if (!entry.key.startsWith(prefix)) continue;
-    const stamp = entry.key.slice(prefix.length).split("/")[0];
+  for (const entry of await scanAll(storage, dayPrefix)) {
+    if (!entry.key.startsWith(dayPrefix)) continue;
+    const stamp = entry.key.slice(dayPrefix.length).split("/")[0];
     // Keep anything not resembling a day bucket (fail-closed reads too).
     if (stamp === undefined || !DAY_STAMP.test(stamp) || stamp > cutoff) {
       continue;
     }
+    victims.push(entry.key);
+  }
+  for (const entry of await scanAll(storage, armPrefix)) {
+    if (!entry.key.startsWith(armPrefix)) continue;
+    // A positive-int stamp fully aged out (older than the one-day window)
+    // can no longer convert anywhere, so removing it is pure housekeeping;
+    // fresh stamps remain and anything malformed is left alone.
+    const value = entry.value;
+    if (!isArmStamp(value) || value >= armCutoff) continue;
     victims.push(entry.key);
   }
   if (victims.length === 0) return 0;
