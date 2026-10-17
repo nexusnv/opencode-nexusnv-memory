@@ -61,6 +61,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | References | `references` entries attach **directories** (`path`) or Git repos (`repository`/`branch`); attachment is a non-recursive root listing and is client-initiated. Designed for directories **outside** the project. | not used (§4.3) |
 | Instructions | V2 **does** resolve the `instructions` array (relative/glob, `~/`, absolute, `http(s)`), loading it after `AGENTS.md`. The design still injects via `AGENTS.md` + hooks — a deliberate choice (single-owner injection, no client config edit), **not** a platform limitation. | ADR-0002 |
 | AGENTS.md | Global + upward files live-reload before the next request; **edits to already-loaded nested files are not detected** (new session required). | ADR-0002 |
+| Session synthetic message | `ctx.session.synthetic({ sessionID, text, description?, metadata?, delivery? })` → `SessionInboxSynthetic`: posts a durable synthetic text message into a session — the one deterministic (no-model-turn) visible output channel for a plugin command's executor (`CommandDefinition.execute` returns `Promise<void>`, so there is no text-return surface). Verified against the installed `@opencode/client@2.0.29` types (`SessionSyntheticInput` / `SessionInboxSynthetic`; the method is in the plugin's `SessionDomain` Pick). Whether the TUI renders it without spawning a model turn is **not** type-provable → deploy-time delivery confirmation **G-M1** (§5.12) with the §5.5 prompt fallback. | `/memory-metrics` |
 
 ### 1.2 Corrections applied to earlier revisions of these documents
 
@@ -132,6 +133,14 @@ runtime log remains a deployment sanity check.
   sandbox: its only output is a **proposal table**, and every write requires **per-line human approval**
   through `memory_apply` (§5.11). `memory-manager` (read-only) remains available as an **optional**
   isolated venue when delegation is convenient. No runtime gate.
+- **G-M1 — synthetic delivery (runtime gate for `/memory-metrics`, ADR-0008).**
+  `ctx.session.synthetic({sessionID, text})` is proven via the installed 2.0.29 client types, but
+  whether the TUI renders the post without spawning a model turn is not type-provable. The **first
+  synthetic post of the process** (which is the deploy event) logs one line —
+  `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn` —
+  mirroring the §1.3 event-type check. Until confirmed, or whenever the post rejects, the executor
+  falls back to the §5.5 `ctx.session.prompt` pattern asking the agent to call `memory_metrics` and
+  echo the table verbatim, so the feature degrades to one cheap model turn instead of breaking.
 
 ---
 
@@ -775,6 +784,74 @@ Provenance classes and the routing they imply:
   calls, not by a lock). The mitigations are the `source:` tag, the advisory flags, and the exclusion of
   untrusted lines from bulk approval — not a guarantee.
 
+### 5.12 Local usage metrics + `/memory-metrics` (US-28/29, HS-12, ADR-0008, G-M1)
+
+The plugin measures its own intervention for the user's eyes, count-only, entirely on-machine
+(ADR-0008: no content — every metrics value is a JSON number; the only names appearing in keys are
+the enumerated counter vocabulary and the six allowlisted structural file names / the `handoff` and
+`error` aggregates). Nothing here changes any hook outcome: bumps are fire-and-forget, never-throw,
+and dispatched off the awaited path; metrics are best-effort statistics, never the correctness channel.
+
+Counter vocabulary (normative — the implementation enumerates exactly these in `src/metrics.ts`
+with a fail-closed guard):
+
+| Outcome seam (existing code) | Counters bumped |
+|---|---|
+| `prompt` hook (§5.1) | `hook.prompt`; `index.already` / `index.overCap` / `index.attach` (the three attach branches); `remember.caught` when `rememberAsserted` appends (dedupe-vs-non-directive is not distinguished — deliberate, keeps `provenance.ts`'s boolean return untouched) |
+| `context` hook (§5.2) | `hook.context`; `brief.empty` / `brief.injected` (+ `brief.lines` by the injected line count) / `brief.truncated` (when the budget cascade trims); `status.shown` / `status.dropped` (budget sacrifice of a present status line); `hint.shown` on the ≤1 hit |
+| `compaction` hook (§5.6) | `hook.compaction`; `compaction.priors` (+ `priors.lines` by injected line count) |
+| `execute.after` capture (§5.3) | `failure.captured` / `failure.duplicate` / `failure.retry` / `failure.failed` from the `CaptureOutcome.reason` — only for `status === "error"` events; non-error events bump nothing (keeps per-tool-call overhead at zero for successes) |
+| event dispatch (§5.9) + throttled context-hook writer (§5.2) | `snapshot.written` / `snapshot.unchanged` / `snapshot.dropped` / `snapshot.failed` (`SnapshotOutcome.reason` — bumped at each site internally via an optional metrics tap: the direct `session.idle` handler and the `snapshotIfDue` throttle gate, whose boolean signature and behavior stay unchanged); `compactionCapture.captured` / `compactionCapture.duplicate` / `compactionCapture.dropped` / `compactionCapture.failed` (`CompactionOutcome.reason`, direct dispatch path) |
+| `memory_recall` (§5.4) | `recall.<structural-name>` for the six allowlisted files (`recall.INDEX.md`, `recall.activeContext.md`, `recall.decisions.md`, `recall.architecture.md`, `recall.style.md`, `recall.issues.md`), `recall.handoff` for any `handoffs/…` path, `recall.error` on rejection (the thrown error propagates unchanged — metrics never mask a failure) |
+| `memory_apply` (§5.4) | `apply.batch` (one per call); `apply.lines` (by candidate count); `apply.denied` (per line whose `permission.assert` rejected); `apply.partialError` (a mid-batch write failure after ≥1 applied); `apply.reset` on the completion reset incl. `candidates: []` |
+| commands | `review.invoked` (`/memory-review`); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
+| hint→recall correlation | `hint.shown` arms a boolean session flag (`<projectID>/metrics/arm/hint/<sessionID>`, consumed on first use); a successful `memory_recall` **in that session while armed** bumps `hint.recall` and clears the flag — the one boolean metric, carries no text |
+
+Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
+
+- `<projectID>/metrics/total/<name>` → int, monotonic until `reset`.
+- `<projectID>/metrics/day/<YYYYMMDD>/<name>` → int per UTC day.
+- `<projectID>/metrics/since` → first-write timestamp (the dashboard "since" line).
+- `<projectID>/metrics/arm/hint/<sessionID>` → boolean arm flag (transient, described above).
+- Bounded state: day buckets pruned after **90 UTC days** via paginated
+  `scan({prefix:"<projectID>/metrics/day/"})` + `remove` (modeled on the `seen` prune), piggybacked
+  once per UTC day off the first bump after a day change (fire-and-forget). Total counter names are
+  capped by the enumeration above, so the namespace is small and flat.
+- Writes serialize through the existing per-process mutex (§5.7); each bump is a single locked body
+  writing the total + day pair (+ a lazy `since` set when absent). `reset` removes all
+  `<projectID>/metrics/…` keys (paginated scan + remove) and stamps a fresh `since`.
+
+```ts
+registrations.push(await ctx.tool.transform((editor) => {
+  editor.add({
+    name: "memory_metrics",
+    description: "Local usage metrics of the memory plugin: counters for explicit calls (recall/apply/review) and behind-the-scenes outcomes (captures, truncations, denials, hint→recall), plus memory-file health. Counts only — no content. Use when the user asks about the plugin's activity or its stored stats.",
+    input: { type: "object", properties: {}, required: [], additionalProperties: false },
+    execute: async () => toolResult(await collectAndRender(ctx)), // deps resolve per call (P22)
+  });
+}));
+```
+
+- **Renderer contract (normative):** `renderMetricsDashboard(input)` is a **pure** function over
+  `{ totals, days, health, since }` → one markdown table block; deterministic given inputs; the only
+  free text it can emit is counter names, structural file names, day stamps, and numbers — it has no
+  parameter carrying content. `health` reads on request: per-file line counts vs caps, `handoffs/`
+  and `handoffs/archive/` file counts, `pending`, `seen` set size (scan), decisions tail size — counts
+  only, obtained by `readFile` + line counting, never by rendering file bodies.
+- **Command (normative):** `ctx.command.transform` registers `memory-metrics` (invocation
+  `/memory-metrics [reset]`):
+  - `reset` argument (case-insensitive): removes all `<projectID>/metrics/…` keys, stamps a fresh
+    `since`, then reports via the same output channel that metrics restarted.
+  - otherwise: compute counts → render → `ctx.session.synthetic({ sessionID, text: table })`
+    → bump `dashboard.shown`. **G-M1:** the **first synthetic post of the process** (which is the
+    deploy event — one line per deploy) logs
+    `[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn`
+    (§1.3). If the synthetic post rejects — or delivery is not confirmed on an installed build —
+    fall back to the §5.5 pattern: `ctx.session.prompt({ ...prompt, sessionID, delivery, text: metricsFallbackAsk })`,
+    where the ask instructs the agent to call `memory_metrics` and **echo the table verbatim**. The
+    executor never throws; a fallback failure degrades to `logDiagnostic` only.
+  - The command writes no durable memory file and resets nothing except on `reset`.
+
 ---
 
 ## 6. Data model and budgets (`c4-05`, US-15/17/20/21, ADR-0005)
@@ -796,6 +873,7 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
 | Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); pruned via `scan({prefix:"<projectID>/seen/"})` to ≤500; 30s retry window | bounded |
+| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient boolean); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset` wipes the namespace | ≤ enumerated totals + ≤90 day buckets × bumped names |
 
 Retention = **reachability** (ADR-0005): active (retain + injectable suffix) / causal (one hop behind,
 follow-on-demand) / conditional (INDEX one-liner) / archived (`handoffs/archive/`, recallable, never
@@ -878,11 +956,19 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
   deny the user's own tools in that session. The review's only output is a proposal, and every write
   needs per-line human approval (§5.11), so it needs no sandbox. The read-only `memory-manager` subagent
   remains available as an optional isolated venue. No runtime gate.
+- **D-G — rich TUI metrics panel.** *Deferred by decision* (ADR-0008): a client-side
+  `@opencode/plugin/tui` plugin (SolidJS + `@opentui`; live pages via `ui.router.register`, slot
+  claims, dialogs, durable TUI `storage.store`) could render a real-time metrics page, but it is a
+  second plugin type with a heavier client-side install path for no fidelity gain over the markdown
+  dashboard. *Shipped:* the deterministic markdown dashboard via `memory_metrics` +
+  `/memory-metrics` (§5.12). *Exit:* only on real demand for a persistent panel.
 
 Nothing else defers: budgets, allowlisted recall (incl. `archive/`), exact-match tell-tale, ledger
 idempotency, human-gated promotion, the provenance gate, injection containment (summary-only
 injection + proposal-only review + per-line approval of untrusted lines), append-only lineage,
-per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/uninstall, and all
+per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/uninstall, the
+local usage metrics + `/memory-metrics` dashboard (§5.12, ADR-0008 — shipped with its G-M1
+delivery gate), and all
 `AGENTS.md`/`instructions`/config behaviors are implementable on the verified primitives above.
 
 ---
@@ -928,6 +1014,19 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
   - **G1–G4 type-proven and recorded in the PR**; deploy-time `event.type` log confirms `session.idle` /
     `session.compaction.ended` delivery; `scan` uses the `<projectID>/seen/` prefix with pagination;
     VCS branch comes from `vcs.get()` (status = changes). (G5 was **retired** — see §1.3.)
+  - **metrics (§5.12, ADR-0008):** the persisted metrics namespace contains **numbers only** — a
+    test enumerates every key/value written under `<projectID>/metrics/` during a simulated usage
+    run and asserts int values + enumerated names (fail-closed: an unknown name is logged and
+    dropped, never persisted); a bump against a rejecting fake `ctx.storage` never throws, never
+    alters any hook/tool outcome, and logs instead — the full suite (hooks/tools/isolation covered
+    by rejecting-storage fakes) keeps passing with metrics taps in the hot paths; the 90-day prune
+    removes only expired day buckets (paginated, never a total counter);
+    `memory_metrics` returns `{ content: <table> }` with a **deterministic** renderer (asserted from
+    a fixed fixture: same inputs → byte-identical table, no content parameters);
+    `/memory-metrics` posts via `ctx.session.synthetic` and its executor never throws; the post
+    failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
+    `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
+    first post in the deploy check.
 - **Evals (P2):** recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
   reported as **three** numbers: **static** (~13 lines: ~10 directive + ~3 tool description);
   **per-prompt with content** (static + `INDEX` ≤30 once + brief ≤48 + hint ≤1 + status ≤1);
@@ -949,4 +1048,8 @@ per-project isolation, redaction, style-lock, P0 manual mode, install/discovery/
   (types proven) with throttled fallback, redaction, provenance gate, config/install shapes. Acceptance: $0 default; ≤ budget injection; no duplicates across
   restart; priors survive compaction; G1–G4 type-proven with deploy log (G5 retired).
 - **P2 (1–2 weeks):** hardening (blocklist tuning, multi-project isolation check, per-line approval UX,
-  evals, docs) + explicit opt-ins only (FTS mirror, TTL/decay command). Never automatic.
+  evals, docs) + explicit opt-ins only (FTS mirror, TTL/decay command). Never automatic. P2 also lands
+  the **local usage metrics + `/memory-metrics` dashboard** (§5.12, ADR-0008): production counterpart
+  of the §9 evals — count-only counters in `ctx.storage`, deterministic dashboard via
+  `memory_metrics` + `/memory-metrics` with the G-M1 synthetic-delivery gate (prompt fallback shipped
+  and type-proven on `@opencode/plugin` 2.0.29).
