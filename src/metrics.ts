@@ -26,6 +26,22 @@
  * `metrics.ts` imports `getPending` and the `LedgerStorage` type from
  * `capture.ts`; `capture.ts` imports `MetricsBump` only as a type (Task 3),
  * so both directions stay cycle-free at runtime.
+ *
+ * The `/memory-metrics` command (spec §5.12 command row + §1.3 G-M1; M-T5)
+ * also lives here: its deps resolve per execute call (spec P22), a no-arg
+ * invocation renders `collectAndRender` and posts the table through
+ * `ctx.session.synthetic`, and a case-insensitive `reset` argument wipes the
+ * whole `<projectID>/metrics/…` namespace (`resetMetrics`: paginated scan +
+ * locked removes, then a fresh `since`) and reports the restarted table
+ * through the same channel. G-M1 is a deploy-time human check: the FIRST
+ * RESOLVED synthetic post of the process logs the §1.3 line once (module-
+ * level stamp; a rejected post logs nothing — the line claims "posted").
+ * On a post rejection the executor degrades to the §5.5 prompt spread with
+ * `METRICS_FALLBACK_ASK` (agent calls `memory_metrics` and echoes the table
+ * verbatim); the executor never throws — every failure path, including both
+ * channels rejecting, resolves through `logDiagnostic` only. `src/review.ts`
+ * bumps its `review.invoked` counter via `metricsBumpOf`; this module never
+ * imports it (no cycle).
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,7 +52,7 @@ import {
   withWriteLock,
 } from "./files.js";
 import { getPending, SEEN_LIMIT, type LedgerStorage } from "./capture.js";
-import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
+import { DEFAULT_MEMORY_OPTIONS, parseMemoryOptions } from "./config.js";
 import type { Plugin } from "@opencode/plugin";
 
 /**
@@ -199,14 +215,41 @@ export type MetricsBump = (name: MetricName, by?: number) => void;
 const lastPruneStamps = new Map<string, string>();
 
 /**
+ * G-M1 (§1.3) once-per-process stamp for the `/memory-metrics` command's
+ * deploy-time line. Whether the TUI renders a synthetic post without
+ * spawning a model turn is not type-provable, so the first RESOLVED
+ * synthetic post of the process (the deploy event) logs one line a human
+ * confirms at deploy time (`[memory-metrics] synthetic posted (<session6>);…`
+ * — §1.3, mirroring the §1.3 event-type check). G-M1 is a deploy-time human
+ * check, not a runtime branch: no runtime state can represent "confirmed
+ * delivery", and a post that REJECTED logs nothing (the line claims
+ * "posted"); the stamp only turns on after an actual post.
+ */
+let firstSyntheticPostLogged = false;
+
+function logGm1SyntheticPostOnce(sessionID: string): void {
+  if (firstSyntheticPostLogged) return;
+  firstSyntheticPostLogged = true;
+  try {
+    console.warn(
+      `[memory-metrics] synthetic posted (${sessionID.slice(0, 6)}); confirm the table rendered without a model turn`,
+    );
+  } catch {
+    // Logging must never break a command.
+  }
+}
+
+/**
  * Test seam: clear the once-per-process metrics state (prune piggyback
- * stamps + warned labels) between isolated suites, mirroring
- * `resetWriteChainForTests` (files.ts) / `resetLedgerSingleFlightForTests`
- * (capture.ts). No on-disk state; production code never calls this.
+ * stamps, warned labels, and the G-M1 first-post line) between isolated
+ * suites, mirroring `resetWriteChainForTests` (files.ts) /
+ * `resetLedgerSingleFlightForTests` (capture.ts). No on-disk state;
+ * production code never calls this.
  */
 export function resetMetricsStateForTests(): void {
   lastPruneStamps.clear();
   warned.clear();
+  firstSyntheticPostLogged = false;
 }
 
 /**
@@ -400,6 +443,44 @@ export async function clearArm(
     });
   } catch (error) {
     logDiagnostic(error);
+  }
+}
+
+/**
+ * `/memory-metrics reset` (spec §5.12 storage keys + US-29): wipe the whole
+ * `<projectID>/metrics/…` namespace — every total counter, day bucket, the
+ * `since` stamp, and every arm flag — never another project's namespace and
+ * never any key outside it (the wipe is namespace-scoped numbers-only state;
+ * ledger keys like `curation.pending`/`seen/…` and other projects' metrics
+ * are untouched). One locked body modeled on `pruneDayBuckets` (paginated
+ * scan first, then removes), followed by a FRESH `since` stamp so the
+ * restarted counters open on a new self-comparison window (the bumps that
+ * follow keep the stamp valid from then on). Reset is rare and
+ * user-initiated: like the arm ops it is awaited at its call site and never
+ * rejects — every failure (scan, remove, re-stamp) is caught, logged via
+ * `logDiagnostic`, and reported as `false`, and the command still reports
+ * through its table channel either way.
+ */
+export async function resetMetrics(
+  storage: LedgerStorage,
+  projectID: string,
+): Promise<boolean> {
+  try {
+    const prefix = `${projectPrefix(projectID)}metrics/`;
+    const victims: string[] = [];
+    for (const entry of await scanAll(storage, prefix)) {
+      if (entry.key.startsWith(prefix)) victims.push(entry.key);
+    }
+    await withWriteLock(async () => {
+      for (const victim of victims) {
+        await storage.remove(victim);
+      }
+      await storage.set(sinceKey(projectID), new Date().toISOString());
+    });
+    return true;
+  } catch (error) {
+    logDiagnostic(error);
+    return false;
   }
 }
 
@@ -784,4 +865,138 @@ export async function collectAndRender(
     deps.caps,
   );
   return renderMetricsDashboard({ since, totals, days, health });
+}
+
+/* ------------------------------------------------------------------ */
+/* /memory-metrics command (§5.12 command row + §1.3 G-M1; M-T5).      */
+/* ------------------------------------------------------------------ */
+
+/** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
+const MEMORY_DIR = ".opencode/memory";
+
+export const MEMORY_METRICS_COMMAND_NAME = "memory-metrics";
+
+/** §5.12 command row: the dashboard is local-only, and the description says so. */
+export const MEMORY_METRICS_COMMAND_DESCRIPTION =
+  "Local usage metrics dashboard for the memory plugin (stays on this machine)";
+
+/**
+ * Fallback ask (spec §5.12 command row): the synthetic post rejected, so the
+ * dashboard degrades to one cheap model turn — the agent calls the read-only
+ * `memory_metrics` tool itself and echoes the count table verbatim, exactly
+ * as received (counts only; numbers are never paraphrased, summarized, or
+ * rounded by the model turn).
+ */
+export const METRICS_FALLBACK_ASK =
+  "The metrics dashboard could not be delivered as a synthetic post. Call the memory_metrics tool and echo the markdown table it returns verbatim, exactly as received — every count, name, and row in place. Counts only: do not paraphrase, summarize, reorder, or round any numbers, and add no commentary beyond the table (it is count-only plugin statistics).";
+
+/** Adapt the plugin-scoped `ctx.storage` to the ledger's structural port. */
+function ledgerOf(ctx: Plugin.Context): LedgerStorage {
+  return {
+    get: (key) => ctx.storage.get(key),
+    set: (key, value) =>
+      ctx.storage.set(
+        key,
+        value as Parameters<Plugin.Context["storage"]["set"]>[1],
+      ),
+    remove: (key) => ctx.storage.remove(key),
+    scan: (options) => ctx.storage.scan(options),
+  };
+}
+
+function projectIDOf(ctx: Plugin.Context): string {
+  return ctx.location.project?.id ?? ctx.location.directory;
+}
+
+/** Absolute path to the project's fixed `.opencode/memory` root (health fs). */
+function memoryRootOf(ctx: Plugin.Context): string {
+  const base = (
+    ctx.location.project?.canonical ?? ctx.location.directory
+  ).replace(/\/+$/, "");
+  return join(base, MEMORY_DIR);
+}
+
+/**
+ * The `/memory-metrics [reset]` command (spec §5.12 command row). Execution
+ * shape, per call (spec P22 — ledger, projectID, memory root, and caps all
+ * resolve from the live context; nothing is captured at load):
+ *
+ * - no argument → `collectAndRender` → `ctx.session.synthetic({sessionID,
+ *   text})` → on a RESOLVED post: the G-M1 first-post line (once per
+ *   process, module-level stamp) + a fired-and-forgotten `dashboard.shown`
+ *   bump (§5.12 "successful /memory-metrics render+post").
+ * - case-insensitive `reset` token → `resetMetrics` (awaited, never
+ *   rejecting — like the arm ops), `dashboard.reset` on a completed wipe,
+ *   then the fresh (restarted) table through the SAME channel below.
+ * - a rejected post → the §5.5 spread `{ ...prompt, sessionID, delivery,
+ *   text: METRICS_FALLBACK_ASK }` (text last, wins; files/agents/skills
+ *   survive, P7) — degraded to one model turn; no `dashboard.shown` bump on
+ *   either degraded path.
+ * - never throws: any failure (storage down, publish/fallback rejecting,
+ *   a broken context) is caught here and degraded to `logDiagnostic` only,
+ *   so the executor always resolves.
+ *
+ * Wiring note: `index.ts` registers this alongside `registerMemoryReview`;
+ * the command never writes durable memory and resets nothing except on
+ * `reset`.
+ */
+export function registerMetricsCommand(
+  ctx: Plugin.Context,
+): Promise<{ readonly dispose: () => Promise<void> }> {
+  return ctx.command.transform((editor) => {
+    editor.add({
+      name: MEMORY_METRICS_COMMAND_NAME,
+      description: MEMORY_METRICS_COMMAND_DESCRIPTION,
+      execute: async ({ sessionID, prompt, delivery }) => {
+        try {
+          const bump = metricsBumpOf(ctx);
+          // All deps for THIS call resolve from the live context (P22).
+          const ledger = ledgerOf(ctx);
+          const projectID = projectIDOf(ctx);
+          // One argument: the (trimmed, case-insensitive) reset token.
+          // Anything else renders the plain dashboard.
+          const arg =
+            typeof prompt?.text === "string" ? prompt.text.trim() : "";
+          if (arg.toLowerCase() === "reset") {
+            const reset = await resetMetrics(ledger, projectID);
+            // Only a wipe that actually completed counts; the fire-and-
+            // forget bump cannot delay or fail the command (ADR-0008 §3).
+            if (reset) void bump("dashboard.reset");
+          }
+          // Caps per call (P22): the same parse setup runs, so the health
+          // rows report this install's caps, whatever the options now are.
+          const options = parseMemoryOptions(ctx.options);
+          const table = await collectAndRender({
+            storage: ledger,
+            projectID,
+            memoryRoot: memoryRootOf(ctx),
+            caps: {
+              indexLines: options.indexLines,
+              fileLines: options.fileLines,
+            },
+          });
+          try {
+            await ctx.session.synthetic({ sessionID, text: table });
+            // Deploy-time human check (§1.3 G-M1): once per process, first
+            // resolved post only — never logged for a rejected post.
+            logGm1SyntheticPostOnce(sessionID);
+            // §5.12: this successful render+post counts (reset reports too).
+            void bump("dashboard.shown");
+          } catch {
+            // Synthetic rejected: degrade to the §5.5 pattern. Awaited here
+            // so its rejection is caught by the outer body — no `shown`
+            // bump and no G-M1 line either way (nothing was displayed).
+            await ctx.session.prompt({
+              ...prompt,
+              sessionID,
+              delivery,
+              text: METRICS_FALLBACK_ASK,
+            });
+          }
+        } catch (error) {
+          logDiagnostic(error);
+        }
+      },
+    });
+  });
 }

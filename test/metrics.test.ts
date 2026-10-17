@@ -12,6 +12,9 @@ import {
   createBump,
   DAY_BUCKET_RETENTION_DAYS,
   dayKey,
+  MEMORY_METRICS_COMMAND_DESCRIPTION,
+  MEMORY_METRICS_COMMAND_NAME,
+  METRICS_FALLBACK_ASK,
   METRIC_NAMES,
   metricsBumpOf,
   pruneDayBuckets,
@@ -19,7 +22,9 @@ import {
   readDays,
   readSince,
   readTotals,
+  registerMetricsCommand,
   renderMetricsDashboard,
+  resetMetrics,
   resetMetricsStateForTests,
   scanAll,
   setArm,
@@ -925,5 +930,420 @@ describe("collectHealth (§5.12 renderer contract: counts, never bodies)", () =>
     expect(sliced).toHaveLength(7);
     expect(sliced[0]?.key).toBe(`${PROJECT}/seen/id-0`);
     expect(sliced[6]?.key).toBe(`${PROJECT}/seen/id-6`);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* /memory-metrics command (§5.12 command row + G-M1, M-T5).           */
+/* ------------------------------------------------------------------ */
+
+interface AddedCommand {
+  name: string;
+  description?: string;
+  execute: (input: {
+    sessionID: string;
+    prompt: {
+      text: string;
+      files?: unknown;
+      agents?: unknown;
+      skills?: unknown;
+    };
+    delivery: string;
+  }) => Promise<void>;
+}
+
+/** Collect the (≤1) G-M1 deploy line out of a console.warn spy. */
+function gm1Lines(warn: {
+  mock: { calls: ReadonlyArray<unknown[]> };
+}): ReadonlyArray<unknown[]> {
+  return warn.mock.calls.filter(
+    (call) =>
+      typeof call[0] === "string" &&
+      call[0]!.startsWith("[memory-metrics] synthetic posted"),
+  );
+}
+
+/**
+ * §5.12's `dashboard.shown` is "successful /memory-metrics render+post" —
+ * one increment per resolved synthetic post. A reset's report is such a
+ * post too, while the prompt fallback is the degraded model-turn channel
+ * and never counts.
+ */
+async function drainAndCountShown(
+  storage: LedgerStorage,
+): Promise<number | undefined> {
+  await settle();
+  const value = await storage.get(totalKey(PROJECT, "dashboard.shown"));
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/** Minimal fake context for `registerMetricsCommand` — only what the
+ * executor touches: options/location/storage + `command.transform` +
+ * `session.synthetic`/`session.prompt` spies. */
+function fakeForMetricsCommand(params?: {
+  storage?: LedgerStorage;
+  synthetic?: (input: unknown) => Promise<unknown>;
+  prompt?: (input: unknown) => Promise<unknown>;
+}) {
+  const added: AddedCommand[] = [];
+  const synthetic = vi.fn(async (_input: unknown): Promise<unknown> => undefined);
+  const prompt = vi.fn(async (_input: unknown): Promise<unknown> => undefined);
+  if (params?.synthetic !== undefined) {
+    synthetic.mockImplementation(params.synthetic);
+  }
+  if (params?.prompt !== undefined) {
+    prompt.mockImplementation(params.prompt);
+  }
+  const storage = params?.storage ?? new FakeStorage();
+  const fakeCtx = {
+    options: {},
+    location: {
+      directory: "/tmp/metrics-cmd",
+      project: {
+        id: PROJECT,
+        directory: "/tmp/metrics-cmd",
+        canonical: "/tmp/metrics-cmd",
+      },
+    },
+    storage,
+    command: {
+      transform: async (
+        cb: (editor: { add: (definition: AddedCommand) => void }) => void,
+      ) => {
+        cb({ add: (definition) => added.push(definition) });
+        return { dispose: async () => undefined };
+      },
+    },
+    session: {
+      synthetic: (input: unknown) => synthetic(input),
+      prompt: (input: unknown) => prompt(input),
+    },
+  };
+  return {
+    added,
+    synthetic,
+    prompt,
+    // The executor only ever uses the LedgerStorage shape; the tests that
+    // reach into `data` construct the default FakeStorage here.
+    storage: storage as FakeStorage,
+    fakeCtx: fakeCtx as unknown as Plugin.Context,
+  };
+}
+
+function invokeOf(command: AddedCommand): (text: string) => Promise<void> {
+  return (text) =>
+    command.execute({
+      sessionID: SESSION,
+      prompt: { text, files: [], agents: [], skills: [] },
+      delivery: "steer",
+    });
+}
+
+describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
+  it("command_posts_synthetic_and_logs_gm1_then_bumps_shown", async () => {
+    // Seed one real counter so the table has a non-zero row + a since stamp.
+    const storage = new FakeStorage();
+    createBump(storage, PROJECT)("hook.prompt");
+    await settle();
+    const { added, fakeCtx, synthetic, storage: fakeStorage } =
+      fakeForMetricsCommand({ storage });
+    const registration = await registerMetricsCommand(fakeCtx);
+
+    expect(added).toHaveLength(1);
+    expect(added[0]!.name).toBe(MEMORY_METRICS_COMMAND_NAME);
+    expect(MEMORY_METRICS_COMMAND_NAME).toBe("memory-metrics");
+    expect(added[0]!.description).toBe(MEMORY_METRICS_COMMAND_DESCRIPTION);
+    expect(MEMORY_METRICS_COMMAND_DESCRIPTION).toBe(
+      "Local usage metrics dashboard for the memory plugin (stays on this machine)",
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const invoke = invokeOf(added[0]!);
+
+    // First invocation: the table posts exactly once through synthetic (one
+    // channel per execute — never synthetic AND prompt), and the run's own
+    // bump lands after the post.
+    await invoke("");
+    expect(synthetic).toHaveBeenCalledTimes(1);
+    const posted = synthetic.mock.calls[0]![0]! as {
+      sessionID: string;
+      text: string;
+    };
+    expect(Object.keys(posted).sort()).toEqual(["sessionID", "text"]);
+    expect(posted.sessionID).toBe(SESSION);
+    expect(posted.text).toContain("# [memory] metrics (local-only)");
+    expect(posted.text).toContain("| hook.prompt | 1 |");
+    // shown is bumped AFTER the post, so the freshly rendered table still
+    // shows the pre-bump zero (deterministic ordering).
+    expect(posted.text).toContain("| dashboard.shown | 0 |");
+
+    await settle();
+    expect(await fakeStorage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
+    // G-M1: exactly one deploy line for the process's first resolved post,
+    // carrying the first six chars of the sessionID.
+    expect(gm1Lines(warn)).toHaveLength(1);
+    expect(gm1Lines(warn)[0]![0]).toBe(
+      "[memory-metrics] synthetic posted (sess-m); confirm the table rendered without a model turn",
+    );
+
+    // Second invocation: the line is once-per-PROCESS — never again, while
+    // shown counts each successful render+post.
+    await invoke("");
+    expect(synthetic).toHaveBeenCalledTimes(2);
+    expect(gm1Lines(warn)).toHaveLength(1);
+    await settle();
+    expect(await fakeStorage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(2);
+    expect(await drainAndCountShown(fakeStorage)).toBe(2);
+
+    await expect(registration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("command_falls_back_to_prompt_on_synthetic_reject", async () => {
+    const { added, fakeCtx, prompt, storage } = fakeForMetricsCommand({
+      synthetic: async () => {
+        throw new Error("synthetic surface drifted");
+      },
+    });
+    const registration = await registerMetricsCommand(fakeCtx);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const invocationPrompt = {
+      text: "",
+      files: [{ uri: "file:///attached/notes.md" }],
+      agents: [{ name: "primary" }],
+      skills: [{ id: "memory-skill" }],
+    };
+    await expect(
+      added[0]!.execute({
+        sessionID: SESSION,
+        prompt: invocationPrompt,
+        delivery: "steer",
+      }),
+    ).resolves.toBeUndefined();
+
+    // Exactly one fallback re-submission, §5.5 spread (P7): files/agents/
+    // skills survive; sessionID + delivery come from the invocation; text
+    // LAST so the ask wins.
+    expect(prompt).toHaveBeenCalledTimes(1);
+    const call = prompt.mock.calls[0]![0]! as Record<string, unknown>;
+    expect(call["sessionID"]).toBe(SESSION);
+    expect(call["delivery"]).toBe("steer");
+    expect(call["files"]).toEqual(invocationPrompt.files);
+    expect(call["agents"]).toEqual(invocationPrompt.agents);
+    expect(call["skills"]).toEqual(invocationPrompt.skills);
+    expect(call["text"]).toBe(METRICS_FALLBACK_ASK);
+    // The ask instructs the agent to call memory_metrics and echo the table
+    // verbatim — counts only, numbers never paraphrased.
+    expect(METRICS_FALLBACK_ASK).toContain("memory_metrics");
+    expect(METRICS_FALLBACK_ASK).toContain("verbatim");
+    expect(METRICS_FALLBACK_ASK).toContain("do not paraphrase");
+
+    // Nothing rendered+posted: dashboard.shown is NEVER bumped, and the
+    // rejected post leaves storage untouched.
+    expect(await drainAndCountShown(storage)).toBeUndefined();
+    expect([...storage.data.keys()]).toEqual([]);
+    // G-M1 stays silent: nothing was actually posted.
+    expect(gm1Lines(warn)).toEqual([]);
+
+    await expect(registration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("reset_removes_metrics_and_re_stamps_since", async () => {
+    const storage = new FakeStorage();
+    await storage.set(totalKey(PROJECT, "hook.prompt"), 3);
+    await storage.set(dayKey(PROJECT, "20300101", "hook.prompt"), 2);
+    await storage.set(armKey(PROJECT, SESSION), 1);
+    await storage.set(sinceKey(PROJECT), "2030-01-01T00:00:00.000Z");
+    // Everything OUTSIDE <projectID>/metrics/… must survive (US-29: the
+    // reset is namespace-scoped numbers-only state): ledger keys, another
+    // project's metrics, and a near-miss sibling prefix.
+    await storage.set(`${PROJECT}/curation.pending`, 2);
+    await storage.set(`${PROJECT}/seen/id-1`, 1);
+    await storage.set("proj-other/metrics/total/hook.prompt", 9);
+    await storage.set(`${PROJECT}/metrics-not-a-metric`, 5);
+
+    const { added, fakeCtx, synthetic, storage: fresh } =
+      fakeForMetricsCommand({ storage });
+    const registration = await registerMetricsCommand(fakeCtx);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "reset" },
+      delivery: "queue",
+    });
+    await settle();
+
+    // Every seeded <projectID>/metrics/total|day|arm/… key is gone; the
+    // namespace holds only the fresh since stamp + the two counters the
+    // reset and its successful report just bumped themselves.
+    const metricsKeys = [...storage.data.keys()]
+      .filter((key) => key.startsWith(`${PROJECT}/metrics/`))
+      .sort();
+    const today = dayStampOf(Date.now());
+    expect(metricsKeys).toEqual(
+      [
+        `${PROJECT}/metrics/day/${today}/dashboard.reset`,
+        `${PROJECT}/metrics/day/${today}/dashboard.shown`,
+        `${PROJECT}/metrics/since`,
+        `${PROJECT}/metrics/total/dashboard.reset`,
+        `${PROJECT}/metrics/total/dashboard.shown`,
+      ].sort(),
+    );
+    const since = await readSince(storage, PROJECT);
+    expect(since).toBeDefined();
+    expect(since).not.toBe("2030-01-01T00:00:00.000Z");
+    expect(await storage.get(totalKey(PROJECT, "dashboard.reset"))).toBe(1);
+
+    // The report confirms the restart: the presented table is the fresh one
+    // (Since = the new stamp; pre-reset counters rendered as present-but-0).
+    expect(synthetic).toHaveBeenCalledTimes(1);
+    const posted = synthetic.mock.calls[0]![0]! as {
+      sessionID: string;
+      text: string;
+    };
+    expect(posted.text).toContain(`Since: ${since}`);
+    expect(posted.text).toContain("| hook.prompt | 0 |");
+    expect(posted.text).not.toContain("| hook.prompt | 3 |");
+    // The reset report is also a successful render+post (G-M1 line applies,
+    // dashboard.shown counts it).
+    expect(gm1Lines(warn)).toHaveLength(1);
+    expect(await storage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
+
+    // The wipe stayed inside the metrics namespace.
+    expect(await storage.get("proj-other/metrics/total/hook.prompt")).toBe(9);
+    expect(await storage.get(`${PROJECT}/seen/id-1`)).toBe(1);
+    expect(await storage.get(`${PROJECT}/metrics-not-a-metric`)).toBe(5);
+    expect(await storage.get(`${PROJECT}/curation.pending`)).toBe(2);
+    expect(fresh).toBe(storage);
+
+    await expect(registration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("reset_token_is_case_insensitive_and_unrelated_arguments_change_nothing", async () => {
+    // "RESET" (incl. surrounding whitespace) resets.
+    const upper = fakeForMetricsCommand();
+    await registerMetricsCommand(upper.fakeCtx);
+    await upper.storage.set(sinceKey(PROJECT), "2030-01-01T00:00:00.000Z");
+    await upper.added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "  RESET " },
+      delivery: "steer",
+    });
+    await settle();
+    expect(await upper.storage.get(totalKey(PROJECT, "dashboard.reset"))).toBe(
+      1,
+    );
+    expect(
+      (await readSince(upper.storage, PROJECT)) !==
+        "2030-01-01T00:00:00.000Z",
+    ).toBe(true);
+
+    // "resetAll" is NOT the reset token: the command reports the dashboard,
+    // but never wipes or bumps the reset counter.
+    const other = fakeForMetricsCommand();
+    await registerMetricsCommand(other.fakeCtx);
+    await other.storage.set(sinceKey(PROJECT), "2030-01-01T00:00:00.000Z");
+    await other.added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "resetAll" },
+      delivery: "steer",
+    });
+    await settle();
+    expect(
+      await other.storage.get(totalKey(PROJECT, "dashboard.reset")),
+    ).toBeUndefined();
+    expect(other.synthetic).toHaveBeenCalledTimes(1);
+    // The seeded stamp was not re-stamped: only "reset" restarts metrics.
+    expect(await readSince(other.storage, PROJECT)).toBe(
+      "2030-01-01T00:00:00.000Z",
+    );
+  });
+
+  it("executor_never_throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const diagnostics = () =>
+      warn.mock.calls.filter(
+        (call) =>
+          typeof call[0] === "string" &&
+          call[0]!.startsWith("[memory] metrics diagnostic:"),
+      ).length;
+
+    // (a) Storage fully down + both channels defaulting to reject: the reads
+    // throw inside collectAndRender, so no post/fallback is even attempted.
+    const down = fakeForMetricsCommand({
+      storage: new ThrowingStorage(),
+      synthetic: async () => {
+        throw new Error("synthetic down");
+      },
+      prompt: async () => {
+        throw new Error("prompt down");
+      },
+    });
+    const downRegistration = await registerMetricsCommand(down.fakeCtx);
+    await expect(
+      down.added[0]!.execute({
+        sessionID: SESSION,
+        prompt: { text: "" },
+        delivery: "steer",
+      }),
+    ).resolves.toBeUndefined();
+    expect(down.synthetic).not.toHaveBeenCalled();
+    expect(down.prompt).not.toHaveBeenCalled();
+    expect(diagnostics()).toBeGreaterThan(0);
+    expect(gm1Lines(warn)).toEqual([]);
+
+    // (b) Healthy reads, but BOTH delivery channels reject: the table is
+    // rendered, the post attempt rejects, the §5.5 fallback runs exactly once
+    // and ITS rejection is caught too — the executor still resolves via
+    // logDiagnostic only.
+    const before = diagnostics();
+    const healthy = fakeForMetricsCommand({
+      synthetic: async () => {
+        throw new Error("synthetic gone");
+      },
+      prompt: async () => {
+        throw new Error("prompt gone");
+      },
+    });
+    const healthyRegistration = await registerMetricsCommand(healthy.fakeCtx);
+    await expect(
+      healthy.added[0]!.execute({
+        sessionID: SESSION,
+        prompt: { text: "" },
+        delivery: "steer",
+      }),
+    ).resolves.toBeUndefined();
+    expect(healthy.synthetic).toHaveBeenCalledTimes(1);
+    expect(healthy.prompt).toHaveBeenCalledTimes(1);
+    expect(diagnostics()).toBeGreaterThan(before);
+    await settle();
+    // No bump was scheduled on either failure path.
+    expect(
+      await healthy.storage.get(totalKey(PROJECT, "dashboard.shown")),
+    ).toBeUndefined();
+    expect(
+      await healthy.storage.get(totalKey(PROJECT, "dashboard.reset")),
+    ).toBeUndefined();
+    expect(gm1Lines(warn)).toHaveLength(0);
+
+    await expect(downRegistration.dispose()).resolves.toBeUndefined();
+    await expect(healthyRegistration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("resetMetrics never throws and reports failure when storage is down", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(resetMetrics(new ThrowingStorage(), PROJECT)).resolves.toBe(
+      false,
+    );
+    expect(
+      warn.mock.calls.filter(
+        (call) =>
+          typeof call[0] === "string" &&
+          call[0]!.startsWith("[memory] metrics diagnostic:"),
+      ).length,
+    ).toBeGreaterThan(0);
   });
 });
