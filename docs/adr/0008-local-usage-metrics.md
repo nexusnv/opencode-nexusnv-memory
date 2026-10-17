@@ -48,7 +48,10 @@ ever collecting content?
    ledger (US-24 parity; the storage location and manual `rm` are documented).
 3. **Fire-and-forget, never-throw taps.** Every bump is dispatched off the hook's awaited path
    (`void bump(...)` with its own catch) through the existing per-process write mutex. A bump must
-   never delay a hook, never change a hook's outcome, and never throw. Losing a counter on a crash
+   never delay a hook, never change a hook's outcome, and never throw. The arm-flag transport is
+   the sole exception to the off-path rule: `setArm`/`clearArm` are **awaited** at their two call
+   sites (hint hit / recall success), never-throw, same mutex — the subsequent counter depends on
+   them. Losing a counter on a crash
    or to cross-process concurrency is acceptable: metrics are best-effort statistics, unlike the
    correctness ledger (ADR-0004), which keeps its stronger check-before-write/idempotency guarantees
    untouched.
@@ -100,8 +103,9 @@ ever collecting content?
   opaque session-scoped keys and than what OpenCode itself records about sessions.
 - Once published, counter names are load-bearing output (tests assert the enumeration and the
   fail-closed behavior). Renaming a counter breaks only the continuity of self-comparison, never any
-  memory data. The CSV/JSON export is deliberately absent — the dashboard command is the only
-  intended channel, which keeps the "no egress" property trivially true.
+  memory data. The CSV/JSON export is deliberately absent — the on-demand dashboard surfaces
+  (`memory_metrics` tool + `/memory-metrics` command) are the only intended channels, which keeps the
+  "no egress" property trivially true.
 
 ## Related
 
