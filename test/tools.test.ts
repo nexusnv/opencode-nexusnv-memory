@@ -26,6 +26,7 @@ import {
   clearArm,
   createBump,
   readArmed,
+  readDays,
   readTotals,
   setArm,
 } from "../src/metrics.js";
@@ -389,7 +390,7 @@ describe("tools", () => {
     expect(await getPending(storage, PROJECT)).toBe(0);
   });
 
-  it("registers recall and apply via ctx.tool.transform", async () => {
+  it("registers recall apply and metrics via ctx.tool.transform", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-wire-"));
     const memoryDir = join(projectRoot, ".opencode", "memory");
     await mkdir(memoryDir, { recursive: true });
@@ -857,15 +858,19 @@ describe("tools", () => {
       additionalProperties: false,
     });
 
-    // Read-only proof: the executor must not add any storage key.
-    const beforeKeys = new Set(store.data.keys());
+    // Read-only proof, deep: the executor must not add any storage key AND
+    // must not mutate an existing key's value — so snapshot the whole
+    // serialized store before and after and assert full equality (an
+    // added-or-changed key would fail the compare).
+    const dump = (): string =>
+      JSON.stringify(
+        [...store.data.entries()].sort(([a], [b]) => (a < b ? -1 : 1)),
+      );
+    const before = dump();
     const out = (await metrics.execute(undefined, TOOL_CTX)) as {
       content: string;
     };
-    const addedKeys = [...store.data.keys()].filter(
-      (k) => !beforeKeys.has(k),
-    );
-    expect(addedKeys).toEqual([]);
+    expect(dump()).toBe(before);
 
     // Envelope via the single toolResult adapter; the render reads the
     // live per-call deps (P22): primed counters surface in the table.
@@ -880,8 +885,12 @@ describe("tools", () => {
     expect(table).toContain("| INDEX.md | 3 | 12 |");
     expect(table).toContain("| pending | 3 |");
     expect(table).toMatch(/Since: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
-    // Budget-pressure row from the primed day bucket.
-    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    // Budget-pressure row from the primed day bucket. The expected stamp is
+    // derived from the data (readDays), never from a re-read clock: a UTC
+    // midnight crossing between the prime bump and this assertion could
+    // otherwise desync the two and flake.
+    const stamp = Object.keys(await readDays(store, PROJECT))[0] ?? "";
+    expect(stamp).toMatch(/^\d{8}$/);
     expect(table).toContain(`| ${stamp} | apply.lines | 3 |`);
   });
 
