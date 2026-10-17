@@ -16,9 +16,12 @@
  * — bumps never delay or alter a hook outcome, never throw, and never
  * reject unhandled. `setArm`/`clearArm` are still awaited at their call
  * sites (hint hit + recall success) but stay never-throw and inside the
- * same mutex. Day buckets prune after 90 UTC days, piggybacked once per
- * UTC day per project off the first bump after a day change (fire-and-
- * forget; module-level last-prune stamps per process, keyed by projectID,
+ * same mutex; the recall-side consumption runs through `consumeArm`, which
+ * performs the read + clear in ONE locked body so concurrent recalls can
+ * never both observe the armed flag. Day buckets prune after 90 UTC days,
+ * piggybacked once per UTC day per project off the first bump after a day
+ * change (fire-and-forget; module-level last-prune stamps per process,
+ * keyed by projectID,
  * so one project's first bump cannot advance the stamp for other projects
  * in the same process). Best-effort statistics: losing a bump to a crash
  * or cross-process race is accepted, unlike the correctness ledger.
@@ -31,8 +34,9 @@
  * also lives here: its deps resolve per execute call (spec P22), a no-arg
  * invocation renders `collectAndRender` and posts the table through
  * `ctx.session.synthetic`, and a case-insensitive `reset` argument wipes the
- * whole `<projectID>/metrics/…` namespace (`resetMetrics`: paginated scan +
- * locked removes, then a fresh `since`) and reports the restarted table
+ * whole `<projectID>/metrics/…` namespace (`resetMetrics`: one locked body
+ * covering the paginated scan, the removes, and the fresh `since` stamp)
+ * and reports the restarted table
  * through the same channel. G-M1 is a deploy-time human check: the FIRST
  * RESOLVED synthetic post of the process logs the §1.3 line once (module-
  * level stamp; a rejected post logs nothing — the line claims "posted").
@@ -447,27 +451,60 @@ export async function clearArm(
 }
 
 /**
+ * Consume the session's arm flag under the write mutex (the §5.12 hint→recall
+ * conversion): the read and the clear run in ONE locked body, so two
+ * concurrent recall consumers of the same session resolve mutually exclusive
+ * results — the winner removes the flag and gets `true`, the loser observes
+ * the removal and gets `false` (at-most-once conversion; `readArmed` +
+ * `clearArm` as two separate calls could both see `1` before either remove
+ * landed, double-counting `hint.recall`). The bump after a `true` result
+ * stays clear-after-read by construction: the flag is already gone when the
+ * caller counts, so a crash between consume and count replays uncounted,
+ * never doubled. Never rejects like `setArm`/`clearArm` (the executor wraps
+ * the block best-effort anyway).
+ */
+export async function consumeArm(
+  storage: LedgerStorage,
+  projectID: string,
+  sessionID: string,
+): Promise<boolean> {
+  try {
+    return await withWriteLock(async () => {
+      const key = armKey(projectID, sessionID);
+      if ((await storage.get(key)) === 1) {
+        await storage.remove(key);
+        return true;
+      }
+      return false;
+    });
+  } catch (error) {
+    logDiagnostic(error);
+    return false;
+  }
+}
+
+/**
  * `/memory-metrics reset` (spec §5.12 storage keys + US-29): wipe the whole
  * `<projectID>/metrics/…` namespace — every total counter, day bucket, the
  * `since` stamp, and every arm flag — never another project's namespace and
  * never any key outside it (the wipe is namespace-scoped numbers-only state;
  * ledger keys like `curation.pending`/`seen/…` and other projects' metrics
- * are untouched). One locked body modeled on `pruneDayBuckets` (paginated
- * scan first, then removes), followed by a FRESH `since` stamp so the
- * restarted counters open on a new self-comparison window (the bumps that
- * follow keep the stamp valid from then on). The scan runs OUTSIDE the lock,
- * which is a deliberate, accepted race (best-effort per ADR-0008 §3): a bump
- * racing the scan may survive the wipe (its write lands after the removes)
- * or be counted-then-wiped — every in-process write serializes through the
- * same mutex, so two locked bodies can never corrupt the namespace, and the
- * lost window is a statistic, never the correctness ledger. The REMOVES
- * PRECEDE the `since` re-stamp inside the locked body: a failed remove
- * aborts BEFORE the re-stamp, leaving a partially wiped namespace still
- * covered by the old `since` window and returning `false` to the caller.
- * Reset is rare and user-initiated: like the arm ops it is awaited at its
- * call site and never rejects — every failure (scan, remove, re-stamp) is
- * caught, logged via `logDiagnostic`, and reported as `false`, and the
- * command still reports through its table channel either way.
+ * are untouched). One locked body covering the WHOLE wipe — the paginated
+ * scan, the removes, and the fresh `since` re-stamp — so bumps scheduled
+ * in this process serialize against the reset: a bump either completes
+ * before the locked body starts (counted, then wiped) or runs after it
+ * (counted against the fresh window) — an in-process bump can never land
+ * between the scan and the removes. Cross-process concurrency stays
+ * best-effort with the same mutual exclusion as before (ADR-0008 §3):
+ * the lost window is a statistic, never the correctness ledger. The
+ * REMOVES PRECEDE the `since` re-stamp inside the locked body: a failed
+ * remove aborts BEFORE the re-stamp, leaving a partially wiped namespace
+ * still covered by the old `since` window (and, if the scan itself threw,
+ * untouched) and returning `false` to the caller. Reset is rare and
+ * user-initiated: like the arm ops it is awaited at its call site and
+ * never rejects — every failure (scan, remove, re-stamp) is caught, logged
+ * via `logDiagnostic`, and reported as `false`, and the command still
+ * reports through its table channel either way.
  */
 export async function resetMetrics(
   storage: LedgerStorage,
@@ -475,11 +512,11 @@ export async function resetMetrics(
 ): Promise<boolean> {
   try {
     const prefix = `${projectPrefix(projectID)}metrics/`;
-    const victims: string[] = [];
-    for (const entry of await scanAll(storage, prefix)) {
-      if (entry.key.startsWith(prefix)) victims.push(entry.key);
-    }
     await withWriteLock(async () => {
+      const victims: string[] = [];
+      for (const entry of await scanAll(storage, prefix)) {
+        if (entry.key.startsWith(prefix)) victims.push(entry.key);
+      }
       for (const victim of victims) {
         await storage.remove(victim);
       }

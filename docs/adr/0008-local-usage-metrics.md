@@ -49,9 +49,10 @@ ever collecting content?
 3. **Fire-and-forget, never-throw taps.** Every bump is dispatched off the hook's awaited path
    (`void bump(...)` with its own catch) through the existing per-process write mutex. A bump must
    never delay a hook, never change a hook's outcome, and never throw. The arm-flag transport is
-   the sole exception to the off-path rule: `setArm`/`clearArm` are **awaited** at their two call
-   sites (hint hit / recall success), never-throw, same mutex — the subsequent counter depends on
-   them. Losing a counter on a crash
+   the sole exception to the off-path rule: `setArm` is **awaited** at the hint-hit site, and the
+   recall-side consumption runs through `consumeArm` — read + clear in ONE locked body,
+   never-throw, same mutex — because the subsequent counter depends on it and concurrent recall
+   calls must convert an armed session at most once. Losing a counter on a crash
    or to cross-process concurrency is acceptable: metrics are best-effort statistics, unlike the
    correctness ledger (ADR-0004), which keeps its stronger check-before-write/idempotency guarantees
    untouched.

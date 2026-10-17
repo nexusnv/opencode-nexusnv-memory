@@ -50,10 +50,9 @@ import {
   type CappedFileOptions,
 } from "./files.js";
 import {
-  clearArm,
   collectAndRender,
+  consumeArm,
   metricsBumpOf,
-  readArmed,
   type MetricName,
   type MetricsBump,
 } from "./metrics.js";
@@ -160,18 +159,21 @@ export interface ApplyToolContext {
 
 /**
  * The arm transport `memory_recall` consults on success (§5.12 hint→recall
- * correlation): whether the context hook armed this session's hint flag
- * (`<projectID>/metrics/arm/hint/<sessionID>`, the int `1`), and a clear
- * for consuming it on first use. The flag lives in the metrics namespace,
- * which is why `bump` alone can neither read nor clear it. Method shorthand
- * keeps the shape bivariant so both the real wiring and test fakes satisfy
- * it (same pattern as `PermissionAsserter`).
+ * correlation): consume this session's hint flag
+ * (`<projectID>/metrics/arm/hint/<sessionID>`, the int `1`) in one atomic
+ * read+clear. The flag lives in the metrics namespace, which is why `bump`
+ * alone can neither read nor clear it. Method shorthand keeps the shape
+ * bivariant so both the real wiring and test fakes satisfy it (same pattern
+ * as `PermissionAsserter`).
  */
 export interface MetricsArm {
-  /** True when `hint.shown` armed this session's hint flag (§5.12). */
-  readArmed(sessionID: string): Promise<boolean>;
-  /** Consume the flag: clear is awaited before the `hint.recall` bump. */
-  clearArm(sessionID: string): Promise<void>;
+  /**
+   * Atomically read and clear the armed flag (§5.12): resolves `true` only
+   * for the one consumer whose locked read+remove ran while the flag was
+   * still set — concurrent recalls in the same session can never both
+   * convert, and a cleared/unarmed session resolves `false` cleanly.
+   */
+  consumeArm(sessionID: string): Promise<boolean>;
 }
 
 export interface RecallDeps extends CappedFileOptions {
@@ -250,11 +252,14 @@ function candidateAt(candidates: unknown, index: number): ApplyCandidate {
  * successful read bumps the `handoff` aggregate, and a rejection bumps
  * `recall.error` in the catch before RETHROWING THE ORIGINAL ERROR UNCHANGED
  * (identity preserved — metrics never mask a failure). On success it also
- * consumes the hint→recall arm (§5.12): readArmed → if armed, the awaited
- * clearArm THEN the fire-and-forget `hint.recall` bump, clear-first so a
- * crash between the two cannot double-count the conversion on replay; the
- * block is best-effort wrapped because `readArmed` is a plain storage read
- * that may reject, and such an arm hiccup must never turn a successful
+ * consumes the hint→recall arm (§5.12): one atomic `consumeArm()` — read +
+ * clear inside a single write-locked body — whose `true` return then fires
+ * the fire-and-forget `hint.recall` bump. The flag is already gone when
+ * the count lands, so a crashed process replays at most one uncounted
+ * conversion, and concurrent recalls can never both count (the loser's
+ * read observes the removal, not `1`). The block is best-effort wrapped
+ * because `consumeArm` is a storage operation that may reject through the
+ * port contract, and such an arm hiccup must never turn a successful
  * recall into an error.
  */
 export function createMemoryRecallExecute(deps: RecallDeps) {
@@ -282,22 +287,21 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
     // Success counter: the six-name classifier → literal name, else the
     // handoff aggregate.
     deps.bump?.(RECALL_FILE_COUNTERS[file] ?? "recall.handoff");
-    // Hint→recall conversion (§5.12). Clear is awaited BEFORE the bump
-    // so a crashed process replays at most one uncounted flag, never a
-    // double count.
+    // Hint→recall conversion (§5.12). The consume is atomic (read + clear
+    // in one locked body over the storage port): the `true` branch is the
+    // consumer that removed the flag, so the count can never double-fire
+    // for one armed flag, and the flag is gone before the bump lands.
     if (deps.arm) {
       try {
-        const armed = await deps.arm.readArmed(context.sessionID);
-        if (armed) {
-          await deps.arm.clearArm(context.sessionID);
+        if (await deps.arm.consumeArm(context.sessionID)) {
           deps.bump?.("hint.recall");
         }
       } catch {
         // Best-effort conversion: an arm read/clear failure must never
         // fail a recall that already succeeded. The inner catch defends
-        // the *port* contract — `readArmed` is a plain get that can
-        // reject, while `clearArm` is already never-throw at the impl
-        // layer (ADR-0008 §3) — belt-and-braces, not duplication.
+        // the *port* contract — `consumeArm` is never-throw at the
+        // metrics-impl layer (it catches internally, ADR-0008 §3), so this
+        // is belt-and-braces for a thinner test/port fake, not duplication.
       }
     }
     return toolResult(content);
@@ -524,15 +528,14 @@ function ledgerOf(ctx: Plugin.Context): LedgerStorage {
 /**
  * The §5.12 hint→recall arm transport for the recall executor: the real
  * flag lives under `<projectID>/metrics/arm/hint/<sessionID>` over the
- * ledger, so the executor needs these two partials resolved against the
- * live context (spec P22 — never captured once at load).
+ * ledger, so the executor needs its consume resolved against the live
+ * context (spec P22 — never captured once at load).
  */
 function armOf(ctx: Plugin.Context): MetricsArm {
   const storage = ledgerOf(ctx);
   const projectID = projectIDOf(ctx);
   return {
-    readArmed: (sessionID) => readArmed(storage, projectID, sessionID),
-    clearArm: (sessionID) => clearArm(storage, projectID, sessionID),
+    consumeArm: (sessionID) => consumeArm(storage, projectID, sessionID),
   };
 }
 

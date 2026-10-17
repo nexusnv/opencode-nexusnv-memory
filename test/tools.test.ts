@@ -23,7 +23,7 @@ import {
 } from "../src/capture.js";
 import {
   armKey,
-  clearArm,
+  consumeArm,
   createBump,
   readArmed,
   readDays,
@@ -485,18 +485,14 @@ describe("tools", () => {
       };
     });
     const tools = await import("../src/tools.js");
-    const armReads: string[] = [];
-    const armClears: string[] = [];
+    const armConsumes: string[] = [];
     const failing = tools.createMemoryRecallExecute({
       memoryRoot: root,
       bump,
       arm: {
-        readArmed: async (sessionID: string) => {
-          armReads.push(sessionID);
+        consumeArm: async (sessionID: string) => {
+          armConsumes.push(sessionID);
           return true;
-        },
-        clearArm: async (sessionID: string) => {
-          armClears.push(sessionID);
         },
       },
     });
@@ -508,21 +504,19 @@ describe("tools", () => {
     expect(errTotals["recall.error"]).toBe(1);
     // The arm is consulted only AFTER a successful read — a failed recall
     // consumes nothing.
-    expect(armReads).toEqual([]);
-    expect(armClears).toEqual([]);
+    expect(armConsumes).toEqual([]);
   });
 
   it("recall_consumes_arm_for_hint_conversion", async () => {
     // --- Armed session: the first successful recall bumps hint.recall and
-    // clears the arm flag exactly once. ---
+    // consumes the arm flag exactly once. ---
     const bump = createBump(storage, PROJECT);
     await setArm(storage, PROJECT, TOOL_CTX.sessionID);
     const execute = createMemoryRecallExecute({
       memoryRoot: root,
       bump,
       arm: {
-        readArmed: (sessionID) => readArmed(storage, PROJECT, sessionID),
-        clearArm: (sessionID) => clearArm(storage, PROJECT, sessionID),
+        consumeArm: (sessionID) => consumeArm(storage, PROJECT, sessionID),
       },
     });
     await writeMemory("INDEX.md", "- index marker");
@@ -550,12 +544,9 @@ describe("tools", () => {
       memoryRoot: root,
       bump: createBump(unarmedStore, PROJECT),
       arm: {
-        readArmed: async () => {
+        consumeArm: async () => {
           unarmedReads += 1;
           return false;
-        },
-        clearArm: async () => {
-          throw new Error("unarmed session must never clear the flag");
         },
       },
     });
@@ -566,8 +557,10 @@ describe("tools", () => {
     expect(unarmedTotals["hint.recall"]).toBeUndefined();
     expect(unarmedTotals["recall.INDEX.md"]).toBe(1);
 
-    // --- Decision-4 order: read → awaited clear → fire-and-forget bump
-    // (clear-first so a crash between cannot double-count on replay). ---
+    // --- Decision-4 order: recall counts first, then the one-shot atomic
+    // consume, then the fire-and-forget conversion bump (the flag is
+    // already gone when the count lands — a crash between the two replays
+    // uncounted, never doubled). ---
     const order: string[] = [];
     const ordered = createMemoryRecallExecute({
       memoryRoot: root,
@@ -575,12 +568,9 @@ describe("tools", () => {
         order.push(`bump:${name}`);
       },
       arm: {
-        readArmed: async (sessionID) => {
-          order.push(`read:${sessionID}`);
+        consumeArm: async (sessionID) => {
+          order.push(`consume:${sessionID}`);
           return true;
-        },
-        clearArm: async (sessionID) => {
-          order.push(`clear:${sessionID}`);
         },
       },
     });
@@ -588,11 +578,37 @@ describe("tools", () => {
     order.push("resolved");
     expect(order).toEqual([
       "bump:recall.INDEX.md",
-      `read:${TOOL_CTX.sessionID}`,
-      `clear:${TOOL_CTX.sessionID}`,
+      `consume:${TOOL_CTX.sessionID}`,
       "bump:hint.recall",
       "resolved",
     ]);
+  });
+
+  it("recall_conversions_are_at_most_once_under_concurrent_recalls", async () => {
+    // Two recalls racing the SAME armed flag: the conversion counter is
+    // at-most-once — exactly one of the two consumes wins the locked
+    // read+clear, and `hint.recall` counts 1, never 2 (the fix's contract).
+    const bump = createBump(storage, PROJECT);
+    await setArm(storage, PROJECT, TOOL_CTX.sessionID);
+    await writeMemory("INDEX.md", "- index marker");
+    const execute = createMemoryRecallExecute({
+      memoryRoot: root,
+      bump,
+      arm: {
+        consumeArm: (sessionID) => consumeArm(storage, PROJECT, sessionID),
+      },
+    });
+    await Promise.all([
+      execute({ file: "INDEX.md" }, TOOL_CTX),
+      execute({ file: "INDEX.md" }, TOOL_CTX),
+    ]);
+    await flushMetrics();
+    const totals = await readTotals(storage, PROJECT);
+    expect(totals["recall.INDEX.md"]).toBe(2);
+    expect(totals["hint.recall"]).toBe(1);
+    expect(
+      await storage.get(armKey(PROJECT, TOOL_CTX.sessionID)),
+    ).toBeUndefined();
   });
 
   it("apply_bumps_batch_lines_denied_partial_and_reset", async () => {

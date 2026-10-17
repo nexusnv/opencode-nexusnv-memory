@@ -4,6 +4,7 @@
 
 - Local usage metrics (spec §5.12, ADR-0008, M-T1–M-T6): count-only, on-machine, never-throw `bump` taps over the plugin-scoped `ctx.storage` (`<projectID>/metrics/…` — monotonic totals + ≤90-day UTC buckets + lazy `since`, enumerated fail-closed names, numbers only, 1,000-bump flood containment); metrics health (six structural file line counts, handoffs/archive/pending/seen counts via the shared scan walker); the read-only `memory_metrics` tool; and the `memory-metrics` command registered at setup (`/memory-metrics [reset]`): synthetic-post dashboard → once-per-process G-M1 deploy line → §5.5 `memory_metrics`-echo fallback on a rejected post. Optional file-based `commands/memory-metrics.md` affordance ships alongside (plugin command is normative, later source wins). No memory file, budget, injection, or hook-outcome behavior changes.
 - Five-option config contract unchanged (ADR-0006: metrics always on, no sixth option; `/memory-metrics reset` is the control; uninstall orphans the keys like the ledger).
+- Review hardening (M-T1–T7 follow-up): the §5.12 hint→recall arm consumption is atomic (`consumeArm`: read + clear in one locked body, so concurrent recalls convert an armed session at most once), and `/memory-metrics reset` wipes under one lock (scan + removes + fresh `since` serialize against in-process bumps); no counter definitions, key shapes, or hook outcomes change.
 
 Supported OpenCode range: `2.0.x` (built and type-checked against `@opencode/plugin 2.0.29`).
 

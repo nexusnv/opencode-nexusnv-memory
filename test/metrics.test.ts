@@ -9,6 +9,7 @@ import {
   armKey,
   clearArm,
   collectHealth,
+  consumeArm,
   createBump,
   DAY_BUCKET_RETENTION_DAYS,
   dayKey,
@@ -339,10 +340,39 @@ describe("arm flag (hint→recall, binary as int 1)", () => {
     await expect(clearArm(storage, PROJECT, SESSION)).resolves.toBeUndefined();
   });
 
+  it("consumeArm removes the armed flag and resolves its one true consumer", async () => {
+    const storage = new FakeStorage();
+    // Unarmed: consume resolves false and writes nothing.
+    await expect(consumeArm(storage, PROJECT, SESSION)).resolves.toBe(false);
+    expect(await storage.get(armKey(PROJECT, SESSION))).toBeUndefined();
+    // Armed: the first consume removes the flag while answering true; a
+    // second consume observes the removal and resolves false.
+    await setArm(storage, PROJECT, SESSION);
+    await expect(consumeArm(storage, PROJECT, SESSION)).resolves.toBe(true);
+    expect(await storage.get(armKey(PROJECT, SESSION))).toBeUndefined();
+    await expect(consumeArm(storage, PROJECT, SESSION)).resolves.toBe(false);
+  });
+
+  it("consumeArm is at-most-once for two concurrent consumers", async () => {
+    // Two recalls racing one armed flag: exactly one locked read+clear sees
+    // the `1` — the loser observes the removal (the executor then bumps
+    // `hint.recall` once, never twice).
+    const storage = new FakeStorage();
+    await setArm(storage, PROJECT, SESSION);
+    const [first, second] = await Promise.all([
+      consumeArm(storage, PROJECT, SESSION),
+      consumeArm(storage, PROJECT, SESSION),
+    ]);
+    const results = [first, second].sort((a, b) => Number(a) - Number(b));
+    expect(results).toEqual([false, true]);
+    expect(await storage.get(armKey(PROJECT, SESSION))).toBeUndefined();
+  });
+
   it("never rejects when storage is down", async () => {
     const storage = new ThrowingStorage();
     await expect(setArm(storage, PROJECT, SESSION)).resolves.toBeUndefined();
     await expect(clearArm(storage, PROJECT, SESSION)).resolves.toBeUndefined();
+    await expect(consumeArm(storage, PROJECT, SESSION)).resolves.toBe(false);
   });
 });
 
