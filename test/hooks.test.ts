@@ -13,6 +13,8 @@ import {
 import { extractLatestUserText, matchIndex } from "../src/hints.js";
 import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
+  attemptKey,
+  failureContentID,
   getPending,
   getThrottle,
   incPending,
@@ -21,6 +23,9 @@ import {
   type LedgerStorage,
 } from "../src/capture.js";
 import { DEFAULT_MEMORY_OPTIONS } from "../src/config.js";
+import { withWriteLock } from "../src/files.js";
+import { readDays, readTotals } from "../src/metrics.js";
+import { redact } from "../src/redact.js";
 
 /** Persisted fake storage (same contract as test/ledger.test.ts). */
 class FakeStorage implements LedgerStorage {
@@ -69,6 +74,24 @@ class ThrowingStorage implements LedgerStorage {
     next?: string;
   }> {
     throw new Error("storage down");
+  }
+}
+
+/** FakeStorage + per-key write counts for the metrics-tap assertions.
+ * Behavior is byte-identical to `FakeStorage` (hooks must not observe any
+ * difference); the counters only let tests see which keys were written. */
+class CountingStorage extends FakeStorage {
+  /** Total `set` calls per key. */
+  readonly writes = new Map<string, number>();
+  /** Total `remove` calls per key. */
+  readonly removes = new Map<string, number>();
+  async set(key: string, value: unknown): Promise<void> {
+    this.writes.set(key, (this.writes.get(key) ?? 0) + 1);
+    await super.set(key, value);
+  }
+  async remove(key: string): Promise<void> {
+    this.removes.set(key, (this.removes.get(key) ?? 0) + 1);
+    await super.remove(key);
   }
 }
 
@@ -676,5 +699,241 @@ describe("execute.after failure hook", () => {
     await expect(
       handler!(null as never),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("metrics taps (M-T3)", () => {
+  /**
+   * Drain every scheduled metrics write (bump bodies): one macrotask lets
+   * the fire-and-forget bodies enqueue, then joining the write chain waits
+   * until all earlier work completes (same drain pattern as
+   * metrics.test.ts).
+   */
+  async function settle(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await withWriteLock(async () => undefined);
+  }
+
+  /** Totals for one tap fixture, after letting scheduled bumps land. */
+  async function totalsOf(store: CountingStorage) {
+    await settle();
+    return readTotals(store, PROJECT);
+  }
+
+  function countedStore(): CountingStorage {
+    return new CountingStorage();
+  }
+
+  async function writeFullMemory(store: LedgerStorage): Promise<void> {
+    await writeMemory(
+      "INDEX.md",
+      "- auth-service: login flow in src/auth.ts\n- billing: invoices\n",
+    );
+    await writeMemory("activeContext.md", activeContextWithErrors(2));
+    await incPending(store, PROJECT, 5);
+    await setRotated(store, PROJECT, 2);
+  }
+
+  function armWriteCount(store: CountingStorage): number | undefined {
+    return store.writes.get(`${PROJECT}/metrics/arm/hint/${SESSION}`);
+  }
+
+  it("metrics_taps_match_hook_outcomes", async () => {
+    // -- prompt hook: attach on admission, repeat attach → index.already ---
+    {
+      const store = countedStore();
+      await writeMemory("INDEX.md", "- auth-service: login flow\n");
+      const { hooks } = await setupHooks({}, store);
+      const event = promptEvent("hello");
+      await runHook(hooks, "prompt", event);
+      await runHook(hooks, "prompt", event);
+      expect(await totalsOf(store)).toEqual({
+        "hook.prompt": 2,
+        "index.attach": 1,
+        "index.already": 1,
+      });
+    }
+
+    // -- prompt hook: over-cap INDEX → index.overCap, never attached -------
+    {
+      const store = countedStore();
+      await writeMemory(
+        "INDEX.md",
+        Array.from({ length: 31 }, (_, i) => `- line ${i}`).join("\n"),
+      );
+      const { hooks } = await setupHooks({}, store);
+      const event = promptEvent("hello");
+      await runHook(hooks, "prompt", event);
+      expect(event.prompt.files).toHaveLength(0);
+      expect(await totalsOf(store)).toEqual({
+        "hook.prompt": 1,
+        "index.overCap": 1,
+      });
+    }
+
+    // -- prompt hook: user directive → remember.caught (append lands) ------
+    {
+      const store = countedStore();
+      await writeMemory("INDEX.md", "- auth-service: login flow\n");
+      const { hooks } = await setupHooks({}, store);
+      const event = promptEvent("remember: deploy on Fridays");
+      await runHook(hooks, "prompt", event);
+      expect(await totalsOf(store)).toEqual({
+        "hook.prompt": 1,
+        "index.attach": 1,
+        "remember.caught": 1,
+      });
+      // Replay of the same event is ledger-deduped: remember.caught stays 1
+      // and the already-attached INDEX bumps index.already.
+      await runHook(hooks, "prompt", event);
+      expect(await totalsOf(store)).toEqual({
+        "hook.prompt": 2,
+        "index.attach": 1,
+        "index.already": 1,
+        "remember.caught": 1,
+      });
+    }
+
+    // -- context hook: brief + status + hint all injected ------------------
+    {
+      const store = countedStore();
+      await writeFullMemory(store);
+      const { hooks } = await setupHooks({}, store);
+      const event = contextEvent([
+        userMessage("how does auth-service handle login?"),
+      ]);
+      await runHook(hooks, "context", event);
+      const totals = await totalsOf(store);
+      expect(totals).toEqual({
+        "hook.context": 1,
+        "brief.injected": 1,
+        // `brief.lines` counts the injected brief by its line count.
+        "brief.lines": event.system[0]!.text.split("\n").length,
+        "status.shown": 1,
+        "hint.shown": 1,
+      });
+      // The hint hit arms the flag: <projectID>/metrics/arm/hint/<sessionID>
+      // = 1, and exactly one arm write landed (awaited setArm).
+      expect(
+        await store.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
+      ).toBe(1);
+      expect(armWriteCount(store)).toBe(1);
+      // Total + day pair for every counter bumped this run (one UTC day).
+      const days = await readDays(store, PROJECT);
+      const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const bucket = days[stamp] ?? {};
+      for (const [name, count] of Object.entries(totals)) {
+        expect(bucket[name], `day pair for ${name}`).toBe(count);
+      }
+    }
+
+    // -- context hook: forced truncation drops the status before the hint --
+    {
+      const store = countedStore();
+      await writeFullMemory(store);
+      const { hooks } = await setupHooks({ injectBudgetLines: 5 }, store);
+      const event = contextEvent([
+        userMessage("how does auth-service handle login?"),
+      ]);
+      await runHook(hooks, "context", event);
+      expect(await totalsOf(store)).toEqual({
+        "hook.context": 1,
+        "brief.truncated": 1,
+        "status.dropped": 1,
+        "hint.shown": 1,
+      });
+      // The hint still fired, so the flag is armed even on a dropped status.
+      expect(
+        await store.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
+      ).toBe(1);
+    }
+
+    // -- context hook: empty memory files → brief.empty only ---------------
+    {
+      const store = countedStore();
+      const { hooks } = await setupHooks({}, store);
+      // Remove the scaffolded files: nothing to inject at all.
+      await rm(join(memoryRoot, "activeContext.md"));
+      await rm(join(memoryRoot, "INDEX.md"));
+      const event = contextEvent([userMessage("what is the weather today?")]);
+      await runHook(hooks, "context", event);
+      expect(event.system).toHaveLength(0);
+      expect(await totalsOf(store)).toEqual({
+        "hook.context": 1,
+        "brief.empty": 1,
+      });
+      // No hint fired: the arm flag stays unset (one write = zero).
+      expect(armWriteCount(store)).toBeUndefined();
+    }
+
+    // -- compaction hook: priors injected with their line count ------------
+    {
+      const store = countedStore();
+      await writeMemory("activeContext.md", activeContextWithErrors(1));
+      await writeMemory("decisions.md", decisionsWithTail(10));
+      const { hooks } = await setupHooks({}, store);
+      const event = contextEvent([userMessage("summarize")]) as unknown as {
+        system: Array<{ type: string; text: string }>;
+        messages: unknown[];
+        sessionID: string;
+        result?: unknown;
+      };
+      await runHook(hooks, "compaction", event);
+      expect(await totalsOf(store)).toEqual({
+        "hook.compaction": 1,
+        "compaction.priors": 1,
+        "priors.lines": event.system[0]!.text.split("\n").length,
+      });
+    }
+
+    // -- execute.after: error event captures; replay is a duplicate --------
+    {
+      const store = countedStore();
+      const { toolHooks } = await setupHooks({}, store);
+      const handler = toolHooks.get("execute.after");
+      const toolEvent = (status: string, error?: unknown, input?: unknown) => ({
+        tool: "bash",
+        sessionID: SESSION,
+        agent: "primary",
+        messageID: "m1",
+        id: "call-1",
+        status,
+        error,
+        input,
+      });
+      await handler!(toolEvent("error", { message: "m-t3-fail-one" }) as never);
+      // Identical replay within the retry window: ledger-deduped duplicate.
+      await handler!(toolEvent("error", { message: "m-t3-fail-one" }) as never);
+      // A non-error event bumps nothing.
+      await handler!(toolEvent("completed") as never);
+      expect(await totalsOf(store)).toEqual({
+        "failure.captured": 1,
+        "failure.duplicate": 1,
+      });
+    }
+
+    // -- execute.after: attempt older than ~30s window → failure.retry -----
+    {
+      const store = countedStore();
+      const { toolHooks } = await setupHooks({}, store);
+      const handler = toolHooks.get("execute.after");
+      const toolEvent = (status: string, error?: unknown, input?: unknown) => ({
+        tool: "bash",
+        sessionID: SESSION,
+        agent: "primary",
+        messageID: "m1",
+        id: "call-1",
+        status,
+        error,
+        input,
+      });
+      // contentID over the redacted failure summary (no cmd, no detail).
+      const contentID = failureContentID(redact("m-t3-retry"), redact(""));
+      // A ~60s-old attempt with no seen key blocks the capture inside the
+      // retry window: the outcome is retry-later, not captured.
+      await store.set(attemptKey(PROJECT, contentID), Date.now() - 60_000);
+      await handler!(toolEvent("error", { message: "m-t3-retry" }) as never);
+      expect(await totalsOf(store)).toEqual({ "failure.retry": 1 });
+    }
   });
 });

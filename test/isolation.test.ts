@@ -21,7 +21,8 @@ import {
   type LedgerStorage,
   type VcsPort,
 } from "../src/capture.js";
-import { resetWriteChainForTests } from "../src/files.js";
+import { resetWriteChainForTests, withWriteLock } from "../src/files.js";
+import { createBump, readTotals } from "../src/metrics.js";
 
 /**
  * Task 8 (spec §§5.7, 5.9 + c4-06): idle/compaction capture with survival
@@ -559,6 +560,53 @@ describe("dispatchEvent", () => {
   it("never throws on garbage", async () => {
     await expect(dispatchEvent(null, deps())).resolves.toBeUndefined();
     await expect(dispatchEvent("nope", deps())).resolves.toBeUndefined();
+  });
+
+  it("dispatch_bumps_snapshot_and_compaction_capture_counters", async () => {
+    // Counters ride the SAME storage as the ledger: the bump is built over
+    // one store, and `deps.storage` points at it too.
+    const bumpStore = new FakeStorage();
+    const bump = createBump(bumpStore, PROJECT);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const d = { ...deps(), storage: bumpStore, bump };
+      // Idle → written; a rerun on the same VCS state → unchanged.
+      await dispatchEvent(idleEvent("sess-m1", projectRoot), d);
+      await dispatchEvent(idleEvent("sess-m1", projectRoot), d);
+      // The same durable `ended` redelivered within the ~30s dedupe window:
+      // captured once, then a ledger-deduped duplicate.
+      const ended = endedEvent(
+        "sess-m2",
+        projectRoot,
+        "M-T3-COMPACTION-TEXT",
+        "recent tail",
+      );
+      await dispatchEvent(ended, d);
+      await dispatchEvent(ended, d);
+      // A skipped outcome bumps nothing: idle with no sessionID resolves
+      // skipped inside the snapshot writer.
+      await dispatchEvent({ id: "evt-sk", type: "session.idle", data: {} }, d);
+      // Drain scheduled bump bodies, then read the counters.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await withWriteLock(async () => undefined);
+      const totals = await readTotals(bumpStore, PROJECT);
+      // The skipped outcome (and every non-handled event) bumped nothing:
+      // exactly the four counters for the four real outcomes.
+      expect(totals).toEqual({
+        "snapshot.written": 1,
+        "snapshot.unchanged": 1,
+        "compactionCapture.captured": 1,
+        "compactionCapture.duplicate": 1,
+      });
+      // The skipped outcome never tripped the fail-closed guard: no
+      // `[memory] metrics` warn-once line fired.
+      const warnedMetrics = warn.mock.calls.some(
+        ([line]) => typeof line === "string" && line.includes("[memory] metrics"),
+      );
+      expect(warnedMetrics).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

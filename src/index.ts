@@ -22,6 +22,7 @@ import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
 import { registerMemoryTools } from "./tools.js";
+import { createBump, setArm } from "./metrics.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
@@ -126,10 +127,21 @@ export default Plugin.define({
     const controller = new AbortController();
     const registrations: Registration[] = [];
 
+    // Metrics taps (M-T3): ONE metrics bump shared by every hook body and
+    // the event loop, built once from one ledger adapter over the same
+    // plugin-scoped storage the hooks already adapt (the event-loop wiring
+    // below reuses this adapter). `bump` is fire-and-forget counters only:
+    // never throws sync, never rejects unhandled, and never delays or
+    // alters a hook outcome.
+    const ledger = asLedger(ctx.storage);
+    const projectID = projectIDOf(ctx);
+    const bump = createBump(ledger, projectID);
+
     // Prompt hook: sole INDEX injector + source:user fast path (§§5.1, 5.11).
     registrations.push(
       await ctx.session.hook("prompt", async (event) => {
         try {
+          bump("hook.prompt");
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
@@ -146,14 +158,23 @@ export default Plugin.define({
             // Over-cap/missing/unreadable INDEX is not attached (no truncation).
             if (await indexWithinCap(abs, options.indexLines)) {
               event.prompt.files.push({ uri: expectedIndexUri });
+              bump("index.attach");
+            } else {
+              bump("index.overCap");
             }
+          } else {
+            bump("index.already");
           }
           // One bounded side effect: user-asserted remember → decisions.md.
-          await rememberAsserted(event, {
-            storage: ledger,
-            projectID,
-            memoryRoot,
-          });
+          if (
+            await rememberAsserted(event, {
+              storage: ledger,
+              projectID,
+              memoryRoot,
+            })
+          ) {
+            bump("remember.caught");
+          }
         } catch (error) {
           logDiagnostic(error);
         }
@@ -164,6 +185,7 @@ export default Plugin.define({
     registrations.push(
       await ctx.session.hook("context", async (event) => {
         try {
+          bump("hook.context");
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
@@ -207,14 +229,36 @@ export default Plugin.define({
             );
           }
 
+          // M-T3 taps below: classification uses only these in-scope
+          // variables. Truncation = a budget branch ran and actually cut
+          // brief content (a vacuous `truncateLinesWithNotice` on an empty
+          // brief must not claim `brief.truncated`).
+          if (rawBrief.length > 0 && briefLines !== rawBrief) {
+            bump("brief.truncated");
+          }
+
           if (briefLines.length > 0) {
             event.system.push({ type: "text", text: briefLines.join("\n") });
+            bump("brief.injected");
+            bump("brief.lines", briefLines.length);
+          } else if (brief === "") {
+            bump("brief.empty");
           }
           if (keepStatus && status !== undefined) {
             event.system.push({ type: "text", text: status });
+            bump("status.shown");
+          } else if (status !== undefined) {
+            // A computed status line dropped by the budget (keepStatus is
+            // only ever set false above): never dropped on a hint hit.
+            bump("status.dropped");
           }
           if (hint !== undefined) {
             event.system.push({ type: "text", text: hint });
+            bump("hint.shown");
+            // Arm the hint→recall correlation for this session (decision 4:
+            // awaited; `setArm` is itself never-throw/never-reject, so the
+            // await cannot surface a failure to this hook).
+            await setArm(ledger, projectID, event.sessionID);
           }
 
           // Throttled handoff writer: fire-and-forget, never awaited.
@@ -223,6 +267,7 @@ export default Plugin.define({
             vcs: ctx.vcs as unknown as VcsPort,
             memoryRoot,
             fileLines: options.fileLines,
+            bump,
           }).catch(logDiagnostic);
         } catch (error) {
           logDiagnostic(error);
@@ -234,12 +279,15 @@ export default Plugin.define({
     registrations.push(
       await ctx.session.hook("compaction", async (event) => {
         try {
+          bump("hook.compaction");
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
           const priors = await loadPriors(memoryRoot, {
             fileLines: options.fileLines,
           });
           if (priors.length > 0) {
             event.system.push({ type: "text", text: priors });
+            bump("compaction.priors");
+            bump("priors.lines", priors.split("\n").length);
           }
           // Never set event.result: the hook runs before the summary model
           // call, so setting it would skip the native summary (ADR-0003).
@@ -261,11 +309,36 @@ export default Plugin.define({
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
-          await captureFailure(event, ledger, projectID, memoryRoot, {
-            fileLines: options.fileLines,
-            indexLines: options.indexLines,
-            log: logDiagnostic,
-          });
+          const outcome = await captureFailure(
+            event,
+            ledger,
+            projectID,
+            memoryRoot,
+            {
+              fileLines: options.fileLines,
+              indexLines: options.indexLines,
+              log: logDiagnostic,
+            },
+          );
+          // M-T3 failure tap: explicit CaptureReason → §5.12 counter
+          // mapping (never the raw reason string; `skipped` bumps nothing).
+          switch (outcome.reason) {
+            case "captured":
+              bump("failure.captured");
+              break;
+            case "duplicate":
+              bump("failure.duplicate");
+              break;
+            case "retry-later":
+              bump("failure.retry");
+              break;
+            case "failed":
+              bump("failure.failed");
+              break;
+            case "skipped":
+              // No counter for a skip (non-error/disable paths).
+              break;
+          }
         } catch (error) {
           logDiagnostic(error);
         }
@@ -286,8 +359,8 @@ export default Plugin.define({
     // catch, so a throw on event N never stops event N+1. Location
     // isolation drops foreign events before any write.
     try {
-      const ledger = asLedger(ctx.storage);
-      const projectID = projectIDOf(ctx);
+      // Reuses the adapter + projectID hoisted at the top of setup (same
+      // storage + projectIdentity) — no duplicate per-site build.
       const projectDir = projectRootOf(ctx);
       const memoryRoot = join(projectDir, MEMORY_DIR);
       const subscribe = ctx.event?.subscribe;
@@ -305,6 +378,7 @@ export default Plugin.define({
                 memoryRoot,
                 fileLines: options.fileLines,
                 log: logDiagnostic,
+                bump,
               }),
             log: logDiagnostic,
           },
