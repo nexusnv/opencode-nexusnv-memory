@@ -1041,6 +1041,29 @@ function invokeOf(command: AddedCommand): (text: string) => Promise<void> {
     });
 }
 
+/** Delegates to FakeStorage (reads + writes succeed, so the table renders
+ * with real rows), but every `remove` throws — the reset WIPE itself can
+ * never complete while everything else behaves. */
+class NoRemoveStorage implements LedgerStorage {
+  constructor(readonly inner: FakeStorage) {}
+  async get(key: string): Promise<unknown> {
+    return this.inner.get(key);
+  }
+  async set(key: string, value: unknown): Promise<void> {
+    await this.inner.set(key, value);
+  }
+  async remove(_key: string): Promise<void> {
+    throw new Error("remove down");
+  }
+  async scan(options: {
+    prefix: string;
+    after?: string;
+    limit?: number;
+  }): Promise<{ entries: Array<{ key: string; value: unknown }>; next?: string }> {
+    return this.inner.scan(options);
+  }
+}
+
 describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
   it("command_posts_synthetic_and_logs_gm1_then_bumps_shown", async () => {
     // Seed one real counter so the table has a non-zero row + a since stamp.
@@ -1260,6 +1283,52 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
     expect(await readSince(other.storage, PROJECT)).toBe(
       "2030-01-01T00:00:00.000Z",
     );
+  });
+
+  it("reset_command_reports_through_table_channel_even_when_the_wipe_fails", async () => {
+    // Seed a completed bump so the (unwiped) table has a nonzero row.
+    const inner = new FakeStorage();
+    createBump(inner, PROJECT)("hook.prompt");
+    await settle();
+    const { added, fakeCtx, synthetic, storage } = fakeForMetricsCommand({
+      storage: new NoRemoveStorage(inner),
+    });
+    const registration = await registerMetricsCommand(fakeCtx);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "reset" },
+      delivery: "steer",
+    });
+    await settle();
+
+    // The wipe never completed (removes throw) — resolve-only executor, and
+    // a reset that did not happen is never counted.
+    expect(await storage.get(totalKey(PROJECT, "dashboard.reset"))).toBeUndefined();
+    // The report still ran through the NORMAL table channel, on the intact
+    // (unwiped) table: the seeded row still shows its real value.
+    expect(synthetic).toHaveBeenCalledTimes(1);
+    const posted = synthetic.mock.calls[0]![0]! as {
+      sessionID: string;
+      text: string;
+    };
+    expect(posted.sessionID).toBe(SESSION);
+    expect(posted.text).toContain("# [memory] metrics (local-only)");
+    expect(posted.text).toContain("| hook.prompt | 1 |");
+    // The wipe-less report that resolved IS a successful render+post, so
+    // dashboard.shown counts it (never the reset counter, which did not wipe).
+    expect(await storage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
+    // The wipe failure reached the logDiagnostic path.
+    expect(
+      warn.mock.calls.filter(
+        (call) =>
+          typeof call[0] === "string" &&
+          call[0]!.startsWith("[memory] metrics diagnostic:"),
+      ).length,
+    ).toBeGreaterThan(0);
+
+    await expect(registration.dispose()).resolves.toBeUndefined();
   });
 
   it("executor_never_throws", async () => {

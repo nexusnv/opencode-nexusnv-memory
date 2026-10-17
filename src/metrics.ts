@@ -455,11 +455,19 @@ export async function clearArm(
  * are untouched). One locked body modeled on `pruneDayBuckets` (paginated
  * scan first, then removes), followed by a FRESH `since` stamp so the
  * restarted counters open on a new self-comparison window (the bumps that
- * follow keep the stamp valid from then on). Reset is rare and
- * user-initiated: like the arm ops it is awaited at its call site and never
- * rejects — every failure (scan, remove, re-stamp) is caught, logged via
- * `logDiagnostic`, and reported as `false`, and the command still reports
- * through its table channel either way.
+ * follow keep the stamp valid from then on). The scan runs OUTSIDE the lock,
+ * which is a deliberate, accepted race (best-effort per ADR-0008 §3): a bump
+ * racing the scan may survive the wipe (its write lands after the removes)
+ * or be counted-then-wiped — every in-process write serializes through the
+ * same mutex, so two locked bodies can never corrupt the namespace, and the
+ * lost window is a statistic, never the correctness ledger. The REMOVES
+ * PRECEDE the `since` re-stamp inside the locked body: a failed remove
+ * aborts BEFORE the re-stamp, leaving a partially wiped namespace still
+ * covered by the old `since` window and returning `false` to the caller.
+ * Reset is rare and user-initiated: like the arm ops it is awaited at its
+ * call site and never rejects — every failure (scan, remove, re-stamp) is
+ * caught, logged via `logDiagnostic`, and reported as `false`, and the
+ * command still reports through its table channel either way.
  */
 export async function resetMetrics(
   storage: LedgerStorage,
@@ -975,24 +983,30 @@ export function registerMetricsCommand(
               fileLines: options.fileLines,
             },
           });
+          // Post the table through the synthetic channel; on a rejection
+          // degrade to the §5.5 pattern instead. The `return` in the catch
+          // makes the post-success crossing structural: everything below
+          // runs only after a RESOLVED post and can never co-fire with the
+          // fallback (no `shown` bump and no G-M1 line on either degraded
+          // path — enforced by shape, not by call-site convention).
           try {
             await ctx.session.synthetic({ sessionID, text: table });
-            // Deploy-time human check (§1.3 G-M1): once per process, first
-            // resolved post only — never logged for a rejected post.
-            logGm1SyntheticPostOnce(sessionID);
-            // §5.12: this successful render+post counts (reset reports too).
-            void bump("dashboard.shown");
           } catch {
             // Synthetic rejected: degrade to the §5.5 pattern. Awaited here
-            // so its rejection is caught by the outer body — no `shown`
-            // bump and no G-M1 line either way (nothing was displayed).
+            // so its rejection is caught by the outer body.
             await ctx.session.prompt({
               ...prompt,
               sessionID,
               delivery,
               text: METRICS_FALLBACK_ASK,
             });
+            return;
           }
+          // Deploy-time human check (§1.3 G-M1): once per process, first
+          // resolved post only — never logged for a rejected post.
+          logGm1SyntheticPostOnce(sessionID);
+          // §5.12: this successful render+post counts (reset reports too).
+          void bump("dashboard.shown");
         } catch (error) {
           logDiagnostic(error);
         }
