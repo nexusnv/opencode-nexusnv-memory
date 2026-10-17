@@ -741,3 +741,47 @@ export function metricsBumpOf(ctx: Plugin.Context): MetricsBump {
   };
   return createBump(storage, ctx.location.project?.id ?? ctx.location.directory);
 }
+
+/**
+ * Inputs for the dashboard glue `collectAndRender` — the caller resolves
+ * every dep per call from the live plugin context (spec P22); nothing here
+ * may be captured once at load. `caps` are the operative line caps the
+ * writers actually enforce (`parseMemoryOptions(ctx.options)`), so the
+ * health rows report this install's caps rather than config defaults.
+ */
+export interface CollectAndRenderDeps {
+  /** Ledger storage port over the plugin-scoped `ctx.storage`. */
+  readonly storage: LedgerStorage;
+  /** Project identity of the metrics namespace. */
+  readonly projectID: string;
+  /** Absolute path to `.opencode/memory` (health collectors' fs root). */
+  readonly memoryRoot: string;
+  /** Operative caps: `parseMemoryOptions(ctx.options)`'s two numbers. */
+  readonly caps: { readonly indexLines: number; readonly fileLines: number };
+}
+
+/**
+ * Dashboard glue for the `memory_metrics` tool (spec §5.12 tool row): read
+ * the counter records + `since` stamp and the on-disk health, then render
+ * the deterministic markdown table. Storage/reader errors PROPAGATE from
+ * here (throw-readers style, like `readTotals`/`readDays` — the executor
+ * host decides how to surface them); filesystem misses already resolve to
+ * zero counts inside `collectHealth`. Returns counts/text only — no memory
+ * content ever enters the render.
+ */
+export async function collectAndRender(
+  deps: CollectAndRenderDeps,
+): Promise<string> {
+  const [since, totals, days] = await Promise.all([
+    readSince(deps.storage, deps.projectID),
+    readTotals(deps.storage, deps.projectID),
+    readDays(deps.storage, deps.projectID),
+  ]);
+  const health = await collectHealth(
+    deps.memoryRoot,
+    deps.storage,
+    deps.projectID,
+    deps.caps,
+  );
+  return renderMetricsDashboard({ since, totals, days, health });
+}
