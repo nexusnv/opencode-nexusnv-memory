@@ -1,6 +1,6 @@
 {
   "name": "opencode-nexusnv-memory",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local-first, zero-subscription, zero-daemon, zero-embeddings memory for OpenCode V2. Git-backed markdown is the source of truth; hooks are passive and budget-capped; curation is human-approved.",
   "type": "module",
   "license": "MIT",

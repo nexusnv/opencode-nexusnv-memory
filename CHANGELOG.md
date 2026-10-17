@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-18)
 
 - Local usage metrics (spec §5.12, ADR-0008, M-T1–M-T6): count-only, on-machine, never-throw `bump` taps over the plugin-scoped `ctx.storage` (`<projectID>/metrics/…` — monotonic totals + ≤90-day UTC buckets + lazy `since`, enumerated fail-closed names, numbers only, 1,000-bump flood containment); metrics health (six structural file line counts, handoffs/archive/pending/seen counts via the shared scan walker); the read-only `memory_metrics` tool; and the `memory-metrics` command registered at setup (`/memory-metrics [reset]`): synthetic-post dashboard → once-per-process G-M1 deploy line → §5.5 `memory_metrics`-echo fallback on a rejected post. Optional file-based `commands/memory-metrics.md` affordance ships alongside (plugin command is normative, later source wins). No memory file, budget, injection, or hook-outcome behavior changes.
 - Five-option config contract unchanged (ADR-0006: metrics always on, no sixth option; `/memory-metrics reset` is the control; uninstall orphans the keys like the ledger).
