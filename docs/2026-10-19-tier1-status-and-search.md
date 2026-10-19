@@ -414,12 +414,12 @@ In `src/redact.ts`, replace the URL-credentials pattern with the bounded form an
   // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
   // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
   // No leading `\b`: `\b` fails inside a long alphanumeric run and makes the
-  // engine retry at every character (constant-factor regression). A negative
-  // lookbehind keeps the start at a real boundary while still redacting a URL
-  // embedded after `_`/`=`/`/` (e.g. `foo_postgres://user:pass@host`).
+  // engine retry at every character. The bounded form is linear and covers a
+  // URL glued to a long token; a cheap `://` guard skips it when no URL exists.
   {
-    re: /(?<![A-Za-z0-9])([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
+    guard: (text) => text.includes("://"),
   },
 ```
 
@@ -2317,8 +2317,9 @@ branch's linear-time contract was false for hostile input):
    redacts to EOF (same fail-closed semantics as an unclosed `<private>`), and hostile 100 KB
    header runs are linear.
 
-Also: the URL start uses a negative lookbehind (not `\b` or bare start) to keep the embedded-URL fix
-without the constant-factor regression on long alphanumeric runs; CHANGELOG literal `\n`, a collapsed
+Also: the URL pattern uses the bounded no-`\b` form plus a cheap `://` guard, so glued URLs
+(including `a…ahttps://user:pass@host`) stay covered without scanning every char of a URL-free file;
+the worst case is a bounded linear constant when `://` is present. CHANGELOG literal `\n`, a collapsed
 test block, and the symlinked-directory/root-as-symlink test coverage were fixed.
 
 ---

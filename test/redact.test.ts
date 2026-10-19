@@ -154,6 +154,11 @@ describe("linear_time_guard", () => {
     expect(out).toContain("foo_postgres://user:[redacted]@host/db");
   });
 
+  it("redacts credentials in a URL glued to a long alphanumeric run", () => {
+    const out = redact(`${"a".repeat(60)}https://user:SuperSecretPW@host`);
+    expect(out).not.toContain("SuperSecretPW");
+  });
+
   it("stays linear on a long single-line file (no catastrophic backtracking)", () => {
     const line = "x".repeat(100_000);
     const started = Date.now();

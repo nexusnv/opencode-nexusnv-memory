@@ -108,6 +108,8 @@ function expandReplacement(
 interface Pattern {
   readonly re: RegExp;
   readonly replacement: string;
+  /** Cheap pre-check: skip the regex entirely when it cannot match. */
+  readonly guard?: (text: string) => boolean;
 }
 
 const BLOCKLIST: readonly Pattern[] = [
@@ -151,12 +153,14 @@ const BLOCKLIST: readonly Pattern[] = [
   // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
   // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
   // No leading `\b`: `\b` fails inside a long alphanumeric run and makes the
-  // engine retry at every character (constant-factor regression). A negative
-  // lookbehind keeps the start at a real boundary while still redacting a URL
-  // embedded after `_`/`=`/`/` (e.g. `foo_postgres://user:pass@host`).
+  // engine retry at every character. The pattern is bounded, so the scan is
+  // linear; a cheap `://` guard skips it entirely for files with no URL. This
+  // keeps full coverage (including a URL glued to a long token, e.g.
+  // `a…ahttps://user:pass@host`) at a bounded constant cost.
   {
-    re: /(?<![A-Za-z0-9])([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
+    guard: (text) => text.includes("://"),
   },
   // AWS secret access key with label.
   {
@@ -190,7 +194,8 @@ const BLOCKLIST: readonly Pattern[] = [
  */
 function applyBlocklist(text: string, preserveLines: boolean): string {
   let out = text;
-  for (const { re, replacement } of BLOCKLIST) {
+  for (const { re, replacement, guard } of BLOCKLIST) {
+    if (guard !== undefined && !guard(out)) continue;
     re.lastIndex = 0;
     if (!preserveLines) {
       out = out.replace(re, replacement);
