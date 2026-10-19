@@ -531,6 +531,14 @@ describe("statusLine", () => {
     expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
   });
 
+  it("reports skipped failure captures once, then clears the notice", async () => {
+    await setNotice(storage, PROJECT, "captureFailed", 2);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("2 failure capture(s) skipped");
+    expect(line).toContain("run /memory-review");
+    expect(await statusLine(storage, PROJECT)).toBeUndefined();
+  });
+
   it("nudges at five or more uncurated captures", async () => {
     expect(REVIEW_DUE_PENDING).toBe(5);
     await incPending(storage, PROJECT, 4);
@@ -783,6 +791,20 @@ describe("execute.after failure hook", () => {
     const both = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
     expect(both).toContain("wiring-boom-UNIQUE-789");
     expect(both).toContain("wiring-second-UNIQUE-790");
+  });
+
+  it("notices a write-rejected capture on the status line", async () => {
+    await writeMemory(
+      "activeContext.md",
+      Array.from({ length: 61 }, (_, i) => `- line ${i}`).join("\n") + "\n",
+    );
+    const { toolHooks } = await setupHooks();
+    const handler = toolHooks.get("execute.after");
+    await handler!(
+      toolEvent("error", { message: "Command failed: npm run build" }) as never,
+    );
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("failure capture(s) skipped");
   });
 
   it("is a no-op when captureFailures is false", async () => {

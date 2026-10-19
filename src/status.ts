@@ -3,15 +3,17 @@
  *
  * `statusLine` resolves to at most one `[memory]` line or `undefined`,
  * reading only counters/markers in `ctx.storage` (never the filesystem).
- * Three fixed-threshold facts share the line, joined with `; `: the
+ * Four fixed-threshold facts share the line, joined with `; `: the
  * over-cap INDEX notice (re-set on prompt admission while the condition
  * persists; the `<projectID>/notice.indexOverCap` marker carries the actual
  * line count and is cleared after reporting), the rotation notice (once —
  * the `<projectID>/curation.rotated` marker is cleared after reporting;
- * concurrent `context` calls may double-emit once, which is benign) and the
- * review-due nudge (while scratchpad-only `<projectID>/curation.pending` is
- * ≥5). Under budget pressure the caller drops this line before the hint
- * line. Async, never throws.
+ * concurrent `context` calls may double-emit once, which is benign), the
+ * skipped-capture notice (count only — the `<projectID>/notice.captureFailed`
+ * marker is cleared after reporting) and the review-due nudge (while
+ * scratchpad-only `<projectID>/curation.pending` is ≥5). Under budget
+ * pressure the caller drops this line before the hint line. Async, never
+ * throws.
  */
 import {
   clearNotice,
@@ -62,6 +64,17 @@ export async function statusLine(
       );
       try {
         await clearRotated(storage, projectID);
+      } catch {
+        // Best-effort: a failed clear re-emits once next turn (benign).
+      }
+    }
+    const skipped = await getNotice(storage, projectID, "captureFailed");
+    if (skipped !== undefined) {
+      facts.push(
+        `${skipped} failure capture(s) skipped: memory write rejected (over cap or no rotatable Known-errors block); fix the file or run /memory-review`,
+      );
+      try {
+        await clearNotice(storage, projectID, "captureFailed");
       } catch {
         // Best-effort: a failed clear re-emits once next turn (benign).
       }

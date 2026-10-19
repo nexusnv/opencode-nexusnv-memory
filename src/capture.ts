@@ -488,9 +488,13 @@ export type CaptureReason =
   | "retry-later"
   | "failed";
 
+/** Write-guard rejection sub-kind for `CaptureOutcome.reason === "failed"`. */
+export type CaptureFailureKind = "write-rejected";
+
 export interface CaptureOutcome {
   readonly reason: CaptureReason;
   readonly contentID?: string;
+  readonly failureKind?: CaptureFailureKind;
 }
 
 export interface CaptureFailureOptions extends CappedFileOptions {
@@ -610,8 +614,11 @@ async function listArchive(root: string): Promise<Set<string>> {
  * block only when `error.metadata` carries output. Redacts, ledger-dedupes
  * by stable content ID (~30s retry), appends under Known Errors via
  * `writeCapped`, marks seen + attempt, increments scratchpad-only pending,
- * and sets the rotated marker when the append rotated. Advisory
- * `flagInjection` flags travel with the entry. Never throws.
+ * and sets the rotated marker when the append rotated. A write-guard
+ * rejection of the append itself resolves
+ * `{ reason: "failed", failureKind: "write-rejected" }` — the one failed
+ * sub-kind the status line reports; every other failure stays untagged.
+ * Advisory `flagInjection` flags travel with the entry. Never throws.
  */
 export async function captureFailure(
   event: unknown,
@@ -621,13 +628,18 @@ export async function captureFailure(
   options?: CaptureFailureOptions,
 ): Promise<CaptureOutcome> {
   const log = options?.log ?? (() => undefined);
-  const fail = (error: unknown): CaptureOutcome => {
+  const fail = (
+    error: unknown,
+    failureKind?: CaptureFailureKind,
+  ): CaptureOutcome => {
     try {
       log(error);
     } catch {
       // Logging must never break the tool hook.
     }
-    return { reason: "failed" };
+    return failureKind === undefined
+      ? { reason: "failed" }
+      : { reason: "failed", failureKind };
   };
   try {
     if (typeof event !== "object" || event === null) {
@@ -693,21 +705,27 @@ export async function captureFailure(
     const before = await listArchive(root);
     // Atomic read-modify-write inside the choke-point lock: concurrent
     // failure captures must not read the same base and drop each other.
-    await updateCapped(
-      "activeContext.md",
-      {
-        memoryRoot,
-        fileLines: options?.fileLines,
-        indexLines: options?.indexLines,
-      },
-      (current) => {
-        if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
-        const withNewline = current.endsWith("\n") ? current : `${current}\n`;
-        return /^##\s+known errors\s*$/im.test(current)
-          ? `${withNewline}${entry}`
-          : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
-      },
-    );
+    try {
+      await updateCapped(
+        "activeContext.md",
+        {
+          memoryRoot,
+          fileLines: options?.fileLines,
+          indexLines: options?.indexLines,
+        },
+        (current) => {
+          if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
+          const withNewline = current.endsWith("\n") ? current : `${current}\n`;
+          return /^##\s+known errors\s*$/im.test(current)
+            ? `${withNewline}${entry}`
+            : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
+        },
+      );
+    } catch (error) {
+      // Cap/rotation/IO rejection on the append itself: the one failure kind
+      // the status line reports (Task 6). Ledger failures below stay log-only.
+      return fail(error, "write-rejected");
+    }
     await markSeen(storage, projectID, contentID, options?.now);
     await incPending(storage, projectID);
 

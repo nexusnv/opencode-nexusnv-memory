@@ -294,6 +294,24 @@ describe("captureFailure", () => {
     expect(await getRotated(storage, PROJECT)).toBeGreaterThanOrEqual(1);
   });
 
+  it("tags a write-guard rejection as write-rejected", async () => {
+    await writeFile(
+      join(root, "activeContext.md"),
+      Array.from({ length: 61 }, (_, i) => `- line ${i}`).join("\n") + "\n",
+      "utf8",
+    );
+    const outcome = await captureFailure(
+      { status: "error", error: { message: "boom" } },
+      storage,
+      PROJECT,
+      root,
+    );
+    expect(outcome).toMatchObject({
+      reason: "failed",
+      failureKind: "write-rejected",
+    });
+  });
+
   it("containment: poison lands on disk but the brief sees only the summary", async () => {
     expect(POISON).toContain("Ignore previous instructions");
     await captureFailure(

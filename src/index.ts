@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   captureFailure,
   dispatchEvent,
+  incNotice,
   setNotice,
   snapshotIfDue,
   startEventLoop,
@@ -359,6 +360,12 @@ export default Plugin.define({
               break;
             case "failed":
               bump("failure.failed");
+              // Write-guard rejections are actionable (over cap / no
+              // rotatable block): surface a count-only notice once on the
+              // status line.
+              if (outcome.failureKind === "write-rejected") {
+                await incNotice(ledger, projectID, "captureFailed");
+              }
               break;
             case "skipped":
               // No counter for a skip (non-error/disable paths).
