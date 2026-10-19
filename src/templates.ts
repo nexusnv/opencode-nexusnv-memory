@@ -35,16 +35,16 @@ const INDEX_TEMPLATE = `# INDEX — map to the other five memory files (≤30 li
 const ACTIVE_CONTEXT_TEMPLATE = `# Active context — current slice (append-until-60, then rotate)
 
 ## Goal
-- (what this session is trying to do)
+<!-- what this session is trying to do -->
 
 ## Pending
-- (open items)
+<!-- open items -->
 
 ## Next
-- (immediate next steps)
+<!-- immediate next steps -->
 
 ## Known errors
-- (one summary line per failure, tagged source:tool; detail blocks are recall-only)
+<!-- one summary line per failure, tagged source:tool; detail blocks are recall-only -->
 `;
 
 const DECISIONS_TEMPLATE = `# Decisions — append-only causal chain (unbounded; ≤60-line injectable tail)

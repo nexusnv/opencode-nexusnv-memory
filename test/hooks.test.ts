@@ -11,6 +11,7 @@ import {
   loadPriors,
 } from "../src/brief.js";
 import { extractLatestUserText, matchIndex } from "../src/hints.js";
+import { getScaffoldFiles } from "../src/templates.js";
 import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
   attemptKey,
@@ -516,6 +517,61 @@ describe("loadPriors", () => {
 
   it("never throws", async () => {
     await expect(loadPriors("/nonexistent-root-xyz")).resolves.toBe("");
+  });
+});
+
+describe("scaffold noise pruning", () => {
+  const LEGACY_ACTIVE_CONTEXT =
+    "# Active context — current slice (append-until-60, then rotate)\n" +
+    "\n## Goal\n- (what this session is trying to do)\n" +
+    "\n## Pending\n- (open items)\n" +
+    "\n## Next\n- (immediate next steps)\n" +
+    "\n## Known errors\n" +
+    "- (one summary line per failure, tagged source:tool; detail blocks are recall-only)\n";
+
+  it("a freshly scaffolded memory injects no brief", async () => {
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeMemory(name, content);
+    }
+    expect(await loadBrief(memoryRoot)).toBe("");
+  });
+
+  it("a legacy scaffold injects no brief and no fake error line", async () => {
+    await writeMemory("activeContext.md", LEGACY_ACTIVE_CONTEXT);
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toBe("");
+  });
+
+  it("prunes placeholders and placeholder-only sections, keeps real content", async () => {
+    await writeMemory(
+      "activeContext.md",
+      "# Active context\n\n## Goal\n- ship tier 0\n\n## Pending\n- (open items)\n\n## Next\n1. land the PR\n",
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("- ship tier 0");
+    expect(brief).toContain("1. land the PR");
+    expect(brief).not.toContain("(open items)");
+    expect(brief).not.toContain("## Pending");
+  });
+
+  it("keeps real Known-errors summaries behind a legacy placeholder bullet", async () => {
+    await writeMemory(
+      "activeContext.md",
+      `${LEGACY_ACTIVE_CONTEXT}- real failure summary source:tool\n`,
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("real failure summary source:tool");
+    expect(brief).toContain("[memory] captured output");
+    expect(brief).not.toContain("one summary line per failure");
+  });
+
+  it("a freshly scaffolded activeContext contributes no placeholders to priors", async () => {
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeMemory(name, content);
+    }
+    const priors = await loadPriors(memoryRoot);
+    expect(priors).not.toContain("(open items)");
+    expect(priors).not.toContain("what this session is trying to do");
   });
 });
 

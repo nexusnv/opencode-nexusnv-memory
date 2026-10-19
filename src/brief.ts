@@ -143,6 +143,66 @@ function splitKnownErrors(allLines: string[]): {
   };
 }
 
+/** Legacy scaffold placeholder bullets (pre-Tier-0 templates) — never content. */
+const SCAFFOLD_PLACEHOLDERS: ReadonlySet<string> = new Set([
+  "(what this session is trying to do)",
+  "(open items)",
+  "(immediate next steps)",
+  "(one summary line per failure, tagged source:tool; detail blocks are recall-only)",
+]);
+
+const COMMENT_ONLY_LINE = /^\s*<!--.*-->\s*$/;
+const HEADING_LINE = /^(#{1,6})\s+/;
+
+/** Blank, comment-only, or a legacy scaffold placeholder bullet. Pure. */
+function isScaffoldNoise(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return true;
+  if (COMMENT_ONLY_LINE.test(trimmed)) return true;
+  return SCAFFOLD_PLACEHOLDERS.has(trimmed.replace(/^[-*]\s+/, ""));
+}
+
+/**
+ * Drop blanks, comment-only lines, legacy scaffold placeholders, and headings
+ * whose section has no content before the next heading of the same or higher
+ * level (or EOF). A fresh scaffold therefore injects nothing while real files
+ * keep their headings. Pure, never throws.
+ */
+export function pruneScaffoldNoise(lines: readonly string[]): string[] {
+  try {
+    const kept: string[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!;
+      if (isScaffoldNoise(line)) continue;
+      const heading = HEADING_LINE.exec(line);
+      if (heading) {
+        // Column-0 headings only (H-1 discipline, same as splitKnownErrors):
+        // captured detail bodies are 2-space indented and must never read as
+        // section boundaries.
+        const level = heading[1]!.length;
+        let hasContent = false;
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const next = lines[j]!;
+          const nextHeading = HEADING_LINE.exec(next);
+          if (nextHeading) {
+            if (nextHeading[1]!.length <= level) break;
+            continue; // deeper heading: not content for this section
+          }
+          if (!isScaffoldNoise(next)) {
+            hasContent = true;
+            break;
+          }
+        }
+        if (!hasContent) continue;
+      }
+      kept.push(line);
+    }
+    return kept;
+  } catch {
+    return [...lines];
+  }
+}
+
 /**
  * Order key for a top-level handoff name: explicit `(stamp, sequence)` so a
  * collision sibling (`<stamp>-<session6>-01.md`) ranks after its base
@@ -213,9 +273,10 @@ export async function loadBrief(
     const allLines = redacted.length === 0 ? [] : redacted.split("\n");
     const { contextLines, errorBlocks } = splitKnownErrors(allLines);
 
-    const body: string[] = [...contextLines];
+    const body: string[] = pruneScaffoldNoise(contextLines);
     const summaries: string[] = [];
-    for (const block of errorBlocks.slice(0, BRIEF_MAX_ERROR_LINES)) {
+    const cleanBlocks = errorBlocks.filter((b) => !isScaffoldNoise(b[0] ?? ""));
+    for (const block of cleanBlocks.slice(0, BRIEF_MAX_ERROR_LINES)) {
       const summary = sanitizeForBrief(block.join("\n"));
       if (summary.length > 0) summaries.push(summary);
     }
@@ -277,8 +338,11 @@ export async function loadPriors(
     // treat priors as trusted instructions.
     lines.push(UNTRUSTED_LABEL);
     if (active.trim().length > 0) {
-      lines.push("## active context");
-      lines.push(...active.split("\n").filter((l) => l.trim().length > 0));
+      const activeLines = pruneScaffoldNoise(active.split("\n"));
+      if (activeLines.length > 0) {
+        lines.push("## active context");
+        lines.push(...activeLines);
+      }
     }
     if (tail.trim().length > 0) {
       lines.push("## decisions (tail)");
