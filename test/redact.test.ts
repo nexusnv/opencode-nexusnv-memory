@@ -116,3 +116,21 @@ describe("escaped_quotes_in_values", () => {
     expect(out).toContain("TOKEN=[redacted]");
   });
 });
+
+describe("linear_time_guard", () => {
+  it("redacts URL credentials with an empty user", () => {
+    const out = redact("redis://:SuperSecretPW@host:6379/0");
+    expect(out).not.toContain("SuperSecretPW");
+    expect(out).toContain("redis://:[redacted]@host:6379/0");
+  });
+
+  it("stays linear on a long single-line file (no catastrophic backtracking)", () => {
+    const line = "x".repeat(100_000);
+    const started = Date.now();
+    const out = redact(line);
+    expect(out).toBe(line);
+    // Before the bound, this took ~14s in the URL regex; 1s is a wide
+    // regression guard against reintroducing unbounded backtracking.
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});

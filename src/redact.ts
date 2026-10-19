@@ -104,8 +104,14 @@ const BLOCKLIST: readonly Pattern[] = [
   // before `/`/whitespace so `user:p@ss@host` redacts `p@ss` (M-1). The
   // username stops at the first colon so `user:alpha:bravo@db` masks the
   // whole `alpha:bravo` instead of leaking `alpha:`.
+  //
+  // Linear-time guard (Tier-1): bound the scheme and userinfo so the engine
+  // cannot backtrack across an arbitrarily long non-matching line. The
+  // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
+  // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
+  // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\s:]*:)([^\s/]+)(@)/g,
+    re: /\b([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
   },
   // AWS secret access key with label.
