@@ -11,13 +11,16 @@ import {
   loadPriors,
 } from "../src/brief.js";
 import { extractLatestUserText, matchIndex } from "../src/hints.js";
+import { getScaffoldFiles } from "../src/templates.js";
 import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
   attemptKey,
   failureContentID,
+  getNotice,
   getPending,
   getThrottle,
   incPending,
+  setNotice,
   setRotated,
   snapshotIfDue,
   type LedgerStorage,
@@ -302,6 +305,20 @@ describe("prompt hook", () => {
     expect(missing.prompt.files).toHaveLength(0);
   });
 
+  it("sets the over-cap INDEX notice on prompt admission", async () => {
+    await writeMemory(
+      "INDEX.md",
+      Array.from({ length: 31 }, (_, i) => `- line ${i}`).join("\n"),
+    );
+    const { hooks } = await setupHooks();
+    const event = promptEvent("hello");
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.files).toHaveLength(0);
+    const line = await statusLine(storage, PROJECT, { indexLines: 30 });
+    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(await getNotice(storage, PROJECT, "indexOverCap")).toBeUndefined();
+  });
+
   it("appends user directives to decisions.md without pending", async () => {
     const { hooks } = await setupHooks();
     await runHook(hooks, "prompt", promptEvent("remember: deploy on Fridays"));
@@ -385,7 +402,37 @@ describe("matchIndex", () => {
       indexContent: INDEX,
     });
     expect(hint).toMatch(/^\[memory-hint\] Past decisions mention `auth-service`/);
+    expect(hint).toContain('Call memory_recall("decisions.md")');
     expect(hint!.split("\n")).toHaveLength(1);
+  });
+
+  it("calls the structural file its INDEX line maps to", async () => {
+    const index =
+      "- architecture: contracts and sibling implementations\n" +
+      "- auth-service: login flow in src/auth.ts\n";
+    const hint = await matchIndex(
+      [userMessage("tell me about the architecture")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: index,
+      },
+    );
+    expect(hint).toContain('Call memory_recall("architecture.md")');
+  });
+
+  it("defaults to decisions.md for lines without a structural stem", async () => {
+    const hint = await matchIndex(
+      [userMessage("how does auth-service login work?")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: INDEX, // existing fixture: no structural stems
+      },
+    );
+    expect(hint).toContain('Call memory_recall("decisions.md")');
   });
 
   it("throttles to once per prompt", async () => {
@@ -475,6 +522,45 @@ describe("statusLine", () => {
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
   });
 
+  it("reports an over-cap INDEX notice once, then clears it", async () => {
+    await setNotice(storage, PROJECT, "indexOverCap", 31);
+    const line = await statusLine(storage, PROJECT, { indexLines: 30 });
+    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(line).toContain("not attached");
+    expect(line!.split("\n")).toHaveLength(1);
+    expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
+  });
+
+  it("uses the cap-free wording without an options argument", async () => {
+    await setNotice(storage, PROJECT, "indexOverCap", 31);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("INDEX.md is 31 lines (over cap)");
+    expect(line).toContain("not attached");
+  });
+
+  it("retains a notice when the budget drops the status line", async () => {
+    await setNotice(storage, PROJECT, "captureFailed", 1);
+    const { hooks } = await setupHooks({ injectBudgetLines: 5 }, storage);
+    const event = contextEvent([userMessage("hello there")]);
+    await runHook(hooks, "context", event);
+    expect(event.system.some((p) => p.text.startsWith("[memory] "))).toBe(
+      false,
+    );
+    // Not consumed by the dropped line: the next render still reports it.
+    expect(await statusLine(storage, PROJECT)).toContain(
+      "1 failure capture(s) skipped",
+    );
+  });
+
+  it("reports skipped failure captures once, then clears the notice", async () => {
+    await setNotice(storage, PROJECT, "captureFailed", 2);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("2 failure capture(s) skipped");
+    expect(line).toContain("file I/O");
+    expect(line).toContain("run /memory-review");
+    expect(await statusLine(storage, PROJECT)).toBeUndefined();
+  });
+
   it("nudges at five or more uncurated captures", async () => {
     expect(REVIEW_DUE_PENDING).toBe(5);
     await incPending(storage, PROJECT, 4);
@@ -516,6 +602,87 @@ describe("loadPriors", () => {
 
   it("never throws", async () => {
     await expect(loadPriors("/nonexistent-root-xyz")).resolves.toBe("");
+  });
+
+  it("a truncated fresh activeContext contributes no priors section", async () => {
+    await writeMemory("activeContext.md", getScaffoldFiles()["activeContext.md"]!);
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).not.toContain("## active context");
+    expect(priors).not.toContain("[truncated");
+  });
+
+  it("keeps the truncation notice when real priors content survives", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "- real goal survives",
+        ...Array.from({ length: 20 }, (_, i) => `- filler ${i}`),
+      ].join("\n") + "\n",
+    );
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).toContain("real goal survives");
+    expect(priors).toContain("[truncated:");
+  });
+});
+
+describe("scaffold noise pruning", () => {
+  const LEGACY_ACTIVE_CONTEXT =
+    "# Active context — current slice (append-until-60, then rotate)\n" +
+    "\n## Goal\n- (what this session is trying to do)\n" +
+    "\n## Pending\n- (open items)\n" +
+    "\n## Next\n- (immediate next steps)\n" +
+    "\n## Known errors\n" +
+    "- (one summary line per failure, tagged source:tool; detail blocks are recall-only)\n";
+
+  it("a freshly scaffolded memory injects no brief", async () => {
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeMemory(name, content);
+    }
+    expect(await loadBrief(memoryRoot)).toBe("");
+  });
+
+  it("a legacy scaffold injects no brief and no fake error line", async () => {
+    await writeMemory("activeContext.md", LEGACY_ACTIVE_CONTEXT);
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toBe("");
+  });
+
+  it("a BOM-prefixed legacy scaffold injects no brief", async () => {
+    await writeMemory("activeContext.md", `\uFEFF${LEGACY_ACTIVE_CONTEXT}`);
+    expect(await loadBrief(memoryRoot)).toBe("");
+  });
+
+  it("prunes placeholders and placeholder-only sections, keeps real content", async () => {
+    await writeMemory(
+      "activeContext.md",
+      "# Active context\n\n## Goal\n- ship tier 0\n\n## Pending\n- (open items)\n\n## Next\n1. land the PR\n",
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("- ship tier 0");
+    expect(brief).toContain("1. land the PR");
+    expect(brief).not.toContain("(open items)");
+    expect(brief).not.toContain("## Pending");
+  });
+
+  it("keeps real Known-errors summaries behind a legacy placeholder bullet", async () => {
+    await writeMemory(
+      "activeContext.md",
+      `${LEGACY_ACTIVE_CONTEXT}- real failure summary source:tool\n`,
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("real failure summary source:tool");
+    expect(brief).toContain("[memory] captured output");
+    expect(brief).not.toContain("one summary line per failure");
+  });
+
+  it("a freshly scaffolded activeContext contributes no placeholders to priors", async () => {
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeMemory(name, content);
+    }
+    const priors = await loadPriors(memoryRoot);
+    expect(priors).not.toContain("(open items)");
+    expect(priors).not.toContain("what this session is trying to do");
   });
 });
 
@@ -672,6 +839,20 @@ describe("execute.after failure hook", () => {
     const both = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
     expect(both).toContain("wiring-boom-UNIQUE-789");
     expect(both).toContain("wiring-second-UNIQUE-790");
+  });
+
+  it("notices a write-rejected capture on the status line", async () => {
+    await writeMemory(
+      "activeContext.md",
+      Array.from({ length: 61 }, (_, i) => `- line ${i}`).join("\n") + "\n",
+    );
+    const { toolHooks } = await setupHooks();
+    const handler = toolHooks.get("execute.after");
+    await handler!(
+      toolEvent("error", { message: "Command failed: npm run build" }) as never,
+    );
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("failure capture(s) skipped");
   });
 
   it("is a no-op when captureFailures is false", async () => {

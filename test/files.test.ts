@@ -62,6 +62,23 @@ describe("rejects_traversal_and_enforces_caps", () => {
     );
   });
 
+  it("lists valid paths in the non-allowlisted rejection", async () => {
+    await expect(readCapped("random.md", opts())).rejects.toThrow(
+      /rejected non-allowlisted path: random\.md; valid: .*issues\.md.*handoffs\/<name>\.md/,
+    );
+  });
+
+  it("reports missing files with a recovery hint", async () => {
+    await expect(readCapped("style.md", opts())).rejects.toThrow(
+      "[memory] memory file not found: style.md",
+    );
+    await expect(
+      readCapped("handoffs/2026-10-15-120000-abcdef.md", opts()),
+    ).rejects.toThrow(
+      /not found: handoffs\/2026-10-15-120000-abcdef\.md; list available files with memory_recall\("handoffs"\)/,
+    );
+  });
+
   it("enforces INDEX cap on write and truncates with notice on read", async () => {
     await writeCapped("INDEX.md", lines(30), opts());
     await expect(writeCapped("INDEX.md", lines(31), opts())).rejects.toThrow();

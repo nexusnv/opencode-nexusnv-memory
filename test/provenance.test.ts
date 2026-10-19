@@ -45,6 +45,14 @@ class FakeStorage implements LedgerStorage {
   }
 }
 
+/** Ledger that rejects only `seen/` writes: the append lands, the ledger fails. */
+class SeenRejectingStorage extends FakeStorage {
+  override async set(key: string, value: unknown): Promise<void> {
+    if (key.includes("/seen/")) throw new Error("seen write rejected");
+    await super.set(key, value);
+  }
+}
+
 const PROJECT = "proj-t4";
 const POISON = readFileSync(
   resolve(import.meta.dirname!, "fixtures/poison-error.txt"),
@@ -292,6 +300,40 @@ describe("captureFailure", () => {
       root,
     );
     expect(await getRotated(storage, PROJECT)).toBeGreaterThanOrEqual(1);
+  });
+
+  it("tags a write-guard rejection as write-rejected", async () => {
+    await writeFile(
+      join(root, "activeContext.md"),
+      Array.from({ length: 61 }, (_, i) => `- line ${i}`).join("\n") + "\n",
+      "utf8",
+    );
+    const outcome = await captureFailure(
+      { status: "error", error: { message: "boom" } },
+      storage,
+      PROJECT,
+      root,
+    );
+    expect(outcome).toMatchObject({
+      reason: "failed",
+      failureKind: "write-rejected",
+    });
+  });
+
+  it("does not claim write-rejected when only the ledger fails after a landed append", async () => {
+    const outcome = await captureFailure(
+      {
+        status: "error",
+        error: { message: "Command failed: npm run build\nsecond line" },
+      },
+      new SeenRejectingStorage(),
+      PROJECT,
+      root,
+    );
+    expect(outcome).toMatchObject({ reason: "failed" });
+    expect(outcome.failureKind).toBeUndefined();
+    // The append landed: the failure was the ledger write, not the guard.
+    expect(await readActive()).toContain("Command failed: npm run build");
   });
 
   it("containment: poison lands on disk but the brief sees only the summary", async () => {

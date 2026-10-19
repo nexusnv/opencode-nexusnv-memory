@@ -1,23 +1,25 @@
 import { Plugin } from "@opencode/plugin";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   captureFailure,
   dispatchEvent,
+  incNotice,
+  setNotice,
   snapshotIfDue,
   startEventLoop,
   type LedgerStorage,
   type VcsPort,
 } from "./capture.js";
 import {
-  indexWithinCap,
+  indexLineCount,
   loadBrief,
   loadPriors,
   truncateLinesWithNotice,
 } from "./brief.js";
 import { matchIndex } from "./hints.js";
-import { statusLine } from "./status.js";
+import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
@@ -28,6 +30,7 @@ import {
   ARCHIVE_DIR,
   HANDOFFS_DIR,
   getScaffoldFiles,
+  hasMemoryProtocolBlock,
   optionsSnippet,
   permissionsSnippet,
 } from "./templates.js";
@@ -43,6 +46,14 @@ interface Registration {
 
 /** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
 const MEMORY_DIR = ".opencode/memory";
+
+/** Once-per-process install nudge state (AGENTS.md protocol block missing). */
+let agentsProtocolNudgeLogged = false;
+
+/** Test seam: reset the once-per-process install nudge. */
+export function resetInstallNudgesForTests(): void {
+  agentsProtocolNudgeLogged = false;
+}
 
 /**
  * Scaffold `.opencode/memory/` + six templates + `handoffs/` (+ archive dir).
@@ -156,11 +167,22 @@ export default Plugin.define({
           );
           if (!already) {
             // Over-cap/missing/unreadable INDEX is not attached (no truncation).
-            if (await indexWithinCap(abs, options.indexLines)) {
+            const indexCount = await indexLineCount(abs);
+            if (indexCount !== undefined && indexCount <= options.indexLines) {
               event.prompt.files.push({ uri: expectedIndexUri });
               bump("index.attach");
             } else {
               bump("index.overCap");
+              if (indexCount !== undefined && indexCount > options.indexLines) {
+                // Over-cap (not missing): report the count once on the
+                // status line. Best-effort: a rejected notice write must not
+                // skip the rest of this hook (e.g. the remember fast path).
+                try {
+                  await setNotice(ledger, projectID, "indexOverCap", indexCount);
+                } catch (error) {
+                  logDiagnostic(error);
+                }
+              }
             }
           } else {
             bump("index.already");
@@ -192,7 +214,6 @@ export default Plugin.define({
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
           });
-          const status = await statusLine(ledger, projectID);
           const hint = await matchIndex(event.messages, {
             storage: ledger,
             projectID,
@@ -208,17 +229,30 @@ export default Plugin.define({
             0,
             options.injectBudgetLines - options.indexLines,
           );
+          const budgetHintCount = hint !== undefined ? 1 : 0;
+          // `statusLine` CONSUMES the notices it reports, so render it only
+          // when the budget can carry it: a computed-then-dropped line would
+          // silently lose its notices. When it cannot fit, classify a
+          // would-be line from a pure read — nothing is consumed and the
+          // notices stay queued for a later turn.
+          const statusFits = budget >= budgetHintCount + 1;
+          const status = statusFits
+            ? await statusLine(ledger, projectID, {
+                indexLines: options.indexLines,
+              })
+            : undefined;
+          const statusDroppedByBudget =
+            !statusFits && (await hasStatusLine(ledger, projectID));
           const rawBrief = brief === "" ? [] : brief.split("\n");
           let briefLines = rawBrief;
           let keepStatus = status !== undefined;
           // Classifier flags, set at their true sites (M-T3 hygiene): the
           // truncation classifier is "a budget branch ran" and the status
-          // drop classifier is "a computed status line was dropped below" —
-          // never a reference comparison against `rawBrief`
+          // drop classifier is computed above (a would-be line the budget
+          // cannot carry) — never a reference comparison against `rawBrief`
           // (`truncateLinesWithNotice` returning a fresh array is not a
           // documented contract to lean on).
           let briefTruncated = false;
-          let statusDroppedByBudget = false;
           const hintKept = hint !== undefined;
           const hintCount = hintKept ? 1 : 0;
           const total = () =>
@@ -231,10 +265,9 @@ export default Plugin.define({
             briefTruncated = true;
           }
           if (total() > budget) {
-            // Only a COMPUTED status line counts as dropped by the budget:
-            // with no status, keepStatus is false from the start and there
-            // is nothing to drop.
-            if (keepStatus) statusDroppedByBudget = true;
+            // With `statusFits` false above, `status` (and so `keepStatus`)
+            // is already false when the budget cannot carry the line; this
+            // branch then only re-truncates the brief.
             keepStatus = false;
             briefLines = truncateLinesWithNotice(
               rawBrief,
@@ -263,9 +296,8 @@ export default Plugin.define({
             event.system.push({ type: "text", text: status });
             bump("status.shown");
           } else if (statusDroppedByBudget) {
-            // A computed status line dropped by the budget
-            // (statusDroppedByBudget is set exactly where keepStatus
-            // flips false above): never dropped on a hint hit.
+            // A status line the budget could not carry, classified above by
+            // a pure read: the notices were NOT consumed and stay queued.
             bump("status.dropped");
           }
           if (hint !== undefined) {
@@ -350,6 +382,12 @@ export default Plugin.define({
               break;
             case "failed":
               bump("failure.failed");
+              // Write-guard rejections are actionable (over cap / no
+              // rotatable block): surface a count-only notice once on the
+              // status line.
+              if (outcome.failureKind === "write-rejected") {
+                await incNotice(ledger, projectID, "captureFailed");
+              }
               break;
             case "skipped":
               // No counter for a skip (non-error/disable paths).
@@ -445,6 +483,26 @@ export default Plugin.define({
         );
       } catch {
         // Logging must never break plugin load.
+      }
+    }
+
+    if (!firstRun) {
+      // Non-first-run installs with a hand-owned AGENTS.md that predates the
+      // protocol block never see the first-run print; nudge once per process.
+      // A missing/unreadable AGENTS.md stays silent (a global block may exist).
+      try {
+        const agentsText = await readFile(
+          join(projectRoot, "AGENTS.md"),
+          "utf8",
+        );
+        if (!agentsProtocolNudgeLogged && !hasMemoryProtocolBlock(agentsText)) {
+          agentsProtocolNudgeLogged = true;
+          console.warn(
+            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block printed on first run (or in the README install section).",
+          );
+        }
+      } catch {
+        // Missing/unreadable AGENTS.md: nothing to check.
       }
     }
 

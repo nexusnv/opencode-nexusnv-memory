@@ -268,6 +268,74 @@ export async function clearRotated(
   });
 }
 
+/** Transient status notices (numbers only, cleared after reporting). */
+export type NoticeKind = "indexOverCap" | "captureFailed";
+
+/** `<projectID>/notice.<kind>` → transient notice value (positive int). */
+export function noticeKey(projectID: string, kind: NoticeKind): string {
+  return `${projectPrefix(projectID)}notice.${kind}`;
+}
+
+/** Notice value, or `undefined` when unset/invalid. */
+export async function getNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<number | undefined> {
+  const value = await storage.get(noticeKey(projectID, kind));
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/** Record a positive-int notice value. */
+export async function setNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+  value: number,
+): Promise<void> {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("[memory] ledger notice value must be a positive int");
+  }
+  await withWriteLock(async () => {
+    await storage.set(noticeKey(projectID, kind), value);
+  });
+}
+
+/** Increment a notice counter (read-modify-write under the mutex). */
+export async function incNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<number> {
+  return withWriteLock(async () => {
+    const next = asCount(await storage.get(noticeKey(projectID, kind))) + 1;
+    await storage.set(noticeKey(projectID, kind), next);
+    return next;
+  });
+}
+
+/**
+ * Atomically read-and-clear a notice (one write lock): the value is consumed
+ * exactly once, and an increment that lands after the clear recreates the
+ * key, so a concurrent failure capture is never silently dropped.
+ */
+export async function takeNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<number | undefined> {
+  return withWriteLock(async () => {
+    const value = await storage.get(noticeKey(projectID, kind));
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      return undefined;
+    }
+    await storage.remove(noticeKey(projectID, kind));
+    return value;
+  });
+}
+
 /** Last snapshot content hash for the session, if any. */
 export async function getSnapshotHash(
   storage: LedgerStorage,
@@ -398,15 +466,16 @@ const KNOWN_ERRORS_HEADING_LINE = "## Known errors";
 const ACTIVE_CONTEXT_SCAFFOLD = `# Active context — current slice (append-until-60, then rotate)
 
 ## Goal
-- (what this session is trying to do)
+<!-- what this session is trying to do -->
 
 ## Pending
-- (open items)
+<!-- open items -->
 
 ## Next
-- (immediate next steps)
+<!-- immediate next steps -->
 
 ## Known errors
+<!-- one summary line per failure, tagged source:tool; detail blocks are recall-only -->
 `;
 
 const METADATA_OUTPUT_KEYS = [
@@ -428,9 +497,13 @@ export type CaptureReason =
   | "retry-later"
   | "failed";
 
+/** Write-guard rejection sub-kind for `CaptureOutcome.reason === "failed"`. */
+export type CaptureFailureKind = "write-rejected";
+
 export interface CaptureOutcome {
   readonly reason: CaptureReason;
   readonly contentID?: string;
+  readonly failureKind?: CaptureFailureKind;
 }
 
 export interface CaptureFailureOptions extends CappedFileOptions {
@@ -550,8 +623,11 @@ async function listArchive(root: string): Promise<Set<string>> {
  * block only when `error.metadata` carries output. Redacts, ledger-dedupes
  * by stable content ID (~30s retry), appends under Known Errors via
  * `writeCapped`, marks seen + attempt, increments scratchpad-only pending,
- * and sets the rotated marker when the append rotated. Advisory
- * `flagInjection` flags travel with the entry. Never throws.
+ * and sets the rotated marker when the append rotated. A write-guard
+ * rejection of the append itself resolves
+ * `{ reason: "failed", failureKind: "write-rejected" }` — the one failed
+ * sub-kind the status line reports; every other failure stays untagged.
+ * Advisory `flagInjection` flags travel with the entry. Never throws.
  */
 export async function captureFailure(
   event: unknown,
@@ -561,13 +637,18 @@ export async function captureFailure(
   options?: CaptureFailureOptions,
 ): Promise<CaptureOutcome> {
   const log = options?.log ?? (() => undefined);
-  const fail = (error: unknown): CaptureOutcome => {
+  const fail = (
+    error: unknown,
+    failureKind?: CaptureFailureKind,
+  ): CaptureOutcome => {
     try {
       log(error);
     } catch {
       // Logging must never break the tool hook.
     }
-    return { reason: "failed" };
+    return failureKind === undefined
+      ? { reason: "failed" }
+      : { reason: "failed", failureKind };
   };
   try {
     if (typeof event !== "object" || event === null) {
@@ -633,21 +714,27 @@ export async function captureFailure(
     const before = await listArchive(root);
     // Atomic read-modify-write inside the choke-point lock: concurrent
     // failure captures must not read the same base and drop each other.
-    await updateCapped(
-      "activeContext.md",
-      {
-        memoryRoot,
-        fileLines: options?.fileLines,
-        indexLines: options?.indexLines,
-      },
-      (current) => {
-        if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
-        const withNewline = current.endsWith("\n") ? current : `${current}\n`;
-        return /^##\s+known errors\s*$/im.test(current)
-          ? `${withNewline}${entry}`
-          : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
-      },
-    );
+    try {
+      await updateCapped(
+        "activeContext.md",
+        {
+          memoryRoot,
+          fileLines: options?.fileLines,
+          indexLines: options?.indexLines,
+        },
+        (current) => {
+          if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
+          const withNewline = current.endsWith("\n") ? current : `${current}\n`;
+          return /^##\s+known errors\s*$/im.test(current)
+            ? `${withNewline}${entry}`
+            : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
+        },
+      );
+    } catch (error) {
+      // Cap/rotation/IO rejection on the append itself: the one failure kind
+      // the status line reports (Task 6). Ledger failures below stay log-only.
+      return fail(error, "write-rejected");
+    }
     await markSeen(storage, projectID, contentID, options?.now);
     await incPending(storage, projectID);
 

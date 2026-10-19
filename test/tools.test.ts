@@ -163,6 +163,33 @@ describe("tools", () => {
     ).resolves.toEqual({ content: expect.stringContaining("archived-line") });
   });
 
+  it("lists handoffs newest-first, names only, with the archive count", async () => {
+    await writeMemory("handoffs/2026-10-15-120000-aaaaaa.md", "a");
+    await writeMemory("handoffs/2026-10-16-120000-bbbbbb.md", "b");
+    await writeMemory("handoffs/archive/rotated-2026-10-16-130000-x.md", "c");
+    const execute = createMemoryRecallExecute({ memoryRoot: root });
+
+    const out = await execute({ file: "handoffs" }, TOOL_CTX);
+    expect(out.content).toContain("[memory] handoffs (newest first)");
+    expect(out.content.indexOf("2026-10-16-120000-bbbbbb")).toBeLessThan(
+      out.content.indexOf("2026-10-15-120000-aaaaaa"),
+    );
+    expect(out.content).toContain("2 file(s) total; 1 in handoffs/archive/");
+    expect(out).toEqual(toolResult(out.content)); // envelope identity (G2)
+
+    const archive = await execute({ file: "handoffs/archive" }, TOOL_CTX);
+    expect(archive.content).toContain("[memory] handoffs/archive (newest first)");
+    expect(archive.content).toContain("rotated-2026-10-16-130000-x.md");
+    expect(archive.content).toContain("1 file(s) total");
+  });
+
+  it("listing an empty or missing handoffs tree is not an error", async () => {
+    const execute = createMemoryRecallExecute({ memoryRoot: await freshRoot() });
+    const out = await execute({ file: "handoffs" }, TOOL_CTX);
+    expect(out.content).toContain("(none)");
+    expect(out.content).toContain("0 file(s) total");
+  });
+
   it("apply_per_line_assert_deny_propagates_and_empty_resets", async () => {
     // --- All-allowed path: per-line asserts, verbatim writes, reset. ---
     {

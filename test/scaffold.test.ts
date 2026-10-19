@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import plugin from "../src/index.js";
+import plugin, { resetInstallNudgesForTests } from "../src/index.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
@@ -367,5 +367,115 @@ describe("install_surface_P0_parity", () => {
     const md = read("CHANGELOG.md");
     expect(md).toMatch(/templates\.ts|memory-manager|install/i);
     expect(md).toMatch(/2\.0/);
+  });
+});
+
+/** Fake ctx mirroring the wiring test above; scaffold pre-created → firstRun false. */
+function installCtx(projectRoot: string) {
+  return {
+    options: {},
+    location: {
+      directory: projectRoot,
+      project: { id: "nudge", directory: projectRoot, canonical: projectRoot },
+    },
+    storage: fakeStorageForSetup,
+    permission: { assert: async (_input: unknown) => undefined },
+    tool: {
+      transform: async () => ({ dispose: async () => undefined }),
+      hook: async () => ({ dispose: async () => undefined }),
+    },
+    command: {
+      transform: async () => ({ dispose: async () => undefined }),
+    },
+    session: {
+      hook: async () => ({ dispose: async () => undefined }),
+      prompt: async (args: unknown) =>
+        ({ sessionID: (args as { sessionID?: string }).sessionID }) as never,
+    },
+  };
+}
+
+async function preScaffold(projectRoot: string): Promise<void> {
+  const memoryDir = join(projectRoot, ".opencode", "memory");
+  await mkdir(join(memoryDir, "handoffs", "archive"), { recursive: true });
+  for (const [name, content] of Object.entries(getScaffoldFiles())) {
+    await writeFile(join(memoryDir, name), content, "utf8");
+  }
+}
+
+describe("agents_protocol_nudge", () => {
+  it("warns once when a non-first-run AGENTS.md lacks the protocol block", async () => {
+    resetInstallNudgesForTests();
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-nudge-"));
+    await preScaffold(projectRoot);
+    await writeFile(join(projectRoot, "AGENTS.md"), "# Repo guide\n", "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      const cleanup = await setup(installCtx(projectRoot));
+      const nudged = warn.mock.calls.some((c) =>
+        String(c[0]).includes("no memory protocol block"),
+      );
+      expect(nudged).toBe(true);
+      // Once per process: a second setup is silent.
+      warn.mockClear();
+      await setup(installCtx(projectRoot));
+      const again = warn.mock.calls.some((c) =>
+        String(c[0]).includes("no memory protocol block"),
+      );
+      expect(again).toBe(false);
+      await cleanup?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("stays quiet on the first run even when AGENTS.md lacks the block", async () => {
+    resetInstallNudgesForTests();
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-nudge-first-"));
+    await writeFile(join(projectRoot, "AGENTS.md"), "# Repo guide\n", "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      const cleanup = await setup(installCtx(projectRoot));
+      const nudged = warn.mock.calls.some((c) =>
+        String(c[0]).includes("no memory protocol block"),
+      );
+      expect(nudged).toBe(false);
+      await cleanup?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("stays quiet when AGENTS.md has the block or is absent", async () => {
+    resetInstallNudgesForTests();
+    const withBlock = await mkdtemp(join(tmpdir(), "memory-nudge2-"));
+    await preScaffold(withBlock);
+    await writeFile(
+      join(withBlock, "AGENTS.md"),
+      "## Project memory (.opencode/memory)\n- call memory_recall before editing contracts\n",
+      "utf8",
+    );
+    const withoutFile = await mkdtemp(join(tmpdir(), "memory-nudge3-"));
+    await preScaffold(withoutFile);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      await setup(installCtx(withBlock));
+      await setup(installCtx(withoutFile));
+      const nudged = warn.mock.calls.some((c) =>
+        String(c[0]).includes("no memory protocol block"),
+      );
+      expect(nudged).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

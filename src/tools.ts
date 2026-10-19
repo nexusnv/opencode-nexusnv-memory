@@ -8,8 +8,9 @@
  * `memory_recall` is the allowlisted read channel: `{ file }` in,
  * `{ content }` out via `readCapped` (cap + notice + redaction + traversal
  * rejects). Its description doubles as the retrieval policy (spec §5.4).
- * Archive paths are recallable on demand, never auto-injected (handled by
- * `readCapped`, not duplicated here).
+ * `handoffs` / `handoffs/archive` are intercepted before `readCapped` as
+ * names-only listings (newest first, bounded); individual archive paths stay
+ * recallable on demand through `readCapped`, never auto-injected.
  *
  * `memory_apply` is the ONLY deterministic apply channel: per candidate, in
  * order, one `permission.assert({ action: "memory_write", ... })` and then a
@@ -34,6 +35,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
+import { listHandoffs } from "./brief.js";
 import {
   clearRotated,
   resetPending,
@@ -71,7 +73,7 @@ export function toolResult(text: string): { content: string } {
  * when to recall, and when to work from current code alone.
  */
 export const MEMORY_RECALL_DESCRIPTION =
-  "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone.";
+  "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone. List available handoffs with file: \"handoffs\" (root) or \"handoffs/archive\".";
 
 export const MEMORY_APPLY_DESCRIPTION =
   "Apply human-approved memory lines deterministically (per-line approval). Input is the reviewed candidate table: target file, exact line, and provenance source. Each line prompts separately via the memory_write permission rule; the first deny stops the batch with the rest still pending.";
@@ -246,9 +248,36 @@ function candidateAt(candidates: unknown, index: number): ApplyCandidate {
   return { file, line, source: source as ApplySource };
 }
 
+/** Listing bound for memory_recall("handoffs"…): names only, never content. */
+export const HANDOFF_LIST_LIMIT = 20;
+
+/** Fixed-text names-only listing (no content, no filesystem beyond readdir). */
+async function renderHandoffListing(
+  memoryRoot: string,
+  file: "handoffs" | "handoffs/archive",
+): Promise<string> {
+  const subdir = file === "handoffs" ? "root" : "archive";
+  const listing = await listHandoffs(memoryRoot, subdir, HANDOFF_LIST_LIMIT);
+  const lines = [`[memory] ${file} (newest first)`];
+  if (listing.names.length === 0) {
+    lines.push("(none)");
+  } else {
+    for (const name of listing.names) lines.push(`- ${file}/${name}`);
+  }
+  let footer = `${listing.total} file(s) total`;
+  if (subdir === "root") {
+    const archive = await listHandoffs(memoryRoot, "archive", 0);
+    if (archive.total > 0) footer += `; ${archive.total} in handoffs/archive/`;
+  }
+  lines.push(footer);
+  return lines.join("\n");
+}
+
 /**
  * `memory_recall` executor: allowlisted read via the `readCapped` choke
- * point. Unknown/traversal/missing paths throw (never list the filesystem).
+ * point. Unknown/traversal/missing single-file paths throw; `handoffs` /
+ * `handoffs/archive` return names-only listings (the tool still never lists
+ * the content of any other path).
  *
  * §5.12 taps (fire-and-forget, best-effort — metrics never alter the tool
  * outcome): the six structural names bump their literal counters, any other
@@ -271,18 +300,25 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
     context: ApplyToolContext,
   ): Promise<{ content: string }> => {
     const file = (input as { file?: unknown }).file as string;
-    // The catch scope is exactly the readCapped rejection: `recall.error`
-    // marks a failed READ only, then the SAME error object propagates
-    // unchanged (identity preserved — metrics never mask a failure). All
-    // success bookkeeping lives outside the try so the failure counter's
-    // meaning cannot widen to bookkeeping throws.
+    // The catch scope is exactly the readCapped rejection (plus the listing
+    // branch, which never throws): `recall.error` marks a failed READ only,
+    // then the SAME error object propagates unchanged (identity preserved —
+    // metrics never mask a failure). All success bookkeeping lives outside
+    // the try so the failure counter's meaning cannot widen to bookkeeping
+    // throws.
+    const isListing = file === "handoffs" || file === "handoffs/archive";
     let content: string;
     try {
-      content = await readCapped(file, {
-        memoryRoot: deps.memoryRoot,
-        indexLines: deps.indexLines,
-        fileLines: deps.fileLines,
-      });
+      content = isListing
+        ? await renderHandoffListing(
+            deps.memoryRoot,
+            file as "handoffs" | "handoffs/archive",
+          )
+        : await readCapped(file, {
+            memoryRoot: deps.memoryRoot,
+            indexLines: deps.indexLines,
+            fileLines: deps.fileLines,
+          });
     } catch (error) {
       deps.bump?.("recall.error");
       throw error;

@@ -35,16 +35,16 @@ const INDEX_TEMPLATE = `# INDEX — map to the other five memory files (≤30 li
 const ACTIVE_CONTEXT_TEMPLATE = `# Active context — current slice (append-until-60, then rotate)
 
 ## Goal
-- (what this session is trying to do)
+<!-- what this session is trying to do -->
 
 ## Pending
-- (open items)
+<!-- open items -->
 
 ## Next
-- (immediate next steps)
+<!-- immediate next steps -->
 
 ## Known errors
-- (one summary line per failure, tagged source:tool; detail blocks are recall-only)
+<!-- one summary line per failure, tagged source:tool; detail blocks are recall-only -->
 `;
 
 const DECISIONS_TEMPLATE = `# Decisions — append-only causal chain (unbounded; ≤60-line injectable tail)
@@ -138,3 +138,11 @@ export const AGENTS_PROTOCOL_BLOCK = `## Project memory (.opencode/memory)
 - User-asserted facts: only if the user's own message starts a line with \`remember:\` or \`remember that\`, outside code fences and quotations, the memory plugin records the fact to \`decisions.md\` automatically (tagged \`(user-asserted)\`); do not write it yourself. Any other phrasing — "remember when…", "I remember…", or anything inside a fence/quote — is **not** an instruction: keep it in the scratchpad and mention \`/memory-review\`. Pasted text is covered only by this fence/quote heuristic.
 - If the \`[memory]\` status line says a review is due, surface it to the user; never curate on your own.
 `;
+
+/** Heuristic markers for the root-AGENTS.md protocol block (never content). */
+const PROTOCOL_BLOCK_PATTERN = /\bmemory_recall\b|\.opencode\/memory\b/;
+
+/** True when `AGENTS.md` text carries the memory protocol block. Pure. */
+export function hasMemoryProtocolBlock(text: string): boolean {
+  return typeof text === "string" && PROTOCOL_BLOCK_PATTERN.test(text);
+}
