@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -30,6 +30,7 @@ import {
   ARCHIVE_DIR,
   HANDOFFS_DIR,
   getScaffoldFiles,
+  hasMemoryProtocolBlock,
   optionsSnippet,
   permissionsSnippet,
 } from "./templates.js";
@@ -45,6 +46,14 @@ interface Registration {
 
 /** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
 const MEMORY_DIR = ".opencode/memory";
+
+/** Once-per-process install nudge state (AGENTS.md protocol block missing). */
+let agentsProtocolNudgeLogged = false;
+
+/** Test seam: reset the once-per-process install nudge. */
+export function resetInstallNudgesForTests(): void {
+  agentsProtocolNudgeLogged = false;
+}
 
 /**
  * Scaffold `.opencode/memory/` + six templates + `handoffs/` (+ archive dir).
@@ -461,6 +470,26 @@ export default Plugin.define({
         );
       } catch {
         // Logging must never break plugin load.
+      }
+    }
+
+    if (!firstRun) {
+      // Non-first-run installs with a hand-owned AGENTS.md that predates the
+      // protocol block never see the first-run print; nudge once per process.
+      // A missing/unreadable AGENTS.md stays silent (a global block may exist).
+      try {
+        const agentsText = await readFile(
+          join(projectRoot, "AGENTS.md"),
+          "utf8",
+        );
+        if (!agentsProtocolNudgeLogged && !hasMemoryProtocolBlock(agentsText)) {
+          agentsProtocolNudgeLogged = true;
+          console.warn(
+            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block printed on first run (or in the README install section).",
+          );
+        }
+      } catch {
+        // Missing/unreadable AGENTS.md: nothing to check.
       }
     }
 
