@@ -54,7 +54,8 @@ function asPositiveInt(value: unknown): number | undefined {
 
 /**
  * Parse raw `ctx.options` into validated options. Never throws: any invalid
- * or missing value warns once and falls back to its default.
+ * or missing value warns once and falls back to its default. Valid but
+ * incoherent combinations warn once (no behavior change).
  */
 export function parseMemoryOptions(
   raw: unknown,
@@ -129,7 +130,7 @@ export function parseMemoryOptions(
       );
     }
 
-    return {
+    const resolved: MemoryPluginOptions = {
       indexLines: indexLines ?? DEFAULT_MEMORY_OPTIONS.indexLines,
       fileLines: fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines,
       injectBudgetLines:
@@ -142,6 +143,22 @@ export function parseMemoryOptions(
         snapshotThrottleMinutes ??
         DEFAULT_MEMORY_OPTIONS.snapshotThrottleMinutes,
     };
+    // Coherence warnings (Tier 0): a valid parse can still be unusable.
+    if (resolved.injectBudgetLines <= resolved.indexLines) {
+      warnOnce(
+        "coherence.injectBudgetLines",
+        warn,
+        `[memory] option coherence: injectBudgetLines (${resolved.injectBudgetLines}) is not above indexLines (${resolved.indexLines}); no budget remains for the brief/status/hint — raise injectBudgetLines or lower indexLines`,
+      );
+    }
+    if (resolved.fileLines < 10) {
+      warnOnce(
+        "coherence.fileLines",
+        warn,
+        `[memory] option coherence: fileLines (${resolved.fileLines}) is very small; memory files and handoffs will be truncated aggressively (default 60)`,
+      );
+    }
+    return resolved;
   } catch {
     return { ...DEFAULT_MEMORY_OPTIONS };
   }
