@@ -32,9 +32,11 @@ make the plugin explainable and make older memory reachable:
 - No forget/purge/handoff GC (US-22 remains unimplemented; that needs an ADR revision).
 - No cross-process write locking (E14), hints ledger pruning (E9), or TUI panel.
 - No change to hook injection semantics, budgets, capture, review, or the status line.
-- Do not edit `src/capture.ts`, `src/brief.ts`, `src/hints.ts`, `src/guard.ts`, `src/redact.ts`,
+- Do not edit `src/capture.ts`, `src/brief.ts`, `src/hints.ts`, `src/guard.ts`,
   `src/provenance.ts`, `src/review.ts`, `src/config.ts`, `src/metrics.ts`, `agents/memory-manager.md`,
-  or any ADR. If an edit seems required, stop and raise it in the implementation review.
+  or any ADR. The only `src/redact.ts` change permitted is Task 1a's bounded URL-credential regex
+  (a linear-time guard required by full-file search; no other redaction pattern changes). If any
+  other edit seems required, stop and raise it in the implementation review.
 
 ---
 
@@ -43,6 +45,7 @@ make the plugin explainable and make older memory reachable:
 ```
 src/
   files.ts                 # + readFullRedacted (full allowlisted read; byte guard; redaction)
+  redact.ts                # + bounded URL-credential regex (linear-time guard; Task 1a)
   search.ts                # NEW: literal search core + renderer + tool policy text
   status-report.ts         # NEW: status collectors + renderer + command/tool glue
   tools.ts                 # + memory_search registration + createMemorySearchExecute
@@ -50,6 +53,7 @@ src/
   templates.ts             # AGENTS_PROTOCOL_BLOCK: mention memory_search in the Read bullet
 test/
   files.test.ts            # + readFullRedacted cases
+  redact.test.ts           # + long-line regression + empty-user URL
   search.test.ts           # NEW: search core + renderer
   status-report.test.ts    # NEW: collectors + renderer + command/tool
   tools.test.ts            # + memory_search registration/wiring; extend exact tool list
@@ -69,10 +73,10 @@ README.md                       # tools, commands, verification, evals
 CHANGELOG.md                    # Unreleased entries
 ```
 
-**Dependency order:** Task 1 → 2 → 3 (search lane), Task 4 → 5 (status lane), and **Task 5 also
-depends on Task 3** because its exact setup-surface assertions include `memory_search` (registered in
-Task 3). A second worker may implement Task 4 in parallel with Tasks 1–3, but Task 5 must wait for
-both lanes. Task 6 (docs) runs after Tasks 1–5; Task 7 is the final gate.
+**Dependency order:** Task 1a → 1 → 2 → 3 (search lane), Task 4 → 5 (status lane), and **Task 5
+also depends on Task 3** because its exact setup-surface assertions include `memory_search`
+(registered in Task 3). A second worker may implement Task 4 in parallel with Tasks 1a–3, but Task 5
+must wait for both lanes. Task 6 (docs) runs after Tasks 1a–5; Task 7 is the final gate.
 
 ---
 
@@ -356,6 +360,80 @@ Expected: the five new cases pass; all existing `files` cases still pass. Commit
 ```bash
 git add src/files.ts test/files.test.ts
 git commit -m "feat: full allowlisted read for memory_search (E7a)"
+```
+
+---
+
+## Task 1a (E7a-perf): Redaction linearity guard — `src/redact.ts`, `test/redact.test.ts`
+
+**Why this is a prerequisite for Task 2:** `readFullRedacted` feeds up to 1 MB of arbitrary memory
+content to `redact`. The existing URL-credential regex
+`([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\s:]*:)([^\s/]+)(@)` backtracks from one end of a long
+non-matching line to the other. Measured on 2026-10-19: 10 KB = 113 ms, 50 KB = 3.0 s, 100 KB =
+13.7 s — a 1 MB single-line file would take minutes. That is a real denial-of-service path for
+`memory_search`, not a test artifact. Bound the scheme and userinfo so the scan is linear.
+
+### Failing tests first
+
+Append to `test/redact.test.ts`:
+
+```ts
+describe("linear_time_guard", () => {
+  it("redacts URL credentials with an empty user", () => {
+    const out = redact("redis://:SuperSecretPW@host:6379/0");
+    expect(out).not.toContain("SuperSecretPW");
+    expect(out).toContain("redis://:[redacted]@host:6379/0");
+  });
+
+  it("stays linear on a long single-line file (no catastrophic backtracking)", () => {
+    const line = "x".repeat(100_000);
+    const started = Date.now();
+    const out = redact(line);
+    expect(out).toBe(line);
+    // Before the bound, this took ~14s in the URL regex; 1s is a wide
+    // regression guard against reintroducing unbounded backtracking.
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+```
+
+### Implementation
+
+In `src/redact.ts`, replace the URL-credentials pattern with the bounded form and update its comment:
+
+```ts
+  // URL credentials (e.g. DATABASE_URL=postgres://user:pass@host/...).
+  // Empty user allowed (`redis://:pass@host`); password runs to the last `@`
+  // before `/`/whitespace so `user:p@ss@host` redacts `p@ss` (M-1). The
+  // username stops at the first colon so `user:alpha:bravo@db` masks the
+  // whole `alpha:bravo` instead of leaking `alpha:`.
+  //
+  // Linear-time guard (Tier-1): bound the scheme and userinfo so the engine
+  // cannot backtrack across an arbitrarily long non-matching line. The
+  // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
+  // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
+  // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
+  {
+    re: /\b([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    replacement: "$1[redacted]$3",
+  },
+```
+
+No other pattern changes. The existing fixture (`test/fixtures/secrets.txt`), quoted-value, private
+block, and idempotency tests are the correctness gate.
+
+### Verify
+
+```bash
+npx tsc --noEmit
+npx vitest run test/redact.test.ts test/files.test.ts
+```
+
+Expected: redaction tests pass; the Task 1 oversized-file test now completes quickly. Commit:
+
+```bash
+git add src/redact.ts test/redact.test.ts
+git commit -m "perf: bound URL-credential redaction for full-file search (E7a)"
 ```
 
 ---
