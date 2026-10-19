@@ -362,6 +362,9 @@ describe("install_surface_P0_parity", () => {
     expect(md).toMatch(/opencode plugin list/);
     // The required permission rule and the hand-owned protocol block.
     expect(md).toMatch(/memory_write/);
+    expect(md).toMatch(
+      /\{\s*"action":\s*"memory_write",\s*"resource":\s*"\*",\s*"effect":\s*"ask"\s*\}/,
+    );
     expect(md).toMatch(/AGENTS\.md/);
     expect(md).toMatch(/permissions/);
     // Core workflow surface.
