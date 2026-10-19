@@ -1039,6 +1039,95 @@ local usage metrics + `/memory-metrics` dashboard (§5.12, ADR-0008 — shipped 
 delivery gate), and all
 `AGENTS.md`/`instructions`/config behaviors are implementable on the verified primitives above.
 
+### 5.13 Local status report — `/memory-status` + `memory_status` (US-30, HS-13)
+
+**Purpose.** Give a new or troubleshooting user one deterministic, read-only answer to "is this
+install healthy, and what should I do next?" without reading five files or running the agent. Two
+surfaces share one renderer: the plugin-registered `/memory-status` command (primary; posts via
+synthetic) and the read-only `memory_status` tool (fallback and agent-callable query). The optional
+file-based `commands/memory-status.md` stub is a secondary affordance; the plugin registration is
+normative.
+
+**Input/output.** `memory_status` takes no arguments (`{ type: "object", properties: {}, required: [],
+additionalProperties: false }`) and returns the same markdown report through the `toolResult`
+envelope (`{ content }`). `/memory-status` takes no arguments and returns `void`; it computes the
+report and posts it with `ctx.session.synthetic({ sessionID, text })`. If the synthetic post rejects,
+the executor falls back to the §5.5 prompt pattern (`ctx.session.prompt({ ...prompt, sessionID,
+delivery, text })`) asking the agent to call `memory_status` and echo the report verbatim. The command
+never throws: report-read failures are logged as a best-effort diagnostic and post nothing.
+
+**Checks (fixed order).**
+1. **Memory directory** — present or missing (missing: "scaffolds on first run"; next action: restart/
+   reload the plugin).
+2. **INDEX.md attachability** — line count against `indexLines`; over cap reports "over cap, not
+   attached" (the prompt hook's actual behavior) and a trim action.
+3. **AGENTS.md protocol block** — `present`, `missing (AGENTS.md has no protocol block)`, `no AGENTS.md
+   found`, or `unreadable`; the check uses the same heuristic as the install nudge.
+4. **`memory_write -> ask` rule** — **advisory** scan of readable config files
+   (`opencode.jsonc`/`opencode.json`, project then `.opencode/` then
+   `~/.config/opencode/`), looking for both `memory_write` and `ask`; evidence paths render
+   project-relative or `~/…`. The effective merged permission set is not readable here, so "not found
+   in readable configs (advisory)" is never an error and the next action says the effective rules are
+   unverifiable.
+5. **`memory-manager` agent** — `present`, `absent (optional)`, or `unknown (agent lookup
+   unavailable)`; a rejecting/absent agent registry degrades to `unknown`, never a throw.
+6. **Capture activity** — `snapshot.written` + `compactionCapture.captured` from existing §5.12
+   totals, with a deploy-check action when both are zero; failure totals (`snapshot.failed`,
+   `compactionCapture.failed`) and health counts (handoffs, archive, pending, seen) render in the
+   activity table.
+7. **Context** — plugin options budgets (`INDEX ≤ N`, `files ≤ N`, `injected ≤ N`), OpenCode version
+   (`unknown` or `outside supported 2.0.x` when applicable), validated ISO `since`, and the newest
+   root handoff (name only).
+
+**Renderer contract.** `renderStatusReport` is pure and deterministic: fixed strings, allowlisted
+names, integers, one-line version (whitespace-collapsed, bounded), project-relative or `~/` config
+paths, and the already-validated ISO `since`; no clock, no filesystem, no storage. Two calls with the
+same report render byte-identically. Every dynamic string passes through a whitespace-collapsing
+one-line bound so captured/foreign text cannot add report lines.
+
+**Read-only guarantees.** The report emits no memory body and no captured content. It reads existing
+counters, line/entry counts, and install markers only; it writes nothing and bumps **no** counter —
+the §5.12/ADR-0008 metric vocabulary is frozen. No `status.*` keys exist. Status/search introduce no
+new storage keys; the command's synthetic post is a session message, not durable storage.
+
+### 5.14 `memory_search` tool (US-31, HS-04)
+
+**Purpose.** Make older history reachable when `memory_recall`'s capped tail is not enough. Recall
+remains the primary, capped channel; search is an explicit, user/model-invoked exact grep and is
+**never auto-injected**.
+
+**Input.** `{ query: string, file?: string, maxResults?: integer, caseSensitive?: boolean }`;
+`query` required; `additionalProperties: false`. `file` is an allowlisted path (or a handoff path);
+listing sentinels (`handoffs`, `handoffs/archive`) are rejected — use `memory_recall` for listings.
+`maxResults` defaults to 20 and clamps to 50; a non-positive/non-integer value falls back to 20.
+`caseSensitive` defaults to false.
+
+**Scope and read path.** With no `file`, candidates are the six structural files in `MEMORY_FILES`
+order, then `handoffs/` newest-first, then `handoffs/archive/` newest-first, capped at 200 candidate
+files (the renderer reports when the candidate list was truncated). Reads go through
+`readFullRedacted`: the **same** allowlist/traversal choke point and redaction as `readCapped`, but
+full-file (no line cap) with a **1 MB per-file byte guard**. A file over the guard contributes its
+prefix and is reported as truncated. Missing files are skipped in the default scope; an explicit
+`file` miss throws the friendly `[memory] memory file not found: <name>` error. Unknown/traversal
+scopes reject with the same non-allowlisted-path error as recall.
+
+**Matching and results.** Matching is a literal substring test (never a regex), case-insensitive by
+default. Results are `{ file, line, text }` with 1-based line numbers, trimmed and bounded to 200
+characters + `...`. The report includes the true total match count (`matched`), the bounded number
+shown, files scanned, and the candidate total. Deterministic order follows the candidate order and
+line order within a file.
+
+**Renderer shape.** `[memory] search "<query>" (literal, case-insensitive|case-sensitive)`, one
+`- <file>:<line>: <text>` line per match (or `(no matches)`), a
+`showing <shown> of <matched> match(es) in <filesScanned> file(s)` footer, then up to two truncation
+notes (candidate-file cap, per-file byte guard). Dynamic query text is whitespace-collapsed and
+bounded; match text is redacted.
+
+**Side-effect guarantees.** No counters, no arm consumption, no writes, no new storage keys. The
+result is untrusted data: the tool returns it; the agent must not treat it as instructions and must
+not auto-inject it. The redaction path is linear-time for long single-line files (§9 acceptance),
+including the bounded URL-credential pattern.
+
 ---
 
 ## 9. Build, test, release
@@ -1097,10 +1186,22 @@ delivery gate), and all
     failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
     `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
     first post in the deploy check.
+  - **`memory_search` (§5.14):** the same traversal/allowlist choke point (unknown/traversal scopes
+    reject); an old `decisions.md` line beyond the recall tail is found; redaction runs before
+    matching; result bounds (20 default / 50 max), the 200-candidate cap, and the 1 MB per-file guard
+    are asserted; deterministic order is structural files → `handoffs/` newest-first →
+    `handoffs/archive/` newest-first; a storage snapshot before/after proves no counters or keys are
+    written; a 100 KB single-line fixture redacts in linear time (bounded URL-credential pattern).
+  - **status (§5.13):** the renderer is deterministic (same report → byte-identical output across two
+    calls); `/memory-status` posts once via `ctx.session.synthetic` and falls back to the §5.5 prompt
+    on rejection; a rejecting storage/agent/config read never throws; a storage snapshot proves no
+    writes; the config scan is advisory and does not mistake a bare `memory_write` mention (no `ask`)
+    for the rule.
 - **Evals (P2):** recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
-  reported as **three** numbers: **static** (~13 lines: ~10 directive + ~3 tool description);
-  **per-prompt with content** (static + `INDEX` ≤30 once + brief ≤48 + hint ≤1 + status ≤1);
-  **session-total** (per-prompt × model steps, since the `context` hook runs on every model call
+  reported as **three** numbers: **static** (16 lines: 6 non-empty protocol lines + 5 wrapped
+  `memory_recall` description lines + 5 wrapped `memory_search` description lines; utility tools are
+  excluded); **per-prompt with content** (96: static + `INDEX` ≤30 once + brief ≤48 + hint ≤1 + status
+  ≤1); **session-total** (384 at 4 model steps, since the `context` hook runs on every model call
   including tool-driven continuations). The hint is throttled to once per prompt/session.
 - **Compatibility:** test the installed package against the targeted OpenCode release; record the
   supported range in README/CHANGELOG; verify the published form loads with `opencode plugin list`.
@@ -1123,3 +1224,6 @@ delivery gate), and all
   of the §9 evals — count-only counters in `ctx.storage`, deterministic dashboard via
   `memory_metrics` + `/memory-metrics` with the G-M1 synthetic-delivery gate (prompt fallback shipped
   and type-proven on `@opencode/plugin` 2.0.29).
+  **Tier-1 delivered (2026-10-19):** E2 `/memory-status` + `memory_status` (§5.13) and E7
+  `memory_search` (§5.14), both read-only, no new options/metric names/storage keys, no FTS/embeddings/
+  fuzzy search. E8–E14 remain deferred.

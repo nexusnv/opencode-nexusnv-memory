@@ -29,10 +29,28 @@
 - Invariants: every persisted metrics value is a JSON number (no prompt text, tool output, captured paths, identities, or prose — `redact` deliberately not applied since nothing free-text is stored; the arm flag is the int `1` when armed — binary semantics, numeric storage); counter names are an enumerated fail-closed vocabulary (unknown names are logged and dropped, never written); day buckets pruned after 90 UTC days; bumps are fire-and-forget, never-throw, serialized through the ledger's per-process write mutex and never alter any hook/tool outcome.
 - Renderer: a pure function over `{ totals, days, health, since }` — the only strings it can emit are counter names, the six allowlisted structural file names, UTC day stamps, and integers; `health` is line counts and entry counts only, file bodies never rendered.
 
+## `memory_search` tool
+
+- Input: `{ "query": <non-empty string>, "file"?: <allowlisted path>, "maxResults"?: <integer>, "caseSensitive"?: <boolean> }` (required `query`; `additionalProperties:false`). `file` accepts the six structural names and individual handoff/archive paths; listing sentinels (`handoffs`, `handoffs/archive`) are rejected (recall lists names). `maxResults` defaults to 20 and clamps to 50; invalid values fall back to 20. Matching is literal, case-insensitive by default.
+- Output: `{ content: <rendered hits> }` via `toolResult`. The renderer emits a bounded header, `- <file>:<line>: <text>` rows (or `(no matches)`), a shown/total/files footer, and truncation notes. Hits are 1-based line numbers with trimmed text bounded to 200 chars + `...`.
+- Read path: the **same** allowlist/traversal choke point and redaction as recall, via `readFullRedacted` (full-file, no line cap) under a **1 MB per-file byte guard**. Default scope order is the six structural files in `MEMORY_FILES` order, then `handoffs/` newest-first, then `handoffs/archive/` newest-first, capped at 200 candidate files. Missing files are skipped in the default scope; an explicit `file` miss throws the friendly missing-file error; unknown/traversal scopes reject.
+- Side effects: none. No counters, no arm consumption, no writes, no new storage keys. Results are untrusted data and are never auto-injected. The redaction path is linear-time on long single-line files (bounded URL-credential pattern).
+
+## `memory_status` tool
+
+- Input: `{}` (empty object; `additionalProperties:false`; read-only, no arguments). Normative contract: `design-spec-v2-production.md` §5.13.
+- Output: `{ content: <markdown report> }` via `toolResult`: scaffold presence, INDEX lines/cap/attachability, AGENTS.md protocol block, advisory `memory_write → ask` evidence, optional `memory-manager` agent, capture/health counts, budgets, version, validated `since`, newest root handoff name, and next actions. The renderer is deterministic (fixed strings, allowlisted names, integers, one-line bounded version, relative/`~/` config paths); no memory body or captured content is emitted.
+- Side effects: none. It reads existing counters/health/install markers only, writes no storage, and bumps no counter. Degraded reads render `unknown`/`unreadable`/`not-found` (the config scan is advisory; effective merged permissions are unverifiable).
+
 ## `/memory-metrics` command
 
 - Invocation: `/memory-metrics [reset]`. Behavior: computes the §5.12 counters + on-disk health counts and posts the rendered table into the current session via `ctx.session.synthetic({ sessionID, text })` — no model turn (there is no text-return surface on `CommandDefinition.execute`, `Promise<void>`). Because whether the TUI renders a synthetic post without spawning a model turn is not type-provable on the installed 2.0.29 package, the first post of the process (the deploy event) logs one G-M1 line; G-M1 is a deploy-time human check, not a runtime branch — when the post rejects at runtime, the executor falls back to the `/memory-review` pattern — `ctx.session.prompt({ ...prompt, sessionID, delivery, text })` asking the agent to call `memory_metrics` and echo the table verbatim. The executor never throws; a fallback failure degrades to a diagnostic log.
 - `reset` argument (case-insensitive): removes all `<projectID>/metrics/…` keys (paginated scan + remove), stamps a fresh `since`, and reports the restart through the same post/fallback channel. The command writes no durable memory file and resets nothing except on `reset`; collection is always on with no sixth option (ADR-0006 stands; ADR-0008).
+- Implemented with `ctx.command.transform` (same `{ sessionID, prompt, delivery }` shape as `/memory-review`).
+
+## `/memory-status` command
+
+- Invocation: `/memory-status` (no arguments). Behavior: computes the §5.13 report and posts it via `ctx.session.synthetic({ sessionID, text })` — no model turn. When the post rejects, it falls back to the §5.5 pattern (`ctx.session.prompt` spread) asking the agent to call `memory_status` and echo the report verbatim. It never throws, writes nothing, and bumps no counter; report-read failures degrade to a diagnostic log. The optional `commands/memory-status.md` stub is a secondary affordance; the plugin registration is normative.
 - Implemented with `ctx.command.transform` (same `{ sessionID, prompt, delivery }` shape as `/memory-review`).
 
 ## Hook contracts
