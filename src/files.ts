@@ -8,7 +8,13 @@
  *
  * All file IO via `node:fs/promises` (async only).
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import { redact } from "./redact.js";
@@ -298,6 +304,73 @@ export async function readCapped(
   }
   const kept = redactedText.split("\n").slice(0, limit).join("\n");
   return `${kept}${truncationNotice("first", limit, total)}`;
+}
+
+/** Per-file byte guard for full (`memory_search`) reads. */
+export const SEARCH_FILE_BYTES = 1_000_000;
+
+export interface FullReadOptions {
+  /** Absolute path to `.opencode/memory`; defaults like `readCapped`. */
+  readonly memoryRoot?: string;
+  /** `throw` (default) reports a friendly missing-file error; `skip` returns undefined. */
+  readonly onMissing?: "throw" | "skip";
+}
+
+export interface FullReadResult {
+  readonly text: string;
+  readonly truncated: boolean;
+}
+
+/**
+ * Read one allowlisted memory file in full (no line cap) for `memory_search`.
+ * Same allowlist/traversal choke point and redaction as `readCapped`, but a
+ * per-file byte guard instead of a line cap so older decisions and archived
+ * handoffs stay searchable. A missing file throws the same friendly error as
+ * `readCapped` unless `onMissing: "skip"`. Never reads outside the root.
+ */
+export async function readFullRedacted(
+  file: string,
+  opts?: FullReadOptions,
+): Promise<FullReadResult | undefined> {
+  assertAllowedPath(file);
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  const abs = resolveUnderRoot(root, file);
+  let handle: FileHandle;
+  try {
+    handle = await open(abs, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      if (opts?.onMissing === "skip") return undefined;
+      throw new Error(
+        `[memory] memory file not found: ${file}${missingFileHint(file)}`,
+      );
+    }
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, SEARCH_FILE_BYTES);
+    const buffer = Buffer.alloc(length);
+    let offset = 0;
+    // `FileHandle.read` may satisfy a short read; loop so the tail is not
+    // silently dropped (the limit is a byte guard, not a read-size hint).
+    while (offset < length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        length - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return {
+      text: redact(buffer.subarray(0, offset).toString("utf8")),
+      truncated: size > SEARCH_FILE_BYTES,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

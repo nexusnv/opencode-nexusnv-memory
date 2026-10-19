@@ -2,7 +2,14 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCapped, updateCapped, writeCapped, withWriteLock } from "../src/files.js";
+import {
+  SEARCH_FILE_BYTES,
+  readCapped,
+  readFullRedacted,
+  updateCapped,
+  writeCapped,
+  withWriteLock,
+} from "../src/files.js";
 
 let root: string;
 
@@ -206,5 +213,79 @@ describe("updateCapped_atomic_append", () => {
     expect(out).toContain("- one");
     expect(out).toContain("- two");
     expect(out).toContain("- three");
+  });
+});
+
+describe("readFullRedacted (memory_search support)", () => {
+  it("returns decisions.md in full instead of the recall tail", async () => {
+    const body = [
+      "oldest-marker",
+      ...Array.from({ length: 199 }, (_, i) => `line-${i + 2}`),
+    ].join("\n");
+    await writeCapped("decisions.md", body, opts());
+
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full).toBeDefined();
+    expect(full!.text).toContain("oldest-marker");
+    expect(full!.text).toContain("line-200");
+    expect(full!.truncated).toBe(false);
+
+    // The contrast with recall: the tail cap drops the oldest marker.
+    const tail = await readCapped("decisions.md", opts());
+    expect(tail).not.toContain("oldest-marker");
+  });
+
+  it("applies redaction to the full text", async () => {
+    await writeFile(
+      join(root, "decisions.md"),
+      "before\n<private>\nsecret-value\n</private>\nafter",
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.text).not.toContain("secret-value");
+    expect(full!.text).toContain("before");
+    expect(full!.text).toContain("after");
+  });
+
+  it("uses the same allowlist and traversal choke point", async () => {
+    for (const file of [
+      "../INDEX.md",
+      "/etc/passwd",
+      "random.md",
+      "handoffs/sub/dir.md",
+    ]) {
+      await expect(
+        readFullRedacted(file, opts()),
+        `read ${file}`,
+      ).rejects.toThrow();
+    }
+    await expect(readFullRedacted("handoffs", opts())).rejects.toThrow(
+      /rejected non-allowlisted path/,
+    );
+  });
+
+  it("reports a missing file unless the caller asks to skip", async () => {
+    await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+      "[memory] memory file not found: style.md",
+    );
+    await expect(
+      readFullRedacted("style.md", { ...opts(), onMissing: "skip" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      readFullRedacted("handoffs/2026-10-15-120000-abcdef.md", {
+        ...opts(),
+        onMissing: "skip",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("guards oversized files at the byte limit and reports truncation", async () => {
+    await writeFile(
+      join(root, "decisions.md"),
+      `${"x".repeat(SEARCH_FILE_BYTES)}needle-after-guard`,
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.truncated).toBe(true);
+    expect(full!.text).not.toContain("needle-after-guard");
+    expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
   });
 });
