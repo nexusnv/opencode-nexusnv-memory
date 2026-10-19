@@ -413,8 +413,11 @@ In `src/redact.ts`, replace the URL-credentials pattern with the bounded form an
   // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
   // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
   // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
+  // No leading `\b`: a URL embedded after word characters (e.g.
+  // `foo_postgres://user:pass@host`) must still be redacted; the bounds keep
+  // the scan linear.
   {
-    re: /\b([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
   },
 ```
@@ -2189,7 +2192,7 @@ const staticLines =
   protocolLines +
   Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80) +
   Math.ceil(MEMORY_SEARCH_DESCRIPTION.length / 80);
-expect(staticLines).toBeLessThanOrEqual(20);
+expect(staticLines).toBeLessThanOrEqual(16);
 ```
 
 Update the test comment to say the static number counts the two retrieval-policy descriptions
@@ -2272,6 +2275,29 @@ Expected: full suite green; the printed static number matches the README/spec. C
 git add docs README.md CHANGELOG.md test/acceptance.test.ts
 git commit -m "docs: tier 1 status + search contracts and evals"
 ```
+
+---
+
+## Implementation-review amendments (2026-10-19)
+
+The independent implementation review found one blocking security gap and several hardening gaps.
+Fixes are in the review-fix commit:
+
+1. **Symlink escape (blocking).** `assertAllowedPath`/`resolveUnderRoot` were lexical only; `open`/
+   `readFile` follow symlinks. `readCapped` and `readFullRedacted` now resolve the root and target
+   with `realpath` and reject targets outside the real root (`[memory] rejected symlink escape from
+   memory root: <file>`). A symlink inside the root is allowed; a root that is itself a symlink uses
+   its real destination. Tests cover outside/inside links for both readers.
+2. **Embedded URL credentials.** Removed the leading `\b` from the bounded URL pattern so
+   `foo_postgres://user:pass@host` still redacts; the bounds preserve linear time.
+3. **Search line numbers.** Added `redactPreservingLines`: `<private>` blocks and multiline secrets
+   are replaced with `[redacted]` plus their original newline count, so `memory_search` reports the
+   on-disk line. `readFullRedacted` uses it; normal `redact` (writes/injection) is unchanged.
+4. **Default-scope robustness.** A single unreadable/mislinked candidate (EACCES, EISDIR, symlink
+   escape) is skipped instead of aborting the whole search; an explicit `file` scope still rejects.
+5. **Test hardening.** Status output is asserted not to contain memory-body sentinels; search is run
+   against a storage whose every operation throws (proving no reads/writes); the static eval bound is
+   tightened to 16; the protocol-block comparison is byte-exact including the trailing newline.
 
 ---
 

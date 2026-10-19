@@ -167,8 +167,14 @@ async function seedProject(projectRoot: string): Promise<string> {
     join(memoryRoot, "activeContext.md"),
     "# Active context\n- none\n",
   );
-  await writeFile(join(memoryRoot, "decisions.md"), "# Decisions\n");
-  await writeFile(join(memoryRoot, "architecture.md"), "# Architecture\n");
+  await writeFile(
+    join(memoryRoot, "decisions.md"),
+    "# Decisions\nSTATUS_BODY_SENTINEL_DECISIONS\n",
+  );
+  await writeFile(
+    join(memoryRoot, "architecture.md"),
+    "# Architecture\nSTATUS_BODY_SENTINEL_ARCH\n",
+  );
   await writeFile(join(memoryRoot, "style.md"), "# Style\n");
   await writeFile(join(memoryRoot, "issues.md"), "# Issues\n");
   return memoryRoot;
@@ -232,6 +238,9 @@ describe("collectStatus + renderStatusReport", () => {
     );
     expect(report.actions).toEqual(["(none — memory is healthy)"]);
     expect(text).toContain("(none — memory is healthy)");
+    // The report carries counts and names only, never a memory-file body.
+    expect(text).not.toContain("STATUS_BODY_SENTINEL_DECISIONS");
+    expect(text).not.toContain("STATUS_BODY_SENTINEL_ARCH");
   });
 
   it("flags a missing install and suggests the install steps", async () => {
@@ -473,6 +482,8 @@ describe("status command + tool", () => {
     expect(out).toEqual({
       content: expect.stringContaining("# [memory] status (local-only)"),
     });
+    expect(out.content).not.toContain("STATUS_BODY_SENTINEL_DECISIONS");
+    expect(out.content).not.toContain("STATUS_BODY_SENTINEL_ARCH");
   });
 
   it("degrades an unavailable agent lookup to unknown, not a throw", async () => {

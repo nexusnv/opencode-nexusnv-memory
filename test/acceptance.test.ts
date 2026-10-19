@@ -575,7 +575,7 @@ describe("acceptance_evals_three_numbers", () => {
       protocolLines +
       Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80) +
       Math.ceil(MEMORY_SEARCH_DESCRIPTION.length / 80);
-    expect(staticLines).toBeLessThanOrEqual(20);
+    expect(staticLines).toBeLessThanOrEqual(16);
     // Per-prompt with content: static + INDEX(≤30, once) + brief(≤48) +
     // hint(≤1) + status(≤1). The injectable portion is budget-capped at 80.
     const perPromptInjectable =

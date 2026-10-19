@@ -1,5 +1,13 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -244,6 +252,32 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).not.toContain("secret-value");
     expect(full!.text).toContain("before");
     expect(full!.text).toContain("after");
+    // The private block is replaced line-for-line, not collapsed, so search
+    // hit locations still match the on-disk file.
+    expect(full!.text.split("\n")).toHaveLength(5);
+  });
+
+  it("rejects symlinks that escape the memory root", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await writeFile(join(outside, "secret.md"), "outside-secret");
+      await symlink(join(outside, "secret.md"), join(root, "style.md"));
+      await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+        /symlink escape/,
+      );
+      await expect(readCapped("style.md", opts())).rejects.toThrow(
+        /symlink escape/,
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a symlink that stays inside the memory root", async () => {
+    await writeFile(join(root, "architecture.md"), "inside-target\n");
+    await symlink(join(root, "architecture.md"), join(root, "issues.md"));
+    const full = await readFullRedacted("issues.md", opts());
+    expect(full!.text).toContain("inside-target");
   });
 
   it("uses the same allowlist and traversal choke point", async () => {

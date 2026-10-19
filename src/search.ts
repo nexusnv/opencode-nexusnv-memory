@@ -131,10 +131,19 @@ export async function searchMemory(
   let truncatedFiles = 0;
 
   for (const file of candidates.files) {
-    const full = await readFullRedacted(file, {
-      memoryRoot,
-      onMissing: opts.file === undefined ? "skip" : "throw",
-    });
+    let full;
+    try {
+      full = await readFullRedacted(file, {
+        memoryRoot,
+        onMissing: opts.file === undefined ? "skip" : "throw",
+      });
+    } catch (error) {
+      // One unreadable/mislinked candidate (EACCES, EISDIR, symlink escape,
+      // etc.) must not abort a default-scope search. An explicit file scope
+      // still surfaces the error so the caller learns the read failed.
+      if (opts.file !== undefined) throw error;
+      continue;
+    }
     if (full === undefined) continue;
     filesScanned += 1;
     if (full.truncated) truncatedFiles += 1;

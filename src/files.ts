@@ -12,12 +12,13 @@ import {
   mkdir,
   open,
   readFile,
+  realpath,
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { redact } from "./redact.js";
+import { redact, redactPreservingLines } from "./redact.js";
 
 export interface CappedFileOptions {
   /** Absolute path to `.opencode/memory`. Defaults to `<cwd>/.opencode/memory`. */
@@ -175,6 +176,35 @@ function resolveUnderRoot(root: string, file: string): string {
   return abs;
 }
 
+/**
+ * Resolve an allowlisted path to its real location and reject symlinks that
+ * leave the memory root. Lexical checks alone are insufficient because
+ * `open`/`readFile` follow symlinks. A missing root resolves lexically so
+ * callers keep the friendly missing-file behavior; a missing target
+ * propagates ENOENT. A root that is itself a symlink is allowed: its real
+ * destination is the configured memory root.
+ */
+async function resolveContainedReadPath(
+  root: string,
+  file: string,
+): Promise<string> {
+  const abs = resolveUnderRoot(root, file);
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return abs;
+    throw error;
+  }
+  const realAbs = await realpath(abs);
+  if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
+    throw new Error(
+      `[memory] rejected symlink escape from memory root: ${file}`,
+    );
+  }
+  return realAbs;
+}
+
 function truncationNotice(
   kind: "first" | "last",
   cap: number,
@@ -276,9 +306,9 @@ export async function readCapped(
   assertAllowedPath(file);
   const { indexLines, fileLines } = capsOf(opts);
   const root = resolveMemoryRoot(opts?.memoryRoot);
-  const abs = resolveUnderRoot(root, file);
   let raw: string;
   try {
+    const abs = await resolveContainedReadPath(root, file);
     raw = await readFile(abs, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -326,7 +356,9 @@ export interface FullReadResult {
  * Same allowlist/traversal choke point and redaction as `readCapped`, but a
  * per-file byte guard instead of a line cap so older decisions and archived
  * handoffs stay searchable. A missing file throws the same friendly error as
- * `readCapped` unless `onMissing: "skip"`. Never reads outside the root.
+ * `readCapped` unless `onMissing: "skip"`. Never reads outside the root
+ * (symlinks are resolved and rejected when they escape). Redaction preserves
+ * newline count so reported line numbers match the on-disk file.
  */
 export async function readFullRedacted(
   file: string,
@@ -334,9 +366,9 @@ export async function readFullRedacted(
 ): Promise<FullReadResult | undefined> {
   assertAllowedPath(file);
   const root = resolveMemoryRoot(opts?.memoryRoot);
-  const abs = resolveUnderRoot(root, file);
   let handle: FileHandle;
   try {
+    const abs = await resolveContainedReadPath(root, file);
     handle = await open(abs, "r");
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -365,7 +397,9 @@ export async function readFullRedacted(
       offset += bytesRead;
     }
     return {
-      text: redact(buffer.subarray(0, offset).toString("utf8")),
+      text: redactPreservingLines(
+        buffer.subarray(0, offset).toString("utf8"),
+      ),
       truncated: size > SEARCH_FILE_BYTES,
     };
   } finally {

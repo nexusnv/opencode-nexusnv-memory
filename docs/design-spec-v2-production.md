@@ -504,9 +504,10 @@ registrations.push(await ctx.tool.transform((editor) => {
   function; `Tool.TextContent` (`{ type: "text", text }`) is the persisted **message**-content shape,
   not the executor envelope (§1.3 G2).
 - `readCapped` is the single choke point: it resolves the path under `.opencode/memory`, rejects any
-  escape (`..`, absolute, backslash, percent-encoded separators), checks allowlist membership or the
-  handoff pattern `/^handoffs\/(?:archive\/)?[A-Za-z0-9._-]+\.md$/`, then reads with cap + notice +
-  redaction. Unknown/invalid → throw. Never lists the filesystem.
+  escape (`..`, absolute, backslash, percent-encoded separators), resolves the real path and rejects
+  symlinks that leave the memory root, checks allowlist membership or the handoff pattern
+  `/^handoffs\/(?:archive\/)?[A-Za-z0-9._-]+\.md$/`, then reads with cap + notice + redaction.
+  Unknown/invalid → throw. Never lists the filesystem.
 - Archive paths are recallable on demand and never auto-injected.
 - The description doubles as the retrieval policy (`c4-04`).
 
@@ -1105,11 +1106,14 @@ listing sentinels (`handoffs`, `handoffs/archive`) are rejected — use `memory_
 **Scope and read path.** With no `file`, candidates are the six structural files in `MEMORY_FILES`
 order, then `handoffs/` newest-first, then `handoffs/archive/` newest-first, capped at 200 candidate
 files (the renderer reports when the candidate list was truncated). Reads go through
-`readFullRedacted`: the **same** allowlist/traversal choke point and redaction as `readCapped`, but
-full-file (no line cap) with a **1 MB per-file byte guard**. A file over the guard contributes its
-prefix and is reported as truncated. Missing files are skipped in the default scope; an explicit
-`file` miss throws the friendly `[memory] memory file not found: <name>` error. Unknown/traversal
-scopes reject with the same non-allowlisted-path error as recall.
+`readFullRedacted`: the **same** allowlist/traversal/symlink choke point and redaction as
+`readCapped`, but full-file (no line cap) with a **1 MB per-file byte guard**. Redaction preserves the
+newline count of stripped content, so reported line numbers match the on-disk file. A file over the
+guard contributes its prefix and is reported as truncated. Missing files are skipped in the default
+scope; an unreadable/mislinked candidate is also skipped (an explicit `file` read rejects). An
+explicit `file` miss throws the friendly `[memory] memory file not found: <name>` error.
+Unknown/traversal/symlink-escape scopes reject with the same non-allowlisted-path/escape error as
+recall.
 
 **Matching and results.** Matching is a literal substring test (never a regex), case-insensitive by
 default. Results are `{ file, line, text }` with 1-based line numbers, trimmed and bounded to 200

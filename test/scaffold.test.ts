@@ -325,7 +325,8 @@ describe("install_surface_P0_parity", () => {
     const spec = read("docs/design-spec-v2-production.md");
     const m = spec.match(/```md\n(## Project memory[\s\S]*?)\n```/);
     expect(m, "spec §4.4 protocol block exists").not.toBeNull();
-    expect(AGENTS_PROTOCOL_BLOCK.trim()).toBe(m![1].trim());
+    // Byte-exact, including the trailing newline in the runtime constant.
+    expect(AGENTS_PROTOCOL_BLOCK).toBe(`${m![1]}\n`);
   });
 
   it("manager_has_leading_deny_and_proposal_only_body", () => {

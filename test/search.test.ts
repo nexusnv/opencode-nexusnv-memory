@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -162,6 +162,41 @@ describe("searchMemory", () => {
     });
     expect(result.matches).toEqual([]);
     expect(result.matched).toBe(0);
+  });
+
+  it("keeps on-disk line numbers after redacted private content", async () => {
+    await put(
+      "decisions.md",
+      "one\ntwo\n<private>\nsecret-line\n</private>\nfindme",
+    );
+    const result = await searchMemory({ memoryRoot: root, query: "findme" });
+    expect(result.matches).toEqual([
+      { file: "decisions.md", line: 6, text: "findme" },
+    ]);
+  });
+
+  it("skips unreadable or escaping candidates in the default scope", async () => {
+    await put("decisions.md", "inside-hit\n");
+    const outside = await mkdtemp(join(tmpdir(), "memory-search-outside-"));
+    try {
+      await writeFile(join(outside, "secret.md"), "outside-secret\n");
+      await symlink(join(outside, "secret.md"), join(root, "style.md"));
+      await mkdir(join(root, "handoffs/2026-10-19-000000-dir.md"), {
+        recursive: true,
+      });
+
+      const leaked = await searchMemory({ memoryRoot: root, query: "outside" });
+      expect(leaked.matches).toEqual([]);
+
+      const hit = await searchMemory({ memoryRoot: root, query: "inside-hit" });
+      expect(hit.matches.map((match) => match.file)).toEqual(["decisions.md"]);
+
+      await expect(
+        searchMemory({ memoryRoot: root, query: "outside", file: "style.md" }),
+      ).rejects.toThrow(/symlink escape/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("skips missing files in the default scope, but a scoped miss is an error", async () => {

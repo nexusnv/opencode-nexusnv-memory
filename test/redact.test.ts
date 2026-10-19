@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { redact } from "../src/redact.js";
+import { redact, redactPreservingLines } from "../src/redact.js";
 
 const fixturePath = resolve(import.meta.dirname!, "fixtures/secrets.txt");
 const secrets = readFileSync(fixturePath, "utf8")
@@ -102,8 +102,31 @@ describe("quoted_env_values_with_spaces", () => {
   });
 });
 
-describe("escaped_quotes_in_values", () => {
-  it("consumes escaped quotes inside double-quoted values", () => {
+describe("line_preserving_redaction", () => {
+  it("keeps on-disk line numbers after a private block", () => {
+    const raw = "one\ntwo\n<private>\nsecret-line\n</private>\nfindme";
+    const out = redactPreservingLines(raw);
+    expect(out).not.toContain("secret-line");
+    expect(out.split("\n")).toHaveLength(raw.split("\n").length);
+    expect(out.split("\n").indexOf("findme")).toBe(5);
+  });
+
+  it("keeps line numbers after a multiline private key", () => {
+    const raw = [
+      "before",
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEow-secret-body",
+      "-----END RSA PRIVATE KEY-----",
+      "findme",
+    ].join("\n");
+    const out = redactPreservingLines(raw);
+    expect(out).not.toContain("MIIEow-secret-body");
+    expect(out.split("\n")).toHaveLength(raw.split("\n").length);
+    expect(out.split("\n").indexOf("findme")).toBe(4);
+  });
+});
+
+describe("escaped_quotes_in_values", () => {  it("consumes escaped quotes inside double-quoted values", () => {
     const out = redact('PASSWORD="first\\"remaining-secret"');
     expect(out).not.toContain("first");
     expect(out).not.toContain("remaining-secret");
@@ -122,6 +145,12 @@ describe("linear_time_guard", () => {
     const out = redact("redis://:SuperSecretPW@host:6379/0");
     expect(out).not.toContain("SuperSecretPW");
     expect(out).toContain("redis://:[redacted]@host:6379/0");
+  });
+
+  it("redacts credentials in a URL embedded after word characters", () => {
+    const out = redact("prefix foo_postgres://user:SuperSecretPW@host/db");
+    expect(out).not.toContain("SuperSecretPW");
+    expect(out).toContain("foo_postgres://user:[redacted]@host/db");
   });
 
   it("stays linear on a long single-line file (no catastrophic backtracking)", () => {
