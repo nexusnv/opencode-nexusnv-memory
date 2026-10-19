@@ -13,9 +13,12 @@
  * closing `</private>` (no attributes). An attributed closer such as
  * `</private note>` is NOT a close — inside a block it must not resume
  * copying (fail-closed to EOF redaction); outside a block it is left as-is.
+ *
+ * The slash sits inside the optional group so the two whitespace runs cannot
+ * split the same run; this avoids quadratic backtracking on hostile input
+ * such as `"<private "` repeated to EOF.
  */
-const PRIVATE_TAG =
-  /<\s*(\/?)\s*private((?:\s+[^>]*)?)\s*>/gi;
+const PRIVATE_TAG = /<(\s*\/)?\s*private((?:\s+[^>]*)?)\s*>/gi;
 
 const REDACTED = "[redacted]";
 
@@ -35,10 +38,15 @@ function stripPrivateBlocks(text: string, preserveLines: boolean): string {
   let depth = 0;
   let blockStart = 0;
   let match: RegExpExecArray | null;
+  // A tag cannot extend past the last `>`, so clamp the scan. Without this,
+  // input with no `>` (or a `>` only at EOF) makes every `<` candidate scan
+  // to EOF. `scan` is a prefix of `text`, so `match.index` stays valid.
+  const lastGt = text.lastIndexOf(">");
+  const scan = lastGt === -1 ? "" : text.slice(0, lastGt + 1);
   // Reset lastIndex on each exec via the shared regex; single-threaded use is
   // safe because the function is synchronous.
-  while ((match = PRIVATE_TAG.exec(text)) !== null) {
-    const isClose = match[1] === "/";
+  while ((match = PRIVATE_TAG.exec(scan)) !== null) {
+    const isClose = match[1] !== undefined;
     const hasAttrs = (match[2] ?? "").trim().length > 0;
     if (!isClose) {
       if (depth === 0) {
@@ -103,13 +111,11 @@ interface Pattern {
 }
 
 const BLOCKLIST: readonly Pattern[] = [
-  // Private key blocks (full) first, then lone headers (truncated keys).
+  // Private key blocks. A BEGIN with no matching END redacts to EOF
+  // (fail-closed, like an unclosed `<private>`); this also avoids re-scanning
+  // to EOF from every header on hostile input.
   {
-    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-    replacement: "[redacted private key]",
-  },
-  {
-    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
     replacement: "[redacted private key]",
   },
   {
@@ -144,11 +150,12 @@ const BLOCKLIST: readonly Pattern[] = [
   // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
   // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
   // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
-  // No leading `\b`: a URL embedded after word characters (e.g.
-  // `foo_postgres://user:pass@host`) must still be redacted; the bounds keep
-  // the scan linear.
+  // No leading `\b`: `\b` fails inside a long alphanumeric run and makes the
+  // engine retry at every character (constant-factor regression). A negative
+  // lookbehind keeps the start at a real boundary while still redacting a URL
+  // embedded after `_`/`=`/`/` (e.g. `foo_postgres://user:pass@host`).
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /(?<![A-Za-z0-9])([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
   },
   // AWS secret access key with label.
@@ -165,8 +172,14 @@ const BLOCKLIST: readonly Pattern[] = [
   // intentionally broad (M-1: OPENAI_KEY/GITHUB_KEY/AUTH/ENCRYPTION_KEY via
   // the generic KEY/AUTH/CREDENTIAL match — over-redaction like MONKEY= is
   // accepted over a leak).
+  //
+  // Linear-time guard (Tier-1): bound both runs around the keyword to 256
+  // characters. This keeps the pattern linear on hostile keyword runs; the
+  // deliberate fail-open trade-off is that a keyword more than 256 characters
+  // from the start/end of an unbroken run is not matched (far longer than any
+  // real env key name). A 200-character-prefix key still redacts.
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
+    re: /\b([A-Z0-9_]{0,256}?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]{0,256}\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];

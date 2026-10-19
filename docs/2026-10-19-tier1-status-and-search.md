@@ -413,11 +413,12 @@ In `src/redact.ts`, replace the URL-credentials pattern with the bounded form an
   // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
   // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
   // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
-  // No leading `\b`: a URL embedded after word characters (e.g.
-  // `foo_postgres://user:pass@host`) must still be redacted; the bounds keep
-  // the scan linear.
+  // No leading `\b`: `\b` fails inside a long alphanumeric run and makes the
+  // engine retry at every character (constant-factor regression). A negative
+  // lookbehind keeps the start at a real boundary while still redacting a URL
+  // embedded after `_`/`=`/`/` (e.g. `foo_postgres://user:pass@host`).
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /(?<![A-Za-z0-9])([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
     replacement: "$1[redacted]$3",
   },
 ```
@@ -2298,6 +2299,27 @@ Fixes are in the review-fix commit:
 5. **Test hardening.** Status output is asserted not to contain memory-body sentinels; search is run
    against a storage whose every operation throws (proving no reads/writes); the static eval bound is
    tightened to 16; the protocol-block comparison is byte-exact including the trailing newline.
+
+### Second review round (2026-10-19)
+
+The re-review verified the symlink fix and found three remaining super-linear redaction paths (the
+branch's linear-time contract was false for hostile input):
+
+1. **`<private>` tag scan.** `/\s*(\/?)\s*private.../` could split one whitespace run and made
+   `"<private "` repeated ~quadratic. The slash is now inside the optional group; the scan is clamped
+   to the last `>` (a tag cannot cross it). Hostile 100 KB runs redact in ~20 ms.
+2. **Generic `.env` key pattern.** The unbounded `[A-Z0-9_]*?…[A-Z0-9_]*` prefix/suffix was quadratic
+   on `KEY`/`SECRET`/`AUTH` runs. Both runs are bounded at 256 characters (far beyond real key
+   names); a key more than 256 characters from either end of an unbroken run is deliberately not
+   matched (fail-open, documented in the pattern comment). A 200-character prefix still redacts.
+3. **Private-key pattern.** The lazy `BEGIN…END` scan re-scanned to EOF from every header and left a
+   truncated key body visible. The pattern now ends at the first `END` or `$`, so a lone `BEGIN`
+   redacts to EOF (same fail-closed semantics as an unclosed `<private>`), and hostile 100 KB
+   header runs are linear.
+
+Also: the URL start uses a negative lookbehind (not `\b` or bare start) to keep the embedded-URL fix
+without the constant-factor regression on long alphanumeric runs; CHANGELOG literal `\n`, a collapsed
+test block, and the symlinked-directory/root-as-symlink test coverage were fixed.
 
 ---
 

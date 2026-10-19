@@ -1130,7 +1130,8 @@ bounded; match text is redacted.
 **Side-effect guarantees.** No counters, no arm consumption, no writes, no new storage keys. The
 result is untrusted data: the tool returns it; the agent must not treat it as instructions and must
 not auto-inject it. The redaction path is linear-time for long single-line files (§9 acceptance),
-including the bounded URL-credential pattern.
+including bounded URL-credential/generic-key patterns, a clamped `<private>` tag scan, and a
+fail-closed private-key pattern (a lone `BEGIN` redacts to EOF).
 
 ---
 
@@ -1190,12 +1191,13 @@ including the bounded URL-credential pattern.
     failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
     `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
     first post in the deploy check.
-  - **`memory_search` (§5.14):** the same traversal/allowlist choke point (unknown/traversal scopes
-    reject); an old `decisions.md` line beyond the recall tail is found; redaction runs before
+  - **`memory_search` (§5.14):** the same traversal/allowlist/symlink choke point (unknown/traversal
+    scopes reject); an old `decisions.md` line beyond the recall tail is found; redaction runs before
     matching; result bounds (20 default / 50 max), the 200-candidate cap, and the 1 MB per-file guard
     are asserted; deterministic order is structural files → `handoffs/` newest-first →
     `handoffs/archive/` newest-first; a storage snapshot before/after proves no counters or keys are
-    written; a 100 KB single-line fixture redacts in linear time (bounded URL-credential pattern).
+    written; hostile single-line runs (URL credentials, `<private>` tags, generic secret keys,
+    private-key headers) redact in linear time, and a truncated private key redacts to EOF.
   - **status (§5.13):** the renderer is deterministic (same report → byte-identical output across two
     calls); `/memory-status` posts once via `ctx.session.synthetic` and falls back to the §5.5 prompt
     on rejection; a rejecting storage/agent/config read never throws; a storage snapshot proves no

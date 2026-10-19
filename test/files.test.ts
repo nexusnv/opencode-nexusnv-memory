@@ -280,6 +280,38 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).toContain("inside-target");
   });
 
+  it("rejects a symlinked directory that escapes the memory root", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-dir-"));
+    try {
+      await mkdir(join(outside, "handoffs"), { recursive: true });
+      await writeFile(
+        join(outside, "handoffs", "2026-10-19-000000-aaaaaa.md"),
+        "outside-secret",
+      );
+      await symlink(join(outside, "handoffs"), join(root, "handoffs"));
+      await expect(
+        readFullRedacted("handoffs/2026-10-19-000000-aaaaaa.md", opts()),
+      ).rejects.toThrow(/symlink escape/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a memory root that is itself a symlink", async () => {
+    await writeFile(join(root, "decisions.md"), "root-link-target\n");
+    const linkRoot = await mkdtemp(join(tmpdir(), "memory-files-root-link-"));
+    await rm(linkRoot, { recursive: true, force: true });
+    await symlink(root, linkRoot);
+    try {
+      const full = await readFullRedacted("decisions.md", {
+        memoryRoot: linkRoot,
+      });
+      expect(full!.text).toContain("root-link-target");
+    } finally {
+      await rm(linkRoot, { force: true });
+    }
+  });
+
   it("uses the same allowlist and traversal choke point", async () => {
     for (const file of [
       "../INDEX.md",

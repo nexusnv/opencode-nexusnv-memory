@@ -126,7 +126,8 @@ describe("line_preserving_redaction", () => {
   });
 });
 
-describe("escaped_quotes_in_values", () => {  it("consumes escaped quotes inside double-quoted values", () => {
+describe("escaped_quotes_in_values", () => {
+  it("consumes escaped quotes inside double-quoted values", () => {
     const out = redact('PASSWORD="first\\"remaining-secret"');
     expect(out).not.toContain("first");
     expect(out).not.toContain("remaining-secret");
@@ -160,6 +161,55 @@ describe("linear_time_guard", () => {
     expect(out).toBe(line);
     // Before the bound, this took ~14s in the URL regex; 1s is a wide
     // regression guard against reintroducing unbounded backtracking.
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("stays linear on hostile <private> tag runs", () => {
+    const cases = [
+      "<private ".repeat(11_112),
+      "</private ".repeat(10_000),
+      `<private${" ".repeat(100_000)}`,
+    ];
+    for (const text of cases) {
+      const started = Date.now();
+      redact(text);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
+  it("stays linear on hostile secret-key runs", () => {
+    for (const text of [
+      "KEY".repeat(33_334),
+      "SECRET".repeat(16_667),
+      "AUTH".repeat(25_000),
+    ]) {
+      const started = Date.now();
+      redact(text);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
+  it("redacts a key with a long but bounded prefix", () => {
+    const out = redact(`${"A".repeat(200)}KEY=secret-value`);
+    expect(out).not.toContain("secret-value");
+    expect(out).toContain("[redacted]");
+  });
+
+  it("fail-closes a truncated private key to EOF and stays linear", () => {
+    // Build the PEM header from parts: the runtime string is identical, but
+    // the repo's gitleaks job would otherwise flag this test as a real key.
+    const begin = ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ");
+    const body = "MIIE-secret-body";
+    const truncated = `keep\n${begin}\n${body}\ntrailer`;
+    const out = redact(truncated);
+    expect(out).toContain("keep");
+    expect(out).not.toContain(body);
+    // Deliberate fail-closed: a lone BEGIN consumes the rest of the file.
+    expect(out).not.toContain("trailer");
+
+    const many = `${begin}\n`.repeat(2_000);
+    const started = Date.now();
+    redact(many);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 });
