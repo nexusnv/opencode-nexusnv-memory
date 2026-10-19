@@ -151,7 +151,9 @@ export function assertAllowedPath(file: string): void {
     !HANDOFF_PATTERN.test(file) &&
     !HANDOFF_PATTERN.test(candidate)
   ) {
-    throw new Error(`[memory] rejected non-allowlisted path: ${file}`);
+    throw new Error(
+      `[memory] rejected non-allowlisted path: ${file}; valid: ${[...ALLOWED_ROOT_FILES].join(", ")}, handoffs/<name>.md, handoffs/archive/<name>.md`,
+    );
   }
 }
 
@@ -223,11 +225,23 @@ function rotatedArchiveName(): string {
   return `handoffs/archive/rotated-${stamp}-${Date.now()}-${rand}.md`;
 }
 
+/** Recovery hint for a missing-file recall error (names only, never content). */
+function missingFileHint(file: string): string {
+  if (file.startsWith("handoffs/archive/")) {
+    return `; list available files with memory_recall("handoffs/archive")`;
+  }
+  if (file.startsWith("handoffs/")) {
+    return `; list available files with memory_recall("handoffs")`;
+  }
+  return "";
+}
+
 /**
  * Read one allowlisted file under the memory root. Over-cap content (e.g. a
  * hand-edit that bypassed `writeCapped`) is truncated with a notice; the
  * `decisions.md` tail returns the last N lines, all others the first N.
- * Output is always redacted. Unknown/traversal paths throw.
+ * Output is always redacted. Unknown/traversal paths throw; a missing file
+ * reports `memory file not found` with a listing hint for handoffs.
  */
 export async function readCapped(
   file: string,
@@ -237,7 +251,17 @@ export async function readCapped(
   const { indexLines, fileLines } = capsOf(opts);
   const root = resolveMemoryRoot(opts?.memoryRoot);
   const abs = resolveUnderRoot(root, file);
-  const raw = await readFile(abs, "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(abs, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      throw new Error(
+        `[memory] memory file not found: ${file}${missingFileHint(file)}`,
+      );
+    }
+    throw error;
+  }
   const redactedText = redact(raw);
   const total = countLines(redactedText);
   // decisions.md is unbounded on write but recall-capped to the injectable

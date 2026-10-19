@@ -226,6 +226,20 @@ function handoffOrder(name: string): {
   return { stamp: match[1]!, seq: 0, name };
 }
 
+/** Newest-last order for top-level/archive handoff names (shared). */
+function sortedHandoffNames(names: readonly string[]): string[] {
+  return names
+    .filter((n) => /^[A-Za-z0-9._-]+\.md$/.test(n))
+    .map(handoffOrder)
+    .sort(
+      (a, b) =>
+        (a.stamp < b.stamp ? -1 : a.stamp > b.stamp ? 1 : 0) ||
+        a.seq - b.seq ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    )
+    .map((o) => o.name);
+}
+
 /**
  * Newest top-level `handoffs/*.md` pointer line, or `undefined` when there
  * is none. Archive entries are recall-only and never pointed at. Never
@@ -236,20 +250,39 @@ export async function newestHandoffLine(
 ): Promise<string | undefined> {
   try {
     const entries = await readdir(join(memoryRoot, "handoffs"));
-    const names = entries
-      .filter((n) => /^[A-Za-z0-9._-]+\.md$/.test(n))
-      .map(handoffOrder)
-      .sort(
-        (a, b) =>
-          (a.stamp < b.stamp ? -1 : a.stamp > b.stamp ? 1 : 0) ||
-          a.seq - b.seq ||
-          (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
-      )
-      .map((o) => o.name);
+    const names = sortedHandoffNames(entries);
     if (names.length === 0) return undefined;
     return `[memory] handoff: handoffs/${names[names.length - 1]!} (latest)`;
   } catch {
     return undefined;
+  }
+}
+
+export interface HandoffListing {
+  /** Newest-first names, at most `limit` (names only, never content). */
+  readonly names: readonly string[];
+  /** Filtered total in the directory. */
+  readonly total: number;
+}
+
+/**
+ * Names-only listing for `memory_recall` (never content, never throws):
+ * newest first, bounded to `limit`. A missing/unreadable directory resolves
+ * to an empty listing.
+ */
+export async function listHandoffs(
+  memoryRoot: string,
+  subdir: "root" | "archive",
+  limit = 20,
+): Promise<HandoffListing> {
+  try {
+    const dir = subdir === "archive" ? join("handoffs", "archive") : "handoffs";
+    const sorted = sortedHandoffNames(await readdir(join(memoryRoot, dir)));
+    const total = sorted.length;
+    const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
+    return { names: sorted.reverse().slice(0, cap), total };
+  } catch {
+    return { names: [], total: 0 };
   }
 }
 
