@@ -386,7 +386,37 @@ describe("matchIndex", () => {
       indexContent: INDEX,
     });
     expect(hint).toMatch(/^\[memory-hint\] Past decisions mention `auth-service`/);
+    expect(hint).toContain('Call memory_recall("decisions.md")');
     expect(hint!.split("\n")).toHaveLength(1);
+  });
+
+  it("calls the structural file its INDEX line maps to", async () => {
+    const index =
+      "- architecture: contracts and sibling implementations\n" +
+      "- auth-service: login flow in src/auth.ts\n";
+    const hint = await matchIndex(
+      [userMessage("tell me about the architecture")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: index,
+      },
+    );
+    expect(hint).toContain('Call memory_recall("architecture.md")');
+  });
+
+  it("defaults to decisions.md for lines without a structural stem", async () => {
+    const hint = await matchIndex(
+      [userMessage("how does auth-service login work?")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: INDEX, // existing fixture: no structural stems
+      },
+    );
+    expect(hint).toContain('Call memory_recall("decisions.md")');
   });
 
   it("throttles to once per prompt", async () => {
