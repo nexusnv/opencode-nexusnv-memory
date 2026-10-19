@@ -175,8 +175,13 @@ export default Plugin.define({
               bump("index.overCap");
               if (indexCount !== undefined && indexCount > options.indexLines) {
                 // Over-cap (not missing): report the count once on the
-                // status line.
-                await setNotice(ledger, projectID, "indexOverCap", indexCount);
+                // status line. Best-effort: a rejected notice write must not
+                // skip the rest of this hook (e.g. the remember fast path).
+                try {
+                  await setNotice(ledger, projectID, "indexOverCap", indexCount);
+                } catch (error) {
+                  logDiagnostic(error);
+                }
               }
             }
           } else {

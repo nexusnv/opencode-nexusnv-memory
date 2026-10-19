@@ -531,6 +531,13 @@ describe("statusLine", () => {
     expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
   });
 
+  it("uses the cap-free wording without an options argument", async () => {
+    await setNotice(storage, PROJECT, "indexOverCap", 31);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("INDEX.md is 31 lines (over cap)");
+    expect(line).toContain("not attached");
+  });
+
   it("reports skipped failure captures once, then clears the notice", async () => {
     await setNotice(storage, PROJECT, "captureFailed", 2);
     const line = await statusLine(storage, PROJECT);
@@ -603,6 +610,11 @@ describe("scaffold noise pruning", () => {
     await writeMemory("activeContext.md", LEGACY_ACTIVE_CONTEXT);
     const brief = await loadBrief(memoryRoot);
     expect(brief).toBe("");
+  });
+
+  it("a BOM-prefixed legacy scaffold injects no brief", async () => {
+    await writeMemory("activeContext.md", `\uFEFF${LEGACY_ACTIVE_CONTEXT}`);
+    expect(await loadBrief(memoryRoot)).toBe("");
   });
 
   it("prunes placeholders and placeholder-only sections, keeps real content", async () => {

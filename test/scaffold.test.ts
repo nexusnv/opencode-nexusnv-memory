@@ -432,6 +432,26 @@ describe("agents_protocol_nudge", () => {
     }
   });
 
+  it("stays quiet on the first run even when AGENTS.md lacks the block", async () => {
+    resetInstallNudgesForTests();
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-nudge-first-"));
+    await writeFile(join(projectRoot, "AGENTS.md"), "# Repo guide\n", "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      const cleanup = await setup(installCtx(projectRoot));
+      const nudged = warn.mock.calls.some((c) =>
+        String(c[0]).includes("no memory protocol block"),
+      );
+      expect(nudged).toBe(false);
+      await cleanup?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("stays quiet when AGENTS.md has the block or is absent", async () => {
     resetInstallNudgesForTests();
     const withBlock = await mkdtemp(join(tmpdir(), "memory-nudge2-"));

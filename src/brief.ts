@@ -168,6 +168,15 @@ const SCAFFOLD_PLACEHOLDERS: ReadonlySet<string> = new Set([
 
 const COMMENT_ONLY_LINE = /^\s*<!--.*-->\s*$/;
 const HEADING_LINE = /^(#{1,6})\s+/;
+const BOM = "\uFEFF";
+
+/**
+ * Drop a leading BOM (only ever the first char of a hand-edited file's first
+ * line): it must not hide a heading or turn scaffold noise into content.
+ */
+function withoutBom(line: string): string {
+  return line.startsWith(BOM) ? line.slice(BOM.length) : line;
+}
 
 /** Blank, comment-only, or a legacy scaffold placeholder bullet. Pure. */
 function isScaffoldNoise(line: string): boolean {
@@ -187,7 +196,7 @@ export function pruneScaffoldNoise(lines: readonly string[]): string[] {
   try {
     const kept: string[] = [];
     for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i]!;
+      const line = withoutBom(lines[i]!);
       if (isScaffoldNoise(line)) continue;
       const heading = HEADING_LINE.exec(line);
       if (heading) {
@@ -197,7 +206,7 @@ export function pruneScaffoldNoise(lines: readonly string[]): string[] {
         const level = heading[1]!.length;
         let hasContent = false;
         for (let j = i + 1; j < lines.length; j += 1) {
-          const next = lines[j]!;
+          const next = withoutBom(lines[j]!);
           const nextHeading = HEADING_LINE.exec(next);
           if (nextHeading) {
             if (nextHeading[1]!.length <= level) break;
