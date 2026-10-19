@@ -93,7 +93,7 @@ const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 /** §9/§1.3 G-M1 line: first six chars of the sessionID, verbatim text. */
 const G_M1_LINE = `[memory-metrics] synthetic posted (${SESSION6}); confirm the table rendered without a model turn`;
 
-/** README deploy-check line for the §5.9 event delivery gate (§1.3 G1). */
+/** CONTRIBUTING deploy-check line for the §5.9 event delivery gate (§1.3 G1). */
 const DEPLOY_EVENT_LINE =
   "[memory-deploy] observed event.type: session.compaction.ended, session.compaction.started, session.idle";
 
@@ -1679,21 +1679,21 @@ describe("acceptance-metrics §9 gates (real plugin.setup end-to-end)", () => {
     await rm(projectRoot, { recursive: true, force: true });
   });
 
-  it("readme_gate: README deploy-check carries BOTH gate lines", () => {
-    const readme = readFileSync(
-      resolve(import.meta.dirname!, "..", "README.md"),
+  it("contributing_gate: CONTRIBUTING deploy-check carries BOTH gate lines", () => {
+    const contributing = readFileSync(
+      resolve(import.meta.dirname!, "..", "CONTRIBUTING.md"),
       "utf8",
     );
     expect(
-      readme.includes(DEPLOY_EVENT_LINE),
-      "event.type delivery gate line in the README deploy check",
+      contributing.includes(DEPLOY_EVENT_LINE),
+      "event.type delivery gate line in the CONTRIBUTING deploy check",
     ).toBe(true);
     expect(
-      readme.includes(
+      contributing.includes(
         "[memory-metrics] synthetic posted (<session6>); confirm the table rendered without a model turn",
       ),
-      "G-M1 line in the README deploy check",
+      "G-M1 line in the CONTRIBUTING deploy check",
     ).toBe(true);
-    expect(readme).toMatch(/## Deploy check/);
+    expect(contributing).toMatch(/### Deploy checks/);
   });
 });
