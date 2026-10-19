@@ -19,7 +19,7 @@ import {
   truncateLinesWithNotice,
 } from "./brief.js";
 import { matchIndex } from "./hints.js";
-import { statusLine } from "./status.js";
+import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
@@ -214,9 +214,6 @@ export default Plugin.define({
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
           });
-          const status = await statusLine(ledger, projectID, {
-            indexLines: options.indexLines,
-          });
           const hint = await matchIndex(event.messages, {
             storage: ledger,
             projectID,
@@ -232,17 +229,30 @@ export default Plugin.define({
             0,
             options.injectBudgetLines - options.indexLines,
           );
+          const budgetHintCount = hint !== undefined ? 1 : 0;
+          // `statusLine` CONSUMES the notices it reports, so render it only
+          // when the budget can carry it: a computed-then-dropped line would
+          // silently lose its notices. When it cannot fit, classify a
+          // would-be line from a pure read — nothing is consumed and the
+          // notices stay queued for a later turn.
+          const statusFits = budget >= budgetHintCount + 1;
+          const status = statusFits
+            ? await statusLine(ledger, projectID, {
+                indexLines: options.indexLines,
+              })
+            : undefined;
+          const statusDroppedByBudget =
+            !statusFits && (await hasStatusLine(ledger, projectID));
           const rawBrief = brief === "" ? [] : brief.split("\n");
           let briefLines = rawBrief;
           let keepStatus = status !== undefined;
           // Classifier flags, set at their true sites (M-T3 hygiene): the
           // truncation classifier is "a budget branch ran" and the status
-          // drop classifier is "a computed status line was dropped below" —
-          // never a reference comparison against `rawBrief`
+          // drop classifier is computed above (a would-be line the budget
+          // cannot carry) — never a reference comparison against `rawBrief`
           // (`truncateLinesWithNotice` returning a fresh array is not a
           // documented contract to lean on).
           let briefTruncated = false;
-          let statusDroppedByBudget = false;
           const hintKept = hint !== undefined;
           const hintCount = hintKept ? 1 : 0;
           const total = () =>
@@ -255,10 +265,9 @@ export default Plugin.define({
             briefTruncated = true;
           }
           if (total() > budget) {
-            // Only a COMPUTED status line counts as dropped by the budget:
-            // with no status, keepStatus is false from the start and there
-            // is nothing to drop.
-            if (keepStatus) statusDroppedByBudget = true;
+            // With `statusFits` false above, `status` (and so `keepStatus`)
+            // is already false when the budget cannot carry the line; this
+            // branch then only re-truncates the brief.
             keepStatus = false;
             briefLines = truncateLinesWithNotice(
               rawBrief,
@@ -287,9 +296,8 @@ export default Plugin.define({
             event.system.push({ type: "text", text: status });
             bump("status.shown");
           } else if (statusDroppedByBudget) {
-            // A computed status line dropped by the budget
-            // (statusDroppedByBudget is set exactly where keepStatus
-            // flips false above): never dropped on a hint hit.
+            // A status line the budget could not carry, classified above by
+            // a pure read: the notices were NOT consumed and stay queued.
             bump("status.dropped");
           }
           if (hint !== undefined) {

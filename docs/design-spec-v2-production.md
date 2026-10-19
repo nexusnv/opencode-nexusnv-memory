@@ -471,10 +471,10 @@ registrations.push(await ctx.tool.hook("execute.after", async (event) => {
   documented failure boundary with a typed status. `event.subscribe` remains a diagnostic log (G1).
 
 Tier-0 amendment (2026-10-19): a failure capture whose capped append is rejected (`activeContext.md`
-over cap / no rotatable Known-errors block) resolves
+over cap, no rotatable Known-errors block, or a file I/O error) resolves
 `{ reason: "failed", failureKind: "write-rejected" }` and increments the count-only
 `<projectID>/notice.captureFailed` notice; the status line reports it once
-(`<n> failure capture(s) skipped: memory write rejected (over cap or no rotatable Known-errors block); fix the file or run /memory-review`). Counters/logs are unchanged; other failed outcomes do
+(`<n> failure capture(s) skipped: memory write rejected (over cap, no rotatable Known-errors block, or file I/O); fix the file or run /memory-review`). Counters/logs are unchanged; other failed outcomes do
 not notice.
 
 ### 5.4 `memory_recall` tool (US-11, AS-02/03, HS-04)
@@ -632,10 +632,15 @@ registrations.push(await ctx.session.hook("compaction", async (event) => {
   - **Tier-0 amendment (2026-10-19):** two additional best-effort facts share the line. **Over-cap
     INDEX notice:** when the `prompt` hook sees an over-cap `INDEX.md` it records
     `<projectID>/notice.indexOverCap` with the line count (missing/unreadable stays silent);
-    `statusLine()` emits `[memory] INDEX.md is <n> lines (cap <m>); not attached — trim it to restore auto-injection`, clears the notice after reporting (read-then-clear like the rotation marker),
+    `statusLine()` emits `[memory] INDEX.md is <n> lines (cap <m>); not attached — trim it to restore auto-injection`, and consumes the notice atomically when reporting
+    (read-then-remove under one write lock, so a concurrent re-set survives for the next line),
     and the next `prompt` admission re-sets it while the file stays over cap. **Skipped-capture
-    notice (count-only; §5.3):** `[memory] <n> failure capture(s) skipped: memory write rejected (over cap or no rotatable Known-errors block); fix the file or run /memory-review`, cleared after
-    reporting.
+    notice (count-only; §5.3):** `[memory] <n> failure capture(s) skipped: memory write rejected (over cap, no rotatable Known-errors block, or file I/O); fix the file or run /memory-review`, consumed
+    atomically when reported.
+  - **Tier-0 amendment (2026-10-19, delivery rule):** the `context` hook renders `statusLine()` only
+    when the injection budget can carry the line; when it cannot, `hasStatusLine()` classifies a
+    would-be line from a pure read — nothing is consumed, so the notices stay queued for a later
+    turn instead of being lost with a dropped line.
 - `snapshotHandoffIfChanged()`: resolves the memory root for the **event's** session/location (event
   `location.directory` + `data.sessionID`, falling back to `ctx.location`), never from a root captured
   once at load; `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await (ctx.vcs.branch?.list ?? ctx.vcs.branches)()).data[0] ?? "unknown"`, warn-only);

@@ -316,14 +316,23 @@ export async function incNotice(
   });
 }
 
-/** Clear a notice after `statusLine()` reports it. */
-export async function clearNotice(
+/**
+ * Atomically read-and-clear a notice (one write lock): the value is consumed
+ * exactly once, and an increment that lands after the clear recreates the
+ * key, so a concurrent failure capture is never silently dropped.
+ */
+export async function takeNotice(
   storage: LedgerStorage,
   projectID: string,
   kind: NoticeKind,
-): Promise<void> {
-  await withWriteLock(async () => {
+): Promise<number | undefined> {
+  return withWriteLock(async () => {
+    const value = await storage.get(noticeKey(projectID, kind));
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      return undefined;
+    }
     await storage.remove(noticeKey(projectID, kind));
+    return value;
   });
 }
 

@@ -93,7 +93,7 @@ On setup the plugin emits an unconditional loud warning that this rule must be i
 
 ## Budgets
 
-`INDEX.md` ≤ 30 lines on disk; `activeContext`/`architecture`/`style`/`issues` ≤ 60 lines; `decisions.md` unbounded with a ≤60-line injectable tail; handoffs ≤ 60 lines/file. Auto-inject payload = `INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1` (≤80 total). An over-cap `INDEX.md` is not attached (the `[memory]` status line reports it with its line count until trimmed); `/memory-review` reports the violation instead. A failure capture whose append is rejected (activeContext at cap without a rotatable Known-errors block) is reported on the status line too — fix the file or run `/memory-review`.
+`INDEX.md` ≤ 30 lines on disk; `activeContext`/`architecture`/`style`/`issues` ≤ 60 lines; `decisions.md` unbounded with a ≤60-line injectable tail; handoffs ≤ 60 lines/file. Auto-inject payload = `INDEX ≤30 + brief ≤48 + status ≤1 + hint ≤1` (≤80 total). An over-cap `INDEX.md` is not attached (the `[memory]` status line reports it with its line count until trimmed); `/memory-review` reports the violation instead. A failure capture whose append is rejected (activeContext at cap without a rotatable Known-errors block, or a file I/O error) is reported on the status line too — fix the file or run `/memory-review`. When the budget cannot carry the status line, its notices stay queued for the next turn.
 
 Handoffs are listed names-only via `memory_recall` (`file: "handoffs"` newest first; `file: "handoffs/archive"` for rotated/archived entries) — recall one by its full `handoffs/…` path.
 

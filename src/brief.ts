@@ -19,7 +19,12 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { countLines, readCapped, resolveMemoryRoot } from "./files.js";
+import {
+  countLines,
+  readCapped,
+  resolveMemoryRoot,
+  splitTruncationNotice,
+} from "./files.js";
 import { sanitizeForBrief, UNTRUSTED_LABEL } from "./guard.js";
 import { redact } from "./redact.js";
 
@@ -395,10 +400,15 @@ export async function loadPriors(
     // treat priors as trusted instructions.
     lines.push(UNTRUSTED_LABEL);
     if (active.trim().length > 0) {
-      const activeLines = pruneScaffoldNoise(active.split("\n"));
+      // The loader-generated truncation notice is not content: a truncated
+      // fresh scaffold injects no section, and the notice rides after real
+      // content only.
+      const { body, notice } = splitTruncationNotice(active);
+      const activeLines = pruneScaffoldNoise(body.split("\n"));
       if (activeLines.length > 0) {
         lines.push("## active context");
         lines.push(...activeLines);
+        if (notice !== undefined) lines.push(notice);
       }
     }
     if (tail.trim().length > 0) {

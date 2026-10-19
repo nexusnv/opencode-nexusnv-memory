@@ -538,10 +538,25 @@ describe("statusLine", () => {
     expect(line).toContain("not attached");
   });
 
+  it("retains a notice when the budget drops the status line", async () => {
+    await setNotice(storage, PROJECT, "captureFailed", 1);
+    const { hooks } = await setupHooks({ injectBudgetLines: 5 }, storage);
+    const event = contextEvent([userMessage("hello there")]);
+    await runHook(hooks, "context", event);
+    expect(event.system.some((p) => p.text.startsWith("[memory] "))).toBe(
+      false,
+    );
+    // Not consumed by the dropped line: the next render still reports it.
+    expect(await statusLine(storage, PROJECT)).toContain(
+      "1 failure capture(s) skipped",
+    );
+  });
+
   it("reports skipped failure captures once, then clears the notice", async () => {
     await setNotice(storage, PROJECT, "captureFailed", 2);
     const line = await statusLine(storage, PROJECT);
     expect(line).toContain("2 failure capture(s) skipped");
+    expect(line).toContain("file I/O");
     expect(line).toContain("run /memory-review");
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
   });
@@ -587,6 +602,27 @@ describe("loadPriors", () => {
 
   it("never throws", async () => {
     await expect(loadPriors("/nonexistent-root-xyz")).resolves.toBe("");
+  });
+
+  it("a truncated fresh activeContext contributes no priors section", async () => {
+    await writeMemory("activeContext.md", getScaffoldFiles()["activeContext.md"]!);
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).not.toContain("## active context");
+    expect(priors).not.toContain("[truncated");
+  });
+
+  it("keeps the truncation notice when real priors content survives", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "- real goal survives",
+        ...Array.from({ length: 20 }, (_, i) => `- filler ${i}`),
+      ].join("\n") + "\n",
+    );
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).toContain("real goal survives");
+    expect(priors).toContain("[truncated:");
   });
 });
 

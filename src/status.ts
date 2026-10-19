@@ -6,21 +6,24 @@
  * Four fixed-threshold facts share the line, joined with `; `: the
  * over-cap INDEX notice (re-set on prompt admission while the condition
  * persists; the `<projectID>/notice.indexOverCap` marker carries the actual
- * line count and is cleared after reporting), the rotation notice (once —
- * the `<projectID>/curation.rotated` marker is cleared after reporting;
- * concurrent `context` calls may double-emit once, which is benign), the
- * skipped-capture notice (count only — the `<projectID>/notice.captureFailed`
- * marker is cleared after reporting) and the review-due nudge (while
- * scratchpad-only `<projectID>/curation.pending` is ≥5). Under budget
- * pressure the caller drops this line before the hint line. Async, never
- * throws.
+ * line count and is consumed atomically when reported), the rotation notice
+ * (once — the `<projectID>/curation.rotated` marker is cleared after
+ * reporting; concurrent `context` calls may double-emit once, which is
+ * benign), the skipped-capture notice (count only — the
+ * `<projectID>/notice.captureFailed` marker is consumed atomically when
+ * reported) and the review-due nudge (while scratchpad-only
+ * `<projectID>/curation.pending` is ≥5). Under budget pressure the caller
+ * drops this line before the hint line; the `context` hook renders it only
+ * when the budget can carry it (`hasStatusLine` classifies a would-be drop
+ * from a pure read), so a dropped status never loses its notices. Async,
+ * never throws.
  */
 import {
-  clearNotice,
   clearRotated,
   getNotice,
   getPending,
   getRotated,
+  takeNotice,
   type LedgerStorage,
 } from "./capture.js";
 import { redact } from "./redact.js";
@@ -35,7 +38,8 @@ export interface StatusLineOptions {
 
 /**
  * At most one `[memory]` status line, or `undefined` when there is nothing
- * to report. Async, never throws.
+ * to report. Consumes the notices it reports (atomically). Async, never
+ * throws.
  */
 export async function statusLine(
   storage: LedgerStorage,
@@ -44,18 +48,13 @@ export async function statusLine(
 ): Promise<string | undefined> {
   try {
     const facts: string[] = [];
-    const overCap = await getNotice(storage, projectID, "indexOverCap");
+    const overCap = await takeNotice(storage, projectID, "indexOverCap");
     if (overCap !== undefined) {
       facts.push(
         options?.indexLines !== undefined
           ? `INDEX.md is ${overCap} lines (cap ${options.indexLines}); not attached — trim it to restore auto-injection`
           : `INDEX.md is ${overCap} lines (over cap); not attached — trim it to restore auto-injection`,
       );
-      try {
-        await clearNotice(storage, projectID, "indexOverCap");
-      } catch {
-        // Best-effort: a failed clear re-emits once next turn (benign).
-      }
     }
     const rotated = await getRotated(storage, projectID);
     if (rotated !== undefined) {
@@ -68,16 +67,11 @@ export async function statusLine(
         // Best-effort: a failed clear re-emits once next turn (benign).
       }
     }
-    const skipped = await getNotice(storage, projectID, "captureFailed");
+    const skipped = await takeNotice(storage, projectID, "captureFailed");
     if (skipped !== undefined) {
       facts.push(
-        `${skipped} failure capture(s) skipped: memory write rejected (over cap or no rotatable Known-errors block); fix the file or run /memory-review`,
+        `${skipped} failure capture(s) skipped: memory write rejected (over cap, no rotatable Known-errors block, or file I/O); fix the file or run /memory-review`,
       );
-      try {
-        await clearNotice(storage, projectID, "captureFailed");
-      } catch {
-        // Best-effort: a failed clear re-emits once next turn (benign).
-      }
     }
     const pending = await getPending(storage, projectID);
     if (pending >= REVIEW_DUE_PENDING) {
@@ -92,5 +86,29 @@ export async function statusLine(
     return line.length > 0 ? line : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Pure read: does `statusLine` have anything to report right now? Used by
+ * the `context` hook to classify a budget-dropped status line without
+ * consuming its notices — a dropped line must stay queued for a later turn.
+ * Keep the fact sources in sync with `statusLine` above. Never throws.
+ */
+export async function hasStatusLine(
+  storage: LedgerStorage,
+  projectID: string,
+): Promise<boolean> {
+  try {
+    if ((await getRotated(storage, projectID)) !== undefined) return true;
+    if ((await getNotice(storage, projectID, "indexOverCap")) !== undefined) {
+      return true;
+    }
+    if ((await getNotice(storage, projectID, "captureFailed")) !== undefined) {
+      return true;
+    }
+    return (await getPending(storage, projectID)) >= REVIEW_DUE_PENDING;
+  } catch {
+    return false;
   }
 }
