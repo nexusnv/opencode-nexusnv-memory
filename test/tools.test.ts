@@ -9,6 +9,7 @@ import {
   MEMORY_RECALL_DESCRIPTION,
   createMemoryApplyExecute,
   createMemoryRecallExecute,
+  createMemorySearchExecute,
   registerMemoryTools,
   toolResult,
   type ApplyToolContext,
@@ -462,6 +463,7 @@ describe("tools", () => {
       "memory_apply",
       "memory_metrics",
       "memory_recall",
+      "memory_search",
     ]);
     for (const tool of added) {
       expect(tool.description.length).toBeGreaterThan(0);
@@ -472,6 +474,19 @@ describe("tools", () => {
     await expect(
       recall.execute({ file: "INDEX.md" }, TOOL_CTX),
     ).resolves.toEqual({ content: expect.stringContaining("wired: yes") });
+    const search = added.find((t) => t.name === "memory_search")!;
+    await expect(
+      search.execute({ query: "wired", file: "INDEX.md" }, TOOL_CTX),
+    ).resolves.toEqual({
+      content: expect.stringContaining("- INDEX.md:1: - wired: yes"),
+    });
+    await expect(
+      search.execute({ query: "", file: "INDEX.md" }, TOOL_CTX),
+    ).rejects.toThrow("[memory] memory_search query must be a non-empty string");
+    const direct = createMemorySearchExecute({ memoryRoot: root });
+    await expect(direct({ query: "x", file: 42 })).rejects.toThrow(
+      "[memory] memory_search file must be a string",
+    );
     await expect(registration.dispose()).resolves.toBeUndefined();
   });
 

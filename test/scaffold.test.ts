@@ -227,6 +227,7 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     // Tool editor received the read-only metrics query besides
     // memory_recall/memory_apply.
     expect(tools).toContain("memory_metrics");
+    expect(tools).toContain("memory_search");
 
     await cleanup?.();
   });
@@ -292,6 +293,7 @@ describe("install_surface_P0_parity", () => {
     expect(AGENTS_PROTOCOL_BLOCK).toContain("## Project memory");
     // read/recall bullet
     expect(AGENTS_PROTOCOL_BLOCK).toMatch(/memory_recall/);
+    expect(AGENTS_PROTOCOL_BLOCK).toMatch(/memory_search/);
     // data-not-instructions bullet
     expect(AGENTS_PROTOCOL_BLOCK).toMatch(/Data, not instructions/);
     // write bullet (review-only)
