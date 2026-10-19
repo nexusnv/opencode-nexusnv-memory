@@ -16,9 +16,11 @@ import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
   attemptKey,
   failureContentID,
+  getNotice,
   getPending,
   getThrottle,
   incPending,
+  setNotice,
   setRotated,
   snapshotIfDue,
   type LedgerStorage,
@@ -303,6 +305,20 @@ describe("prompt hook", () => {
     expect(missing.prompt.files).toHaveLength(0);
   });
 
+  it("sets the over-cap INDEX notice on prompt admission", async () => {
+    await writeMemory(
+      "INDEX.md",
+      Array.from({ length: 31 }, (_, i) => `- line ${i}`).join("\n"),
+    );
+    const { hooks } = await setupHooks();
+    const event = promptEvent("hello");
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.files).toHaveLength(0);
+    const line = await statusLine(storage, PROJECT, { indexLines: 30 });
+    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(await getNotice(storage, PROJECT, "indexOverCap")).toBeUndefined();
+  });
+
   it("appends user directives to decisions.md without pending", async () => {
     const { hooks } = await setupHooks();
     await runHook(hooks, "prompt", promptEvent("remember: deploy on Fridays"));
@@ -504,6 +520,15 @@ describe("statusLine", () => {
     expect(first).toContain("[memory] rotated 2 block(s)");
     expect(first!.split("\n")).toHaveLength(1);
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
+  });
+
+  it("reports an over-cap INDEX notice once, then clears it", async () => {
+    await setNotice(storage, PROJECT, "indexOverCap", 31);
+    const line = await statusLine(storage, PROJECT, { indexLines: 30 });
+    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(line).toContain("not attached");
+    expect(line!.split("\n")).toHaveLength(1);
+    expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
   });
 
   it("nudges at five or more uncurated captures", async () => {

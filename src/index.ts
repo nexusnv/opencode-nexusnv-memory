@@ -5,13 +5,14 @@ import { pathToFileURL } from "node:url";
 import {
   captureFailure,
   dispatchEvent,
+  setNotice,
   snapshotIfDue,
   startEventLoop,
   type LedgerStorage,
   type VcsPort,
 } from "./capture.js";
 import {
-  indexWithinCap,
+  indexLineCount,
   loadBrief,
   loadPriors,
   truncateLinesWithNotice,
@@ -156,11 +157,17 @@ export default Plugin.define({
           );
           if (!already) {
             // Over-cap/missing/unreadable INDEX is not attached (no truncation).
-            if (await indexWithinCap(abs, options.indexLines)) {
+            const indexCount = await indexLineCount(abs);
+            if (indexCount !== undefined && indexCount <= options.indexLines) {
               event.prompt.files.push({ uri: expectedIndexUri });
               bump("index.attach");
             } else {
               bump("index.overCap");
+              if (indexCount !== undefined && indexCount > options.indexLines) {
+                // Over-cap (not missing): report the count once on the
+                // status line.
+                await setNotice(ledger, projectID, "indexOverCap", indexCount);
+              }
             }
           } else {
             bump("index.already");
@@ -192,7 +199,9 @@ export default Plugin.define({
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
           });
-          const status = await statusLine(ledger, projectID);
+          const status = await statusLine(ledger, projectID, {
+            indexLines: options.indexLines,
+          });
           const hint = await matchIndex(event.messages, {
             storage: ledger,
             projectID,

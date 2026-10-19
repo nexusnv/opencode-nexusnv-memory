@@ -268,6 +268,65 @@ export async function clearRotated(
   });
 }
 
+/** Transient status notices (numbers only, cleared after reporting). */
+export type NoticeKind = "indexOverCap" | "captureFailed";
+
+/** `<projectID>/notice.<kind>` → transient notice value (positive int). */
+export function noticeKey(projectID: string, kind: NoticeKind): string {
+  return `${projectPrefix(projectID)}notice.${kind}`;
+}
+
+/** Notice value, or `undefined` when unset/invalid. */
+export async function getNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<number | undefined> {
+  const value = await storage.get(noticeKey(projectID, kind));
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/** Record a positive-int notice value. */
+export async function setNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+  value: number,
+): Promise<void> {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("[memory] ledger notice value must be a positive int");
+  }
+  await withWriteLock(async () => {
+    await storage.set(noticeKey(projectID, kind), value);
+  });
+}
+
+/** Increment a notice counter (read-modify-write under the mutex). */
+export async function incNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<number> {
+  return withWriteLock(async () => {
+    const next = asCount(await storage.get(noticeKey(projectID, kind))) + 1;
+    await storage.set(noticeKey(projectID, kind), next);
+    return next;
+  });
+}
+
+/** Clear a notice after `statusLine()` reports it. */
+export async function clearNotice(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+): Promise<void> {
+  await withWriteLock(async () => {
+    await storage.remove(noticeKey(projectID, kind));
+  });
+}
+
 /** Last snapshot content hash for the session, if any. */
 export async function getSnapshotHash(
   storage: LedgerStorage,

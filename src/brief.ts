@@ -63,20 +63,35 @@ export function truncateLinesWithNotice(
 }
 
 /**
+ * Async INDEX line count for the `prompt` hook: missing/unreadable/invalid
+ * resolves `undefined` (never throws), so the caller can distinguish
+ * "missing" (silent) from "over cap" (report the count).
+ */
+export async function indexLineCount(
+  absPath: string,
+): Promise<number | undefined> {
+  try {
+    if (typeof absPath !== "string" || absPath.length === 0) return undefined;
+    return countLines(await readFile(absPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Async INDEX cap check for the `prompt` hook: read + line count against
- * `indexLines`. Missing, over-cap, or unreadable resolves `false` (no
- * attach, never throws). A file attachment cannot be truncated, so an
- * over-cap INDEX is skipped, not attached in part.
+ * `indexLines` (delegates to `indexLineCount`). Missing, over-cap, or
+ * unreadable resolves `false` (no attach, never throws). A file attachment
+ * cannot be truncated, so an over-cap INDEX is skipped, not attached in part.
  */
 export async function indexWithinCap(
   absPath: string,
   indexLines: number = DEFAULT_MEMORY_OPTIONS.indexLines,
 ): Promise<boolean> {
   try {
-    if (typeof absPath !== "string" || absPath.length === 0) return false;
     if (!Number.isInteger(indexLines) || indexLines <= 0) return false;
-    const raw = await readFile(absPath, "utf8");
-    return countLines(raw) <= indexLines;
+    const count = await indexLineCount(absPath);
+    return count !== undefined && count <= indexLines;
   } catch {
     return false;
   }
