@@ -14,6 +14,7 @@ import {
   permissionsSnippet,
 } from "../src/templates.js";
 import { MEMORY_METRICS_COMMAND_DESCRIPTION } from "../src/metrics.js";
+import { MEMORY_STATUS_COMMAND_DESCRIPTION } from "../src/status-report.js";
 
 const root = resolve(import.meta.dirname!, "..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
@@ -209,12 +210,19 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
       },
     });
 
-    // Command editor received BOTH plugin commands, in setup order
-    // (memory-review first, then memory-metrics).
-    expect([...commands.keys()]).toEqual(["memory-review", "memory-metrics"]);
-    // And the registered description is exactly the plugin constant.
+    // Command editor received ALL plugin commands, in setup order
+    // (memory-review, memory-metrics, memory-status).
+    expect([...commands.keys()]).toEqual([
+      "memory-review",
+      "memory-metrics",
+      "memory-status",
+    ]);
+    // And the registered descriptions are exactly the plugin constants.
     expect(commands.get("memory-metrics")).toBe(
       MEMORY_METRICS_COMMAND_DESCRIPTION,
+    );
+    expect(commands.get("memory-status")).toBe(
+      MEMORY_STATUS_COMMAND_DESCRIPTION,
     );
     // The file-based metrics stub mirrors the review stub's contract.
     expect(
@@ -223,11 +231,18 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
       ),
       "metrics stub frontmatter description is byte-exact",
     ).toBe(true);
+    expect(
+      read("commands/memory-status.md").startsWith(
+        '---\ndescription: "Read-only memory plugin status: install checks, budgets, capture activity, and next actions"\n---\n',
+      ),
+      "status stub frontmatter description is byte-exact",
+    ).toBe(true);
 
     // Tool editor received the read-only metrics query besides
-    // memory_recall/memory_apply.
+    // memory_recall/memory_apply, plus search and status.
     expect(tools).toContain("memory_metrics");
     expect(tools).toContain("memory_search");
+    expect(tools).toContain("memory_status");
 
     await cleanup?.();
   });
