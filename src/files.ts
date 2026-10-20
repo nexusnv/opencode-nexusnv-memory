@@ -3,7 +3,7 @@
  *
  * Every later writer/loader routes through `readCapped`/`writeCapped`:
  * allowlist + handoff regex + traversal rejects + cap/notice + redaction +
- * per-process write mutex. `activeContext.md` rotates the oldest
+ * per-process mutex + cross-process root lock. `activeContext.md` rotates the oldest
  * Known-Errors block to `handoffs/archive/` instead of throwing at the cap.
  *
  * All file IO via `node:fs/promises` (async only).
@@ -479,9 +479,7 @@ export async function readFullRedacted(
     // that redaction needs. Drop the incomplete final line; complete lines
     // before the guard keep their on-disk line numbers.
     const text =
-      size > SEARCH_FILE_BYTES
-        ? raw.slice(0, raw.lastIndexOf("\n") + 1)
-        : raw;
+      size > SEARCH_FILE_BYTES ? raw.slice(0, raw.lastIndexOf("\n") + 1) : raw;
     return {
       text: redactPreservingLines(text),
       truncated: size > SEARCH_FILE_BYTES,
@@ -594,12 +592,7 @@ export async function readContainedLines(
       return true;
     };
     outer: for (;;) {
-      const { bytesRead } = await handle.read(
-        chunk,
-        0,
-        chunk.length,
-        null,
-      );
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
       if (bytesRead === 0) break;
       carry += decoder.write(chunk.subarray(0, bytesRead));
       let newline = carry.indexOf("\n");
@@ -688,10 +681,14 @@ async function assertContainedAncestors(
       }
       const targetInfo = await stat(current);
       if (!targetInfo.isDirectory()) {
-        throw new Error(`[memory] rejected non-directory memory parent: ${current}`);
+        throw new Error(
+          `[memory] rejected non-directory memory parent: ${current}`,
+        );
       }
     } else if (!info.isDirectory()) {
-      throw new Error(`[memory] rejected non-directory memory parent: ${current}`);
+      throw new Error(
+        `[memory] rejected non-directory memory parent: ${current}`,
+      );
     }
   }
 }
@@ -703,7 +700,9 @@ async function assertContainedDirectory(
   const realRoot = await realpath(root);
   const realDir = await realpath(directory);
   if (realDir !== realRoot && !realDir.startsWith(`${realRoot}${sep}`)) {
-    throw new Error(`[memory] rejected symlink escape from memory root: ${directory}`);
+    throw new Error(
+      `[memory] rejected symlink escape from memory root: ${directory}`,
+    );
   }
 }
 
@@ -836,7 +835,9 @@ async function writeRedactedCapped(
     allLines.length > 0 && allLines[allLines.length - 1] === ""
       ? allLines.slice(0, -1)
       : allLines;
-  const headingIdx = working.findIndex((l) => KNOWN_ERRORS_HEADING.test(l.trim()));
+  const headingIdx = working.findIndex((l) =>
+    KNOWN_ERRORS_HEADING.test(l.trim()),
+  );
   if (headingIdx === -1) {
     throw new Error(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
@@ -854,7 +855,10 @@ async function writeRedactedCapped(
   let removedCount = 0;
   const rotated: string[] = [];
   let blockCursor = 0;
-  while (countLines(remaining.join("\n")) > limit && blockCursor < blocks.length) {
+  while (
+    countLines(remaining.join("\n")) > limit &&
+    blockCursor < blocks.length
+  ) {
     const block = blocks[blockCursor]!;
     const start = block.start - removedCount;
     const len = block.end - block.start;
@@ -879,7 +883,9 @@ async function writeRedactedCapped(
     );
     if (outcome === "created") break;
     if (attempt === 4) {
-      throw new Error("[memory] could not allocate a unique rotation archive name");
+      throw new Error(
+        "[memory] could not allocate a unique rotation archive name",
+      );
     }
     archiveRel = rotatedArchiveName();
   }
@@ -970,7 +976,13 @@ export async function withCappedTransaction<T>(
       read: (file) => readRawForMutation(file, root, "throw"),
       write: async (file, text) => {
         assertAllowedPath(file);
-        await writeRedactedCapped(file, redact(text), root, indexLines, fileLines);
+        await writeRedactedCapped(
+          file,
+          redact(text),
+          root,
+          indexLines,
+          fileLines,
+        );
       },
       writeArchive: async (file, text) => {
         assertAllowedPath(file);
@@ -986,7 +998,10 @@ export async function withCappedTransaction<T>(
         );
       },
       removeHandoff: async (file) => {
-        if (!HANDOFF_PATTERN.test(file) || file.startsWith("handoffs/archive/")) {
+        if (
+          !HANDOFF_PATTERN.test(file) ||
+          file.startsWith("handoffs/archive/")
+        ) {
           throw new Error(
             `[memory] remove rejected: root handoffs only: ${file}`,
           );

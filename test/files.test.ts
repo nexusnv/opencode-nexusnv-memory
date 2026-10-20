@@ -14,7 +14,10 @@ import {
   SEARCH_FILE_BYTES,
   publishAtomicForTests,
   readCapped,
+  readContainedLines,
+  readContainedText,
   readFullRedacted,
+  readHandoffDirectory,
   updateCapped,
   writeCapped,
   writeNewCapped,
@@ -62,9 +65,7 @@ describe("rejects_traversal_and_enforces_caps", () => {
   it("rejects non-allowlisted names but allows handoff pattern", async () => {
     await expect(readCapped("random.md", opts())).rejects.toThrow();
     await expect(writeCapped("random.md", "x", opts())).rejects.toThrow();
-    await expect(
-      readCapped("handoffs/bad name!.md", opts()),
-    ).rejects.toThrow();
+    await expect(readCapped("handoffs/bad name!.md", opts())).rejects.toThrow();
 
     await writeCapped("handoffs/2026-10-15-120000-abcdef.md", "ok", opts());
     const out = await readCapped(
@@ -74,9 +75,9 @@ describe("rejects_traversal_and_enforces_caps", () => {
     expect(out).toContain("ok");
 
     await writeCapped("handoffs/archive/rotated-123.md", "archived", opts());
-    expect(await readCapped("handoffs/archive/rotated-123.md", opts())).toContain(
-      "archived",
-    );
+    expect(
+      await readCapped("handoffs/archive/rotated-123.md", opts()),
+    ).toContain("archived");
   });
 
   it("lists valid paths in the non-allowlisted rejection", async () => {
@@ -381,6 +382,54 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).not.toContain("https://");
     expect(full!.text).not.toContain("SuperSecretPW");
     expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
+  });
+});
+
+describe("contained read helpers", () => {
+  it("bounds full reads and reports truncation", async () => {
+    await writeFile(join(root, "style.md"), "x".repeat(128));
+    const out = await readContainedText("style.md", {
+      ...opts(),
+      maxBytes: 64,
+    });
+    expect(out?.truncated).toBe(true);
+    expect(out?.text).toHaveLength(64);
+  });
+
+  it("bounds line reads and refuses an oversized sparse line", async () => {
+    await writeFile(join(root, "style.md"), lines(10));
+    const out = await readContainedLines("style.md", {
+      ...opts(),
+      maxLines: 3,
+    });
+    expect(out?.lines).toEqual(["line-1", "line-2", "line-3"]);
+    expect(out?.truncated).toBe(true);
+
+    await writeFile(join(root, "style.md"), "x".repeat(4096));
+    const sparse = await readContainedLines("style.md", {
+      ...opts(),
+      maxLines: 5,
+      maxBytes: 64,
+    });
+    expect(sparse?.lines).toEqual([]);
+    expect(sparse?.truncated).toBe(true);
+  });
+
+  it("lists only the exact handoff directories", async () => {
+    await mkdir(join(root, "handoffs", "archive"), { recursive: true });
+    await writeFile(join(root, "handoffs", "2026-10-15-120000-abcdef.md"), "h");
+    await writeFile(join(root, "handoffs", "archive", "rotated-1.md"), "a");
+    expect((await readHandoffDirectory(root, "root")).sort()).toEqual([
+      "2026-10-15-120000-abcdef.md",
+      "archive",
+    ]);
+    expect(await readHandoffDirectory(root, "archive")).toEqual([
+      "rotated-1.md",
+    ]);
+
+    await rm(join(root, "handoffs"), { recursive: true, force: true });
+    await symlink(root, join(root, "handoffs"), "dir");
+    expect(await readHandoffDirectory(root, "root")).toEqual([]);
   });
 });
 

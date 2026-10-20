@@ -6,7 +6,6 @@ import { join, resolve } from "node:path";
 import { acquireWriteLock } from "../src/lock.js";
 
 const ROOT = resolve(import.meta.dirname!, "..");
-const VITE_NODE = resolve(ROOT, "node_modules/vite-node/vite-node.mjs");
 
 interface WorkerHandle {
   readonly child: ChildProcess;
@@ -17,11 +16,15 @@ function spawnWorker(
   script: string,
   env: Record<string, string>,
 ): WorkerHandle {
-  const child = spawn(process.execPath, [VITE_NODE, resolve(ROOT, script)], {
-    cwd: ROOT,
-    env: { ...process.env, ...env },
-    stdio: ["ignore", "ignore", "pipe"],
-  });
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", resolve(ROOT, script)],
+    {
+      cwd: ROOT,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
   let stderr = "";
   child.stderr!.setEncoding("utf8");
   child.stderr!.on("data", (chunk: string) => {
@@ -55,7 +58,7 @@ function spawnHolder(root: string): Promise<ChildProcess> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
       process.execPath,
-      [VITE_NODE, resolve(ROOT, "test/fixtures/lock-holder.ts")],
+      ["--import", "tsx", resolve(ROOT, "test/fixtures/lock-holder.ts")],
       {
         cwd: ROOT,
         env: { ...process.env, MEMORY_ROOT: root },
@@ -63,10 +66,19 @@ function spawnHolder(root: string): Promise<ChildProcess> {
       },
     );
     let stdout = "";
+    let stderr = "";
     child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("lock holder did not become ready"));
+      reject(
+        new Error(
+          `lock holder did not become ready; stdout=${stdout} stderr=${stderr}`,
+        ),
+      );
     }, 10_000);
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
@@ -75,7 +87,19 @@ function spawnHolder(root: string): Promise<ChildProcess> {
         resolvePromise(child);
       }
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      reject(
+        new Error(
+          `lock holder exited before ready: code=${code} stdout=${stdout} ` +
+            `stderr=${stderr}`,
+        ),
+      );
+    });
   });
 }
 
@@ -102,10 +126,27 @@ describe("cross-process memory writes", () => {
         WORKER_READY: join(coord, "beta.ready"),
         WORKER_START: startFile,
       });
-      await Promise.all([
+      const ready = Promise.all([
         waitForFile(join(coord, "alpha.ready")),
         waitForFile(join(coord, "beta.ready")),
       ]);
+      const earlyExit = Promise.all([
+        a.done.then((result) => {
+          if (result.code !== 0) {
+            throw new Error(
+              `alpha exited before start: ${result.code} ${result.stderr}`,
+            );
+          }
+        }),
+        b.done.then((result) => {
+          if (result.code !== 0) {
+            throw new Error(
+              `beta exited before start: ${result.code} ${result.stderr}`,
+            );
+          }
+        }),
+      ]);
+      await Promise.race([ready, earlyExit]);
       await writeFile(startFile, "go\n");
       const [ra, rb] = await Promise.all([a.done, b.done]);
       expect(ra.code, ra.stderr).toBe(0);
@@ -137,10 +178,11 @@ describe("cross-process memory writes", () => {
         await expect(
           acquireWriteLock(root, { timeoutMs: 150, pollMs: 10 }),
         ).rejects.toThrow(/another OpenCode process is writing memory/);
-        holder.kill("SIGKILL");
-        await new Promise<void>((resolvePromise) => {
+        const closed = new Promise<void>((resolvePromise) => {
           holder!.once("close", () => resolvePromise());
         });
+        holder.kill("SIGKILL");
+        await closed;
         const release = await acquireWriteLock(root, { timeoutMs: 3_000 });
         await release();
         expect(holder.exitCode ?? holder.signalCode).toBeTruthy();
