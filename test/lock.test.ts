@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -97,6 +104,52 @@ describe("acquireWriteLock", () => {
       });
       expect(await readFile(lock, "utf8")).toBe("909\n");
       await release();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow a symlinked lock record", async () => {
+    const dir = await root();
+    const outside = await mkdtemp(join(tmpdir(), "memory-lock-outside-"));
+    try {
+      await writeFile(join(outside, "record"), "123\n");
+      await symlink(join(outside, "record"), join(dir, WRITE_LOCK_FILE));
+      await expect(
+        acquireWriteLock(dir, { pid: 456, timeoutMs: 100 }),
+      ).rejects.toThrow(/non-regular lock record/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("release is idempotent and cannot drop a same-PID reacquire", async () => {
+    const dir = await root();
+    try {
+      const first = await acquireWriteLock(dir, { pid: 111, timeoutMs: 100 });
+      await first();
+      const second = await acquireWriteLock(dir, { pid: 111, timeoutMs: 100 });
+      await first();
+      expect(await readFile(join(dir, WRITE_LOCK_FILE), "utf8")).toBe("111\n");
+      await second();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names a same-process nested lock instead of blaming another process", async () => {
+    const dir = await root();
+    try {
+      await writeFile(join(dir, WRITE_LOCK_FILE), "111\n");
+      await expect(
+        acquireWriteLock(dir, {
+          pid: 111,
+          isAlive: () => true,
+          timeoutMs: 30,
+          pollMs: 5,
+        }),
+      ).rejects.toThrow(/this process already holds the memory write lock/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

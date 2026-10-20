@@ -5,8 +5,10 @@
  * namespaced per project: `<projectID>/…` where `<projectID>` is
  * `ctx.location.project.id`). No compare-and-set exists, so check-before-write
  * goes through `get`, concurrent `markSeen` calls for one content ID share a
- * single-flight promise, and all writes serialize via the `withWriteLock`
- * mutex. A duplicate that still slips through is benign (idempotent append).
+ * single-flight promise, and ledger writes serialize via the `withWriteLock`
+ * mutex while memory files use `withFileWriteLock` (in-process chain plus the
+ * cross-process `.write.lock`). A duplicate that still slips through is benign
+ * (idempotent append).
  *
  * Ledger helpers only — `captureFailure`/`snapshotHandoffIfChanged` land in
  * later tasks (T4/T8) on top of these primitives.
@@ -1451,8 +1453,8 @@ export interface SnapshotOutcome {
  * `<projectID>/snapshot/<sessionID>` is a no-op, otherwise an immutable
  * `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` is written (newest wins).
  * Location-less `idle` for a session with neither a snapshot nor a
- * throttle key is dropped + debug-logged. Serialized via `writeCapped`'s
- * mutex; never throws.
+ * throttle key is dropped + debug-logged. Serialized via `writeNewCapped`'s
+ * file lock (in-process chain + root `.write.lock`); never throws.
  */
 export async function snapshotHandoffIfChanged(
   event: unknown,

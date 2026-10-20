@@ -39,6 +39,15 @@ function spawnWorker(
   return { child, done };
 }
 
+async function stopWorker(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise<void>((resolvePromise) => {
+    child.once("close", () => resolvePromise());
+  });
+  child.kill("SIGKILL");
+  await closed;
+}
+
 async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -161,12 +170,11 @@ describe("cross-process memory writes", () => {
         text.split("\n").filter((line) => line.startsWith("- ")),
       ).toHaveLength(30);
     } finally {
-      a?.child.kill("SIGKILL");
-      b?.child.kill("SIGKILL");
+      await Promise.all([stopWorker(a?.child), stopWorker(b?.child)]);
       await rm(root, { recursive: true, force: true });
       await rm(coord, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.skipIf(process.platform === "win32")(
     "SIGKILL recovery: the next writer takes over the dead holder's lock",
@@ -187,7 +195,7 @@ describe("cross-process memory writes", () => {
         await release();
         expect(holder.exitCode ?? holder.signalCode).toBeTruthy();
       } finally {
-        holder?.kill("SIGKILL");
+        await stopWorker(holder);
         await rm(root, { recursive: true, force: true });
       }
     },

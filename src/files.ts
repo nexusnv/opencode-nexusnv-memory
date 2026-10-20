@@ -239,32 +239,39 @@ async function openContainedRead(
 ): Promise<{ readonly handle: FileHandle; readonly size: number }> {
   const abs = resolveUnderRoot(root, file);
   await assertContainedAncestors(root, dirname(abs));
-  const handle = await open(abs, READ_OPEN_FLAGS);
-  try {
-    const opened = await handle.stat();
-    if (!opened.isFile()) {
-      throw new Error(`[memory] rejected non-regular memory file: ${file}`);
+  // Atomic publish replaces the inode on every write. A reader that opened
+  // just before the rename sees the old inode at `stat` time; that is normal
+  // concurrency, so retry a bounded number of times before treating it as a
+  // rewrite race rather than a symlink escape.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const handle = await open(abs, READ_OPEN_FLAGS);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) {
+        throw new Error(`[memory] rejected non-regular memory file: ${file}`);
+      }
+      const realRoot = await realpath(root);
+      const realAbs = await realpath(abs);
+      if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(
+          `[memory] rejected symlink escape from memory root: ${file}`,
+        );
+      }
+      // The path may have been swapped after `open`; only accept the read
+      // when the descriptor still names the contained path's current inode.
+      const target = await stat(realAbs);
+      if (target.dev !== opened.dev || target.ino !== opened.ino) {
+        await handle.close().catch(() => undefined);
+        if (attempt < 3) continue;
+        throw new Error(`[memory] memory file is being rewritten: ${file}`);
+      }
+      return { handle, size: opened.size };
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
     }
-    const realRoot = await realpath(root);
-    const realAbs = await realpath(abs);
-    if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
-      throw new Error(
-        `[memory] rejected symlink escape from memory root: ${file}`,
-      );
-    }
-    // The path may have been swapped after `open`; only accept the read when
-    // the descriptor still names the file the contained path resolves to.
-    const target = await stat(realAbs);
-    if (target.dev !== opened.dev || target.ino !== opened.ino) {
-      throw new Error(
-        `[memory] rejected symlink escape from memory root: ${file}`,
-      );
-    }
-    return { handle, size: opened.size };
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
   }
+  throw new Error(`[memory] memory file is being rewritten: ${file}`);
 }
 
 function truncationNotice(
@@ -496,8 +503,15 @@ export interface ContainedTextOptions {
 }
 
 export interface ContainedTextResult {
+  /** Raw (unredacted) text; callers must redact before injection. */
   readonly text: string;
   readonly truncated: boolean;
+}
+
+function positiveInt(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1
+    ? Math.trunc(value)
+    : fallback;
 }
 
 /**
@@ -514,7 +528,7 @@ export async function readContainedText(
   try {
     const opened = await openContainedRead(root, file);
     handle = opened.handle;
-    const limit = Math.max(1, Math.trunc(opts?.maxBytes ?? 1_048_576));
+    const limit = positiveInt(opts?.maxBytes, 1_048_576);
     const length = Math.min(opened.size, limit);
     const buffer = Buffer.alloc(length);
     let offset = 0;
@@ -553,6 +567,7 @@ export interface ContainedLinesOptions {
 }
 
 export interface ContainedLinesResult {
+  /** Raw (unredacted) lines; callers must redact before injection. */
   readonly lines: string[];
   readonly truncated: boolean;
 }
@@ -578,8 +593,8 @@ export async function readContainedLines(
   try {
     const opened = await openContainedRead(root, file);
     handle = opened.handle;
-    const limit = Math.max(1, Math.trunc(opts.maxLines));
-    const maxBytes = Math.max(1, Math.trunc(opts.maxBytes ?? 1_048_576));
+    const limit = positiveInt(opts.maxLines, 1);
+    const maxBytes = positiveInt(opts.maxBytes, 1_048_576);
     const accept = (line: string): boolean => {
       const clean = line.endsWith("\r") ? line.slice(0, -1) : line;
       const size = Buffer.byteLength(clean, "utf8") + 1;
@@ -629,6 +644,7 @@ export async function readContainedLines(
  * Exact contained handoff directory listing. Aliases (including in-root
  * symlinks such as `handoffs -> .` or `handoffs/archive -> ..`) and off-root
  * targets yield an empty listing rather than filenames from the wrong dir.
+ * A missing/non-directory path propagates ENOENT/ENOTDIR; every caller wraps.
  */
 export async function readHandoffDirectory(
   memoryRoot: string | undefined,
@@ -641,7 +657,9 @@ export async function readHandoffDirectory(
   const realRoot = await realpath(root);
   const realDir = await realpath(directory);
   if (realDir !== join(realRoot, relativeDir)) return [];
-  return readdir(realDir);
+  return (await readdir(realDir)).filter((name) =>
+    /^[A-Za-z0-9._-]+\.md$/.test(name),
+  );
 }
 
 /** Reject escaping ancestors and handoff/archive symlink aliases. */
@@ -972,63 +990,79 @@ export async function withCappedTransaction<T>(
   const { indexLines, fileLines } = capsOf(opts);
   const root = resolveMemoryRoot(opts?.memoryRoot);
   return withFileWriteLock(root, async () => {
-    return fn({
-      read: (file) => readRawForMutation(file, root, "throw"),
-      write: async (file, text) => {
-        assertAllowedPath(file);
-        await writeRedactedCapped(
-          file,
-          redact(text),
-          root,
-          indexLines,
-          fileLines,
-        );
-      },
-      writeArchive: async (file, text) => {
-        assertAllowedPath(file);
-        if (!file.startsWith("handoffs/archive/")) {
-          throw new Error(
-            `[memory] archive write rejected outside handoffs/archive/: ${file}`,
+    let closed = false;
+    const assertOpen = (): void => {
+      if (closed) {
+        throw new Error("[memory] transaction already closed");
+      }
+    };
+    try {
+      return await fn({
+        read: async (file) => {
+          assertOpen();
+          return readRawForMutation(file, root, "throw");
+        },
+        write: async (file, text) => {
+          assertOpen();
+          assertAllowedPath(file);
+          await writeRedactedCapped(
+            file,
+            redact(text),
+            root,
+            indexLines,
+            fileLines,
           );
-        }
-        return publishExclusive(
-          root,
-          resolveUnderRoot(root, file),
-          redact(text),
-        );
-      },
-      removeHandoff: async (file) => {
-        if (
-          !HANDOFF_PATTERN.test(file) ||
-          file.startsWith("handoffs/archive/")
-        ) {
-          throw new Error(
-            `[memory] remove rejected: root handoffs only: ${file}`,
+        },
+        writeArchive: async (file, text) => {
+          assertOpen();
+          assertAllowedPath(file);
+          if (!file.startsWith("handoffs/archive/")) {
+            throw new Error(
+              `[memory] archive write rejected outside handoffs/archive/: ${file}`,
+            );
+          }
+          return publishExclusive(
+            root,
+            resolveUnderRoot(root, file),
+            redact(text),
           );
-        }
-        assertAllowedPath(file);
-        const abs = resolveUnderRoot(root, file);
-        const directory = dirname(abs);
-        try {
-          await assertContainedAncestors(root, directory);
-          await assertContainedDirectory(root, directory);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-            return "missing";
+        },
+        removeHandoff: async (file) => {
+          assertOpen();
+          if (
+            !HANDOFF_PATTERN.test(file) ||
+            file.startsWith("handoffs/archive/")
+          ) {
+            throw new Error(
+              `[memory] remove rejected: root handoffs only: ${file}`,
+            );
           }
-          throw error;
-        }
-        try {
-          await unlink(abs);
-          return "deleted";
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-            return "missing";
+          assertAllowedPath(file);
+          const abs = resolveUnderRoot(root, file);
+          const directory = dirname(abs);
+          try {
+            await assertContainedAncestors(root, directory);
+            await assertContainedDirectory(root, directory);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+              return "missing";
+            }
+            throw error;
           }
-          throw error;
-        }
-      },
-    });
+          try {
+            await unlink(abs);
+            return "deleted";
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+              return "missing";
+            }
+            throw error;
+          }
+        },
+      });
+    } finally {
+      closed = true;
+    }
   });
 }
 

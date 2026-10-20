@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin";
-import { mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -71,6 +71,12 @@ async function scaffoldMemoryDir(projectRoot: string): Promise<boolean> {
     await mkdir(join(dir, ARCHIVE_DIR), { recursive: true });
     let created = false;
     for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      try {
+        await access(join(dir, name));
+        continue;
+      } catch {
+        // Missing (or unreadable): fall through to the exclusive create.
+      }
       const outcome = await writeNewCapped(name, content, {
         memoryRoot: dir,
       });

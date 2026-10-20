@@ -212,7 +212,8 @@ export async function rememberAsserted(
       // contract as every other memory file — atomic read-modify-write
       // inside the lock, so a concurrent append of a *different* fact
       // cannot be silently dropped. The ledger calls stay outside the
-      // lock: they take the same mutex internally and must never nest.
+      // file lock: they take the ledger mutex internally, and a ledger body
+      // must never call a memory writer (lock order is always file → ledger).
       await updateCapped(
         "decisions.md",
         { memoryRoot: deps.memoryRoot },

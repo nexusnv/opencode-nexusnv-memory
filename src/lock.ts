@@ -10,7 +10,8 @@
  * containers sharing a volume, multi-host use, and PID reuse are not made safe
  * by this protocol. No fsync is performed; the target is atomic visibility.
  */
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const WRITE_LOCK_FILE = ".write.lock";
@@ -52,11 +53,22 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 async function readRecord(path: string): Promise<LockRecord | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const [text, info] = await Promise.all([
-      readFile(path, "utf8"),
-      stat(path),
-    ]);
+    // Lock records are tiny regular files. Never follow a symlink/FIFO here:
+    // a cloned checkout could otherwise point `.write.lock` at /dev/zero.
+    const before = await lstat(path);
+    if (!before.isFile()) {
+      throw new Error(`[memory] rejected non-regular lock record: ${path}`);
+    }
+    handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new Error(`[memory] rejected non-regular lock record: ${path}`);
+    }
+    const buffer = Buffer.alloc(1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
     const first = text.split("\n", 1)[0]?.trim() ?? "";
     const parsed = /^\d+$/.test(first) ? Number.parseInt(first, 10) : NaN;
     const pid = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
@@ -64,6 +76,8 @@ async function readRecord(path: string): Promise<LockRecord | undefined> {
   } catch (error) {
     if (codeOf(error) === "ENOENT") return undefined;
     throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
   }
 }
 
@@ -121,7 +135,17 @@ async function removeIfStale(
   }
 }
 
-function timeoutError(path: string, record: LockRecord | undefined): Error {
+function timeoutError(
+  path: string,
+  record: LockRecord | undefined,
+  pid: number,
+): Error {
+  if (record?.pid === pid) {
+    return new Error(
+      `[memory] this process already holds the memory write lock (${path}; pid ${pid}); ` +
+        "nested writes are not supported; release the outer lock first",
+    );
+  }
   const holder =
     record?.pid !== undefined
       ? `pid ${record.pid}`
@@ -155,18 +179,29 @@ export async function acquireWriteLock(
   const claimPath = join(root, WRITE_LOCK_CLAIM_FILE);
   const deadline = now() + Math.max(0, timeoutMs);
   const staleOptions = { now: now(), isAlive: alive, malformedGraceMs };
+  const wait = async (lock: LockRecord | undefined): Promise<void> => {
+    if (now() >= deadline) throw timeoutError(lockPath, lock, pid);
+    await sleep(pollMs);
+  };
 
   for (;;) {
     if (await createExclusive(lockPath, pid)) {
-      return async () => removeIfOwned(lockPath, pid);
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        await removeIfOwned(lockPath, pid);
+      };
     }
     const lock = await readRecord(lockPath);
-    if (lock === undefined) continue;
+    if (lock === undefined) {
+      await wait(undefined);
+      continue;
+    }
     const currentNow = now();
     const stale = isStale(lock, { ...staleOptions, now: currentNow });
     if (!stale) {
-      if (currentNow >= deadline) throw timeoutError(lockPath, lock);
-      await sleep(pollMs);
+      await wait(lock);
       continue;
     }
 
@@ -177,14 +212,18 @@ export async function acquireWriteLock(
           ...staleOptions,
           now: currentNow,
         });
+        if (now() >= deadline) throw timeoutError(lockPath, lock, pid);
+        await sleep(Math.min(pollMs, 5));
         continue;
       }
-      if (currentNow >= deadline) throw timeoutError(lockPath, lock);
-      await sleep(pollMs);
+      await wait(lock);
       continue;
     }
 
-    if (!(await createExclusive(claimPath, pid))) continue;
+    if (!(await createExclusive(claimPath, pid))) {
+      await wait(lock);
+      continue;
+    }
     try {
       const again = await readRecord(lockPath);
       if (

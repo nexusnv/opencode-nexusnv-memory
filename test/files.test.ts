@@ -21,6 +21,7 @@ import {
   updateCapped,
   writeCapped,
   writeNewCapped,
+  withCappedTransaction,
   withWriteLock,
 } from "../src/files.js";
 
@@ -419,9 +420,8 @@ describe("contained read helpers", () => {
     await mkdir(join(root, "handoffs", "archive"), { recursive: true });
     await writeFile(join(root, "handoffs", "2026-10-15-120000-abcdef.md"), "h");
     await writeFile(join(root, "handoffs", "archive", "rotated-1.md"), "a");
-    expect((await readHandoffDirectory(root, "root")).sort()).toEqual([
+    expect(await readHandoffDirectory(root, "root")).toEqual([
       "2026-10-15-120000-abcdef.md",
-      "archive",
     ]);
     expect(await readHandoffDirectory(root, "archive")).toEqual([
       "rotated-1.md",
@@ -433,7 +433,48 @@ describe("contained read helpers", () => {
   });
 });
 
+describe("capped transaction lifecycle", () => {
+  it("revokes the transaction after its callback settles", async () => {
+    let leaked:
+      | { read: (file: string) => Promise<string> }
+      | undefined;
+    await withCappedTransaction(opts(), async (tx) => {
+      await tx.write("decisions.md", "inside\n");
+      leaked = tx;
+    });
+    await expect(leaked!.read("decisions.md")).rejects.toThrow(
+      /transaction already closed/,
+    );
+  });
+});
+
 describe("atomic_publish_and_exclusive_create", () => {
+  it("retries readers across an atomic replacement", async () => {
+    const abs = join(root, "decisions.md");
+    await writeFile(abs, "initial\n");
+    let done = false;
+    const writer = (async () => {
+      for (let i = 0; i < 500; i += 1) {
+        await publishAtomicForTests(root, abs, `v${i}\n`);
+      }
+    })().finally(() => {
+      done = true;
+    });
+    const errors: unknown[] = [];
+    let reads = 0;
+    while (!done) {
+      try {
+        await readCapped("decisions.md", opts());
+        reads += 1;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    await writer;
+    expect(errors).toEqual([]);
+    expect(reads).toBeGreaterThan(0);
+  });
+
   it("swaps complete files at rename time and leaves no temp files", async () => {
     await writeCapped("decisions.md", "old\n", opts());
     const next = `${"new\n".repeat(10_000)}`;
