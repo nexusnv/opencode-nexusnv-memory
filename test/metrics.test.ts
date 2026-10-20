@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import { withWriteLock } from "../src/files.js";
-import type { LedgerStorage } from "../src/capture.js";
+import {
+  HINT_RETENTION_MS,
+  hintKey,
+  type LedgerStorage,
+} from "../src/capture.js";
 import {
   armKey,
   clearArm,
@@ -560,6 +564,31 @@ describe("once-per-UTC-day prune piggyback", () => {
     await settle();
     expect(await storage.get(dayKey(PROJECT, oldStamp, "hook.prompt"))).toBe(3);
     expect(await storage.get(totalKey(PROJECT, "hint.recall"))).toBe(1);
+  });
+
+  it("also prunes aged ledger state on the first bump after a day change", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const base = Date.UTC(2035, 5, 2); // fixed UTC day, never the real today
+    vi.setSystemTime(base);
+    const storage = new FakeStorage();
+    await storage.set(
+      hintKey(PROJECT, "s1", "old"),
+      base - HINT_RETENTION_MS - 1,
+    );
+    const bump = createBump(storage, PROJECT);
+
+    bump("hook.prompt");
+    await settle();
+    expect(await storage.get(hintKey(PROJECT, "s1", "old"))).toBeUndefined();
+
+    // Same UTC day: a re-planted old key survives (no second prune).
+    await storage.set(
+      hintKey(PROJECT, "s1", "old"),
+      base - HINT_RETENTION_MS - 1,
+    );
+    bump("hint.recall");
+    await settle();
+    expect(await storage.get(hintKey(PROJECT, "s1", "old"))).toBeDefined();
   });
 
   it("prunes per project: two projects each piggyback on the same UTC day", async () => {

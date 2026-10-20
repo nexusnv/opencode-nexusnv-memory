@@ -47,6 +47,25 @@ export const SEEN_LIMIT = 500;
 /** Retry window for a failed capture attempt (~30s via the attempt key). */
 export const RETRY_WINDOW_MS = 30_000;
 
+/** Attempts older than the retry window are semantically abandoned. */
+export const ATTEMPT_RETENTION_MS = RETRY_WINDOW_MS;
+
+/** Prompt-hint throttle keys are bounded to one week. */
+export const HINT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Snapshot hashes and throttle stamps are bounded to 30 days. */
+export const SNAPSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Snapshot value: an opaque content hash plus the time it was written, so the
+ * daily prune can age it. Older versions stored the bare hash string; reads
+ * still accept that form and the prune normalizes it out.
+ */
+export interface SnapshotRecord {
+  readonly hash: string;
+  readonly at: number;
+}
+
 /** In-flight `markSeen` writes keyed by full storage key (single-flight). */
 const inflight = new Map<string, Promise<boolean>>();
 
@@ -111,7 +130,7 @@ export function rotatedKey(projectID: string): string {
   return `${projectPrefix(projectID)}curation.rotated`;
 }
 
-/** `<projectID>/snapshot/<sessionID>` → last snapshot content hash. */
+/** `<projectID>/snapshot/<sessionID>` → `{hash, at}` (legacy: bare hash). */
 export function snapshotKey(projectID: string, sessionID: string): string {
   return `${projectPrefix(projectID)}snapshot/${requireNonEmpty("sessionID", sessionID)}`;
 }
@@ -336,6 +355,17 @@ export async function takeNotice(
   });
 }
 
+/** True for the timestamped snapshot form written since E9. */
+function isSnapshotRecord(value: unknown): value is SnapshotRecord {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as { readonly hash?: unknown; readonly at?: unknown };
+  return (
+    typeof record.hash === "string" &&
+    typeof record.at === "number" &&
+    Number.isFinite(record.at)
+  );
+}
+
 /** Last snapshot content hash for the session, if any. */
 export async function getSnapshotHash(
   storage: LedgerStorage,
@@ -343,7 +373,8 @@ export async function getSnapshotHash(
   sessionID: string,
 ): Promise<string | undefined> {
   const value = await storage.get(snapshotKey(projectID, sessionID));
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") return value;
+  return isSnapshotRecord(value) ? value.hash : undefined;
 }
 
 /** Persist the snapshot content hash for hash-guarded idempotency. */
@@ -352,9 +383,13 @@ export async function setSnapshotHash(
   projectID: string,
   sessionID: string,
   hash: string,
+  now: number = Date.now(),
 ): Promise<void> {
   await withWriteLock(async () => {
-    await storage.set(snapshotKey(projectID, sessionID), hash);
+    await storage.set(snapshotKey(projectID, sessionID), {
+      hash,
+      at: now,
+    } satisfies SnapshotRecord);
   });
 }
 
@@ -406,6 +441,29 @@ export async function setHint(
 }
 
 /**
+ * Drain every page of a `scan` prefix. A broken port that repeats its cursor
+ * terminates instead of hanging the caller (same no-progress guard as the
+ * metrics walker; duplicated here to avoid a capture↔metrics runtime cycle).
+ */
+async function scanEntries(
+  storage: LedgerStorage,
+  prefix: string,
+): Promise<Array<{ readonly key: string; readonly value: unknown }>> {
+  const all: Array<{ key: string; value: unknown }> = [];
+  let after: string | undefined;
+  for (;;) {
+    const page =
+      after === undefined
+        ? await storage.scan({ prefix })
+        : await storage.scan({ prefix, after });
+    for (const entry of page.entries) all.push(entry);
+    if (page.next === undefined || page.next === after) break;
+    after = page.next;
+  }
+  return all;
+}
+
+/**
  * Bound the `seen` set to `SEEN_LIMIT` entries: paginate `scan` via
  * `after`/`next` over `<projectID>/seen/`, evict oldest-first by stored
  * timestamp (missing/non-numeric = oldest, key order breaks ties), and remove
@@ -416,25 +474,13 @@ export async function pruneSeenTo500(
   projectID: string,
 ): Promise<number> {
   const prefix = `${projectPrefix(projectID)}seen/`;
-  const all: Array<{ key: string; seenAt: number }> = [];
-  let after: string | undefined;
-  for (;;) {
-    const page =
-      after === undefined
-        ? await storage.scan({ prefix })
-        : await storage.scan({ prefix, after });
-    for (const entry of page.entries) {
-      all.push({
-        key: entry.key,
-        seenAt:
-          typeof entry.value === "number" && Number.isFinite(entry.value)
-            ? entry.value
-            : 0,
-      });
-    }
-    if (page.next === undefined) break;
-    after = page.next;
-  }
+  const all = (await scanEntries(storage, prefix)).map((entry) => ({
+    key: entry.key,
+    seenAt:
+      typeof entry.value === "number" && Number.isFinite(entry.value)
+        ? entry.value
+        : 0,
+  }));
   const overflow = all.length - SEEN_LIMIT;
   if (overflow <= 0) return 0;
   all.sort((a, b) =>
@@ -449,6 +495,121 @@ export async function pruneSeenTo500(
     }
   });
   return victims.length;
+}
+
+/** Ledger namespaces with age-based retention (spec §6 / E9). */
+type LedgerPruneKind = "attempt" | "hint" | "snapshot" | "throttle";
+
+interface LedgerPruneSpec {
+  readonly kind: LedgerPruneKind;
+  readonly prefix: string;
+  readonly retentionMs: number;
+}
+
+/** A timestamp value older than (or exactly at) its retention boundary. */
+function isAgedTimestamp(
+  value: unknown,
+  now: number,
+  retentionMs: number,
+): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    now - value >= retentionMs
+  );
+}
+
+/** True when a scanned ledger value is old enough to remove. */
+function isAgedLedgerValue(
+  kind: LedgerPruneKind,
+  value: unknown,
+  now: number,
+  retentionMs: number,
+): boolean {
+  if (kind === "snapshot") {
+    // Legacy bare hashes carry no age; normalize them out on the first pass.
+    if (typeof value === "string") return true;
+    return (
+      isSnapshotRecord(value) && now - value.at >= SNAPSHOT_RETENTION_MS
+    );
+  }
+  return isAgedTimestamp(value, now, retentionMs);
+}
+
+/**
+ * Bound the age-growing ledger namespaces. Attempts are abandoned after the
+ * retry window; hint throttles expire after a week; snapshot hashes and
+ * throttle stamps after 30 days. Scans happen outside the write lock, then
+ * each victim is re-read under one lock so an in-process write that lands
+ * between scan and remove is preserved. Only this project's exact prefixes
+ * are touched; malformed hint/throttle/attempt values are left alone
+ * (fail-closed). Resolves the number actually removed.
+ */
+export async function pruneLedgerState(
+  storage: LedgerStorage,
+  projectID: string,
+  now: number = Date.now(),
+): Promise<number> {
+  const prefix = projectPrefix(projectID);
+  const specs: readonly LedgerPruneSpec[] = [
+    {
+      kind: "attempt",
+      prefix: `${prefix}attempt/`,
+      retentionMs: ATTEMPT_RETENTION_MS,
+    },
+    {
+      kind: "hint",
+      prefix: `${prefix}hint/`,
+      retentionMs: HINT_RETENTION_MS,
+    },
+    {
+      kind: "snapshot",
+      prefix: `${prefix}snapshot/`,
+      retentionMs: SNAPSHOT_RETENTION_MS,
+    },
+    {
+      kind: "throttle",
+      prefix: `${prefix}snapshotThrottle/`,
+      retentionMs: SNAPSHOT_RETENTION_MS,
+    },
+  ];
+
+  const victims: Array<{ key: string; kind: LedgerPruneKind; retentionMs: number }> =
+    [];
+  for (const spec of specs) {
+    for (const entry of await scanEntries(storage, spec.prefix)) {
+      if (
+        isAgedLedgerValue(spec.kind, entry.value, now, spec.retentionMs)
+      ) {
+        victims.push({
+          key: entry.key,
+          kind: spec.kind,
+          retentionMs: spec.retentionMs,
+        });
+      }
+    }
+  }
+  if (victims.length === 0) return 0;
+
+  let removed = 0;
+  await withWriteLock(async () => {
+    for (const victim of victims) {
+      const current = await storage.get(victim.key);
+      if (
+        !isAgedLedgerValue(
+          victim.kind,
+          current,
+          now,
+          victim.retentionMs,
+        )
+      ) {
+        continue;
+      }
+      await storage.remove(victim.key);
+      removed += 1;
+    }
+  });
+  return removed;
 }
 
 /* ------------------------------------------------------------------ */

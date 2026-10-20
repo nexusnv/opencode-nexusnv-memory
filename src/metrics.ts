@@ -57,7 +57,12 @@ import {
   resolveMemoryRoot,
   withWriteLock,
 } from "./files.js";
-import { getPending, SEEN_LIMIT, type LedgerStorage } from "./capture.js";
+import {
+  getPending,
+  pruneLedgerState,
+  SEEN_LIMIT,
+  type LedgerStorage,
+} from "./capture.js";
 import { DEFAULT_MEMORY_OPTIONS, parseMemoryOptions } from "./config.js";
 import type { Plugin } from "@opencode/plugin";
 
@@ -304,6 +309,7 @@ export function createBump(
       if (stamp !== lastPruneStamps.get(projectID)) {
         lastPruneStamps.set(projectID, stamp);
         void pruneDayBuckets(storage, projectID).catch(logDiagnostic);
+        void pruneLedgerState(storage, projectID).catch(logDiagnostic);
       }
     } catch (error) {
       logDiagnostic(error);
