@@ -105,7 +105,7 @@ ever collecting content?
 - Residual risk, stated honestly: on-machine usage-pattern metadata (counts + timestamps) is still
   metadata; a user may not want it even locally. The mitigations are the same class the repo already
   trusts — on-machine residence inside the plugin's own namespace, a documented storage location, a
-  one-command reset, and plugin removal. It is smaller in kind than the ledger's existing
+  two-step reset (`reset` then `reset confirm`), and plugin removal. It is smaller in kind than the ledger's existing
   opaque session-scoped keys and than what OpenCode itself records about sessions.
 - Once published, counter names are load-bearing output (tests assert the enumeration and the
   fail-closed behavior). Renaming a counter breaks only the continuity of self-comparison, never any

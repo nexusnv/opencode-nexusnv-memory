@@ -1033,7 +1033,10 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
 
 **Bounded ledger and reset control (Tier 2).** Ledger idempotency guarantees are unchanged; the only
 new ledger behavior is age-based pruning of the existing keys and timestamping the snapshot value.
-The control for the count-only metrics namespace is explicitly two-step: `/memory-metrics reset`
+A pruned `attempt/` record no longer suppresses a later identical failure (that failure may be
+attempted once more, recovering captures whose append previously failed) and a pruned legacy snapshot
+string can hand off once more; the `seen` key still blocks duplicates of successfully captured
+content. The control for the count-only metrics namespace is explicitly two-step: `/memory-metrics reset`
 renders a confirmation notice and changes nothing, while `/memory-metrics reset confirm` wipes
 `<projectID>/metrics/…` and re-stamps `since`.
 

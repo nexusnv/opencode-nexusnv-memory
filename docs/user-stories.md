@@ -1,6 +1,6 @@
 # User, Agent, and Harness Stories — No-Fuss Memory Plugin for OpenCode V2
 
-**Status:** proposed. **Sources:** `motivation.md` §§4–5; `c4-01-system-context.md` through `c4-06-code.md`; ADR-0001 through ADR-0007; `README.md`. **Precedence:** ADRs are normative on decision intent; `design-spec-v2-production.md` is normative on V2 contracts and supersedes these stories on conflict.
+**Status:** proposed. **Sources:** `motivation.md` §§4–5; `c4-01-system-context.md` through `c4-06-code.md`; ADR-0001 through ADR-0008; `README.md`. **Precedence:** ADRs are normative on decision intent; `design-spec-v2-production.md` is normative on V2 contracts and supersedes these stories on conflict.
 
 **Scope:** all functional requirements from install to uninstall. Three viewpoints: **User** = developer (owns memory, approves promotion); **Agent** = OpenCode V2 agent incl. `memory-manager` subagent (reads protocol, peeks lazily, proposes); **Harness** = OpenCode V2 server/runtime (loads plugin, provides hooks/events/transforms/storage/vcs, enforces AGENTS.md hierarchy).
 

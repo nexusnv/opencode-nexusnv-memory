@@ -35,10 +35,11 @@
  * The `/memory-metrics` command (spec §5.12 command row + §1.3 G-M1; M-T5)
  * also lives here: its deps resolve per execute call (spec P22), a no-arg
  * invocation renders `collectAndRender` and posts the table through
- * `ctx.session.synthetic`, and a case-insensitive `reset` argument wipes the
- * whole `<projectID>/metrics/…` namespace (`resetMetrics`: one locked body
- * covering the paginated scan, the removes, and the fresh `since` stamp)
- * and reports the restarted table
+ * `ctx.session.synthetic`; a bare `reset` argument renders the intact table
+ * plus the confirmation notice, and `reset confirm` wipes the whole
+ * `<projectID>/metrics/…` namespace (`resetMetrics`: one locked body covering
+ * the paginated scan, the removes, and the fresh `since` stamp) and reports
+ * the restarted table
  * through the same channel. G-M1 is a deploy-time human check: the FIRST
  * RESOLVED synthetic post of the process logs the §1.3 line once (module-
  * level stamp; a rejected post logs nothing — the line claims "posted").
@@ -1102,7 +1103,7 @@ function memoryRootOf(ctx: Plugin.Context): string {
 }
 
 /**
- * The `/memory-metrics [reset]` command (spec §5.12 command row). Execution
+ * The `/memory-metrics [reset | reset confirm]` command (spec §5.12 command row). Execution
  * shape, per call (spec P22 — ledger, projectID, memory root, and caps all
  * resolve from the live context; nothing is captured at load):
  *

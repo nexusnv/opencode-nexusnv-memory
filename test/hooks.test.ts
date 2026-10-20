@@ -523,6 +523,14 @@ describe("matchRememberNearMiss", () => {
     expect(hint!.split("\n")).toHaveLength(1);
     expect(hint).toContain("Nothing was recorded");
     expect(await matchRememberNearMiss(messages, opts)).toBeUndefined();
+    // The throttle is shared with `matchIndex`: the same prompt/session
+    // cannot also receive an INDEX tell-tale hint.
+    expect(
+      await matchIndex(messages, {
+        ...opts,
+        indexContent: "- deploy: Fridays\n",
+      }),
+    ).toBeUndefined();
     // A different prompt can nudge again.
     expect(
       await matchRememberNearMiss(

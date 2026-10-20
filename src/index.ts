@@ -440,8 +440,9 @@ export default Plugin.define({
     registrations.push(await registerMemoryReview(ctx));
 
     // /memory-metrics command: local-only count dashboard — never writes a
-    // memory file (wipes counter keys only on `reset`); deps resolve per
-    // call from the live context (spec P22).
+    // memory file (wipes counter keys only on `reset confirm`; bare `reset`
+    // renders the confirmation notice); deps resolve per call from the live
+    // context (spec P22).
     registrations.push(await registerMetricsCommand(ctx));
 
     // /memory-status command + memory_status tool: read-only install/health

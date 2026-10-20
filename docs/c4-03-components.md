@@ -57,4 +57,4 @@ flowchart TD
 - **Memory content is untrusted data, never instructions.** No component acts on text read from memory; the review writes no memory and only proposes (its only durable side effect is the §5.12 `review.invoked` counter — count diagnostics, no content), and every durable write is approved per line (`memory_apply`) — not merely a system-prompt instruction; captured command output never enters the auto-injected payload except as a tagged summary line; untrusted candidates are never bulk-approved (ADR-0007).
 - No component calls the network, embeddings, or an LLM in the default path.
 - Setup registers **five tools** (`memory_recall`, `memory_apply`, `memory_metrics`, `memory_search`, `memory_status`) and **three commands** (`/memory-review`, `/memory-metrics`, `/memory-status`); search/status are read-only and add no metrics or storage keys.
-- Decisions: ADR-0001 through ADR-0007.
+- Decisions: ADR-0001 through ADR-0008.

@@ -456,6 +456,12 @@ describe("first_run_install_checklist", () => {
       expect(checklist).toHaveLength(1);
       expect(String(checklist[0]![0])).toContain(permissionsSnippet());
       expect(String(checklist[0]![0])).toContain("/memory-status");
+      // Exactly one warning, and it is the checklist — not the legacy
+      // standalone permission warning plus a dump.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).not.toContain(
+        "[memory] install the memory_write",
+      );
       expect(log).not.toHaveBeenCalled();
       await cleanup?.();
     } finally {
