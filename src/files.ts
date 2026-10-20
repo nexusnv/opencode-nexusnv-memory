@@ -8,10 +8,19 @@
  *
  * All file IO via `node:fs/promises` (async only).
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { redact } from "./redact.js";
+import { redact, redactPreservingLines } from "./redact.js";
 
 export interface CappedFileOptions {
   /** Absolute path to `.opencode/memory`. Defaults to `<cwd>/.opencode/memory`. */
@@ -169,6 +178,56 @@ function resolveUnderRoot(root: string, file: string): string {
   return abs;
 }
 
+/**
+ * O_NONBLOCK keeps a symlink to an outside FIFO from blocking before the
+ * opened handle is validated; regular files ignore it. Platforms without the
+ * flag fall back to a normal read-only open.
+ */
+const READ_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
+
+/**
+ * Open an allowlisted path, then validate the *opened inode* against the
+ * memory root. Resolving first and opening second left a check-then-open race:
+ * a concurrent replace could swap the validated path for an outside symlink
+ * before `open`, and the read would follow it. Opening first fixes the
+ * descriptor; `realpath` plus a `dev`/`ino` comparison prove that inode is
+ * still reachable inside the root, and no bytes are read until that holds.
+ * In-root symlinks and a root that is itself a symlink keep working. A missing
+ * root/target still propagates ENOENT so callers keep the friendly error.
+ */
+async function openContainedRead(
+  root: string,
+  file: string,
+): Promise<{ readonly handle: FileHandle; readonly size: number }> {
+  const abs = resolveUnderRoot(root, file);
+  const handle = await open(abs, READ_OPEN_FLAGS);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) {
+      throw new Error(`[memory] rejected non-regular memory file: ${file}`);
+    }
+    const realRoot = await realpath(root);
+    const realAbs = await realpath(abs);
+    if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
+      throw new Error(
+        `[memory] rejected symlink escape from memory root: ${file}`,
+      );
+    }
+    // The path may have been swapped after `open`; only accept the read when
+    // the descriptor still names the file the contained path resolves to.
+    const target = await stat(realAbs);
+    if (target.dev !== opened.dev || target.ino !== opened.ino) {
+      throw new Error(
+        `[memory] rejected symlink escape from memory root: ${file}`,
+      );
+    }
+    return { handle, size: opened.size };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 function truncationNotice(
   kind: "first" | "last",
   cap: number,
@@ -270,10 +329,12 @@ export async function readCapped(
   assertAllowedPath(file);
   const { indexLines, fileLines } = capsOf(opts);
   const root = resolveMemoryRoot(opts?.memoryRoot);
-  const abs = resolveUnderRoot(root, file);
   let raw: string;
+  let handle: FileHandle | undefined;
   try {
-    raw = await readFile(abs, "utf8");
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    raw = await handle.readFile("utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       throw new Error(
@@ -281,6 +342,8 @@ export async function readCapped(
       );
     }
     throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
   }
   const redactedText = redact(raw);
   const total = countLines(redactedText);
@@ -298,6 +361,84 @@ export async function readCapped(
   }
   const kept = redactedText.split("\n").slice(0, limit).join("\n");
   return `${kept}${truncationNotice("first", limit, total)}`;
+}
+
+/** Per-file byte guard for full (`memory_search`) reads. */
+export const SEARCH_FILE_BYTES = 1_000_000;
+
+export interface FullReadOptions {
+  /** Absolute path to `.opencode/memory`; defaults like `readCapped`. */
+  readonly memoryRoot?: string;
+  /** `throw` (default) reports a friendly missing-file error; `skip` returns undefined. */
+  readonly onMissing?: "throw" | "skip";
+}
+
+export interface FullReadResult {
+  readonly text: string;
+  readonly truncated: boolean;
+}
+
+/**
+ * Read one allowlisted memory file in full (no line cap) for `memory_search`.
+ * Same allowlist/traversal choke point and redaction as `readCapped`, but a
+ * per-file byte guard instead of a line cap so older decisions and archived
+ * handoffs stay searchable. A missing file throws the same friendly error as
+ * `readCapped` unless `onMissing: "skip"`. Never reads outside the root
+ * (symlinks are resolved and rejected when they escape). Redaction preserves
+ * newline count so reported line numbers match the on-disk file.
+ */
+export async function readFullRedacted(
+  file: string,
+  opts?: FullReadOptions,
+): Promise<FullReadResult | undefined> {
+  assertAllowedPath(file);
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  let handle: FileHandle;
+  let size: number;
+  try {
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    size = opened.size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      if (opts?.onMissing === "skip") return undefined;
+      throw new Error(
+        `[memory] memory file not found: ${file}${missingFileHint(file)}`,
+      );
+    }
+    throw error;
+  }
+  try {
+    const length = Math.min(size, SEARCH_FILE_BYTES);
+    const buffer = Buffer.alloc(length);
+    let offset = 0;
+    // `FileHandle.read` may satisfy a short read; loop so the tail is not
+    // silently dropped (the limit is a byte guard, not a read-size hint).
+    while (offset < length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        length - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const raw = buffer.subarray(0, offset).toString("utf8");
+    // A byte-limited read can cut through a URL credential before the `@`
+    // that redaction needs. Drop the incomplete final line; complete lines
+    // before the guard keep their on-disk line numbers.
+    const text =
+      size > SEARCH_FILE_BYTES
+        ? raw.slice(0, raw.lastIndexOf("\n") + 1)
+        : raw;
+    return {
+      text: redactPreservingLines(text),
+      truncated: size > SEARCH_FILE_BYTES,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

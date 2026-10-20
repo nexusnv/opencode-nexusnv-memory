@@ -1,5 +1,6 @@
 /**
- * memory_recall + memory_apply tools (spec §§5.4, 5.5 + c4-04 + c4-06).
+ * memory_recall, memory_apply, memory_metrics, and memory_search tools
+ * (spec §§5.4, 5.5, 5.12, 5.14 + c4-04 + c4-06).
  *
  * `toolResult(text)` is the single adapter for the tool-executor return
  * envelope (`{ content: text }` by default; G2). Every tool return goes
@@ -30,7 +31,8 @@
  * `memory_metrics` is the read-only metrics query: empty input, resolves the
  * readers per call (P22) and returns `collectAndRender`'s markdown count
  * table via the same `toolResult` adapter — it reads storage/files only,
- * never writes.
+ * never writes. `memory_search` is the full-file literal grep across the same
+ * allowlist (redacted, byte-guarded, deterministic), also read-only.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -59,6 +61,12 @@ import {
   type MetricsBump,
 } from "./metrics.js";
 import { redact } from "./redact.js";
+import {
+  MEMORY_SEARCH_DESCRIPTION,
+  MEMORY_SEARCH_INPUT,
+  renderSearchResults,
+  searchMemory,
+} from "./search.js";
 
 /** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
 const MEMORY_DIR = ".opencode/memory";
@@ -347,6 +355,33 @@ export function createMemoryRecallExecute(deps: RecallDeps) {
   };
 }
 
+export interface MemorySearchToolDeps {
+  readonly memoryRoot: string;
+}
+
+/**
+ * `memory_search` executor: validates the scope/query delivery shape, searches
+ * the allowlist in full, and returns the deterministic rendered result through
+ * `toolResult`. No counters, no arm consumption, no writes.
+ */
+export function createMemorySearchExecute(deps: MemorySearchToolDeps) {
+  return async (input: unknown): Promise<{ content: string }> => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    if (record.file !== undefined && typeof record.file !== "string") {
+      throw new Error("[memory] memory_search file must be a string");
+    }
+    const result = await searchMemory({
+      memoryRoot: deps.memoryRoot,
+      query: record.query as string,
+      file: record.file,
+      maxResults:
+        typeof record.maxResults === "number" ? record.maxResults : undefined,
+      caseSensitive: record.caseSensitive === true,
+    });
+    return toolResult(renderSearchResults(result));
+  };
+}
+
 /**
  * Raw read for cap projection only (no cap, no redaction — the projection
  * replicates the `updateCapped` merge and counts redacted lines itself).
@@ -579,12 +614,12 @@ function armOf(ctx: Plugin.Context): MetricsArm {
 }
 
 /**
- * Register all three tools via `ctx.tool.transform` (spec §5.4/§5.12):
- * `memory_recall`, `memory_apply`, and the read-only `memory_metrics`
- * query. The memory root and project ID resolve per execute call from the
- * live context — never captured once at load (spec P22); caps come from the
- * plugin options (same parse as setup). Returns the transform registration
- * for disposal.
+ * Register all four tools via `ctx.tool.transform` (spec §5.4/§5.12/§5.14):
+ * `memory_recall`, `memory_apply`, the read-only `memory_metrics` query, and
+ * `memory_search`. The memory root and project ID resolve per execute call
+ * from the live context — never captured once at load (spec P22); caps come
+ * from the plugin options (same parse as setup). Returns the transform
+ * registration for disposal.
  */
 export function registerMemoryTools(
   ctx: Plugin.Context,
@@ -656,6 +691,15 @@ export function registerMemoryTools(
             },
           }),
         ),
+    });
+    editor.add({
+      name: "memory_search",
+      description: MEMORY_SEARCH_DESCRIPTION,
+      input: MEMORY_SEARCH_INPUT,
+      // Full allowlisted reads (no line cap) with the same traversal +
+      // redaction choke point; deterministic literal matches, no side effects.
+      execute: async (input) =>
+        createMemorySearchExecute({ memoryRoot: memoryRootOf(ctx) })(input),
     });
   });
 }

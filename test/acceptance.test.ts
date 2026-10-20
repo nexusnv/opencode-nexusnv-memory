@@ -40,6 +40,7 @@ import {
   toolResult,
   type PermissionAsserter,
 } from "../src/tools.js";
+import { MEMORY_SEARCH_DESCRIPTION } from "../src/search.js";
 
 /**
  * P1 acceptance gate (spec §9). Each `it` maps to one pre-merge bullet:
@@ -564,13 +565,16 @@ describe("acceptance_containment_and_provenance", () => {
 describe("acceptance_evals_three_numbers", () => {
   it("reports_static_per_prompt_and_session_total", () => {
     // Static: hand-owned AGENTS.md protocol block (≤10 non-empty lines) +
-    // the memory_recall description (~3 lines when wrapped at 80 cols).
+    // the two retrieval-policy descriptions (recall + search) wrapped at
+    // 80 cols. Utility tools (apply/metrics/status) are excluded.
     const protocolLines = AGENTS_PROTOCOL_BLOCK.split("\n").filter(
       (l) => l.trim().length > 0,
     ).length;
     expect(protocolLines).toBeLessThanOrEqual(10);
     const staticLines =
-      protocolLines + Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80);
+      protocolLines +
+      Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80) +
+      Math.ceil(MEMORY_SEARCH_DESCRIPTION.length / 80);
     expect(staticLines).toBeLessThanOrEqual(16);
     // Per-prompt with content: static + INDEX(≤30, once) + brief(≤48) +
     // hint(≤1) + status(≤1). The injectable portion is budget-capped at 80.

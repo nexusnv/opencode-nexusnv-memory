@@ -24,6 +24,10 @@ import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
 import { registerMemoryTools } from "./tools.js";
+import {
+  registerStatusCommand,
+  registerStatusTool,
+} from "./status-report.js";
 import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
   AGENTS_PROTOCOL_BLOCK,
@@ -423,6 +427,13 @@ export default Plugin.define({
     // memory file (wipes counter keys only on `reset`); deps resolve per
     // call from the live context (spec P22).
     registrations.push(await registerMetricsCommand(ctx));
+
+    // /memory-status command + memory_status tool: read-only install/health
+    // report. Posts via synthetic (no model turn) with the §5.5 fallback;
+    // never writes memory and never bumps a counter (the §5.12 vocabulary
+    // is frozen).
+    registrations.push(await registerStatusCommand(ctx));
+    registrations.push(await registerStatusTool(ctx));
 
     // Event subscriber: idle/compaction capture + sampled diagnostics
     // (spec §§5.7, 5.9). Fire-and-forget on the ONE setup controller: the

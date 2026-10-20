@@ -1,8 +1,23 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCapped, updateCapped, writeCapped, withWriteLock } from "../src/files.js";
+import {
+  SEARCH_FILE_BYTES,
+  readCapped,
+  readFullRedacted,
+  updateCapped,
+  writeCapped,
+  withWriteLock,
+} from "../src/files.js";
 
 let root: string;
 
@@ -206,5 +221,163 @@ describe("updateCapped_atomic_append", () => {
     expect(out).toContain("- one");
     expect(out).toContain("- two");
     expect(out).toContain("- three");
+  });
+});
+
+describe("readFullRedacted (memory_search support)", () => {
+  it("returns decisions.md in full instead of the recall tail", async () => {
+    const body = [
+      "oldest-marker",
+      ...Array.from({ length: 199 }, (_, i) => `line-${i + 2}`),
+    ].join("\n");
+    await writeCapped("decisions.md", body, opts());
+
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full).toBeDefined();
+    expect(full!.text).toContain("oldest-marker");
+    expect(full!.text).toContain("line-200");
+    expect(full!.truncated).toBe(false);
+
+    // The contrast with recall: the tail cap drops the oldest marker.
+    const tail = await readCapped("decisions.md", opts());
+    expect(tail).not.toContain("oldest-marker");
+  });
+
+  it("applies redaction to the full text", async () => {
+    await writeFile(
+      join(root, "decisions.md"),
+      "before\n<private>\nsecret-value\n</private>\nafter",
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.text).not.toContain("secret-value");
+    expect(full!.text).toContain("before");
+    expect(full!.text).toContain("after");
+    // The private block is replaced line-for-line, not collapsed, so search
+    // hit locations still match the on-disk file.
+    expect(full!.text.split("\n")).toHaveLength(5);
+  });
+
+  it("rejects symlinks that escape the memory root", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await writeFile(join(outside, "secret.md"), "outside-secret");
+      await symlink(join(outside, "secret.md"), join(root, "style.md"));
+      await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+        /symlink escape/,
+      );
+      await expect(readCapped("style.md", opts())).rejects.toThrow(
+        /symlink escape/,
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a symlink that stays inside the memory root", async () => {
+    await writeFile(join(root, "architecture.md"), "inside-target\n");
+    await symlink(join(root, "architecture.md"), join(root, "issues.md"));
+    const full = await readFullRedacted("issues.md", opts());
+    expect(full!.text).toContain("inside-target");
+  });
+
+  it("rejects a symlinked directory that escapes the memory root", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-dir-"));
+    try {
+      await mkdir(join(outside, "handoffs"), { recursive: true });
+      await writeFile(
+        join(outside, "handoffs", "2026-10-19-000000-aaaaaa.md"),
+        "outside-secret",
+      );
+      await symlink(join(outside, "handoffs"), join(root, "handoffs"));
+      await expect(
+        readFullRedacted("handoffs/2026-10-19-000000-aaaaaa.md", opts()),
+      ).rejects.toThrow(/symlink escape/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a non-regular memory file", async () => {
+    await mkdir(join(root, "handoffs"), { recursive: true });
+    await symlink(join(root, "handoffs"), join(root, "style.md"));
+    await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+      /non-regular memory file/,
+    );
+    await expect(readCapped("style.md", opts())).rejects.toThrow(
+      /non-regular memory file/,
+    );
+  });
+
+  it("allows a memory root that is itself a symlink", async () => {
+    await writeFile(join(root, "decisions.md"), "root-link-target\n");
+    const linkRoot = await mkdtemp(join(tmpdir(), "memory-files-root-link-"));
+    await rm(linkRoot, { recursive: true, force: true });
+    await symlink(root, linkRoot);
+    try {
+      const full = await readFullRedacted("decisions.md", {
+        memoryRoot: linkRoot,
+      });
+      expect(full!.text).toContain("root-link-target");
+    } finally {
+      await rm(linkRoot, { force: true });
+    }
+  });
+
+  it("uses the same allowlist and traversal choke point", async () => {
+    for (const file of [
+      "../INDEX.md",
+      "/etc/passwd",
+      "random.md",
+      "handoffs/sub/dir.md",
+    ]) {
+      await expect(
+        readFullRedacted(file, opts()),
+        `read ${file}`,
+      ).rejects.toThrow();
+    }
+    await expect(readFullRedacted("handoffs", opts())).rejects.toThrow(
+      /rejected non-allowlisted path/,
+    );
+  });
+
+  it("reports a missing file unless the caller asks to skip", async () => {
+    await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+      "[memory] memory file not found: style.md",
+    );
+    await expect(
+      readFullRedacted("style.md", { ...opts(), onMissing: "skip" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      readFullRedacted("handoffs/2026-10-15-120000-abcdef.md", {
+        ...opts(),
+        onMissing: "skip",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("guards oversized files at the byte limit and reports truncation", async () => {
+    await writeFile(
+      join(root, "decisions.md"),
+      `${"x".repeat(SEARCH_FILE_BYTES)}needle-after-guard`,
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.truncated).toBe(true);
+    expect(full!.text).not.toContain("needle-after-guard");
+    expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
+  });
+
+  it("drops an incomplete final line at the byte guard", async () => {
+    const head = `${"x".repeat(SEARCH_FILE_BYTES - 20)}\n`;
+    await writeFile(
+      join(root, "decisions.md"),
+      `${head}https://user:SuperSecretPW@host`,
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.truncated).toBe(true);
+    // The cut lands inside the URL; the partial line must not survive,
+    // because redaction cannot see the `@` that would identify the password.
+    expect(full!.text).not.toContain("https://");
+    expect(full!.text).not.toContain("SuperSecretPW");
+    expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
   });
 });

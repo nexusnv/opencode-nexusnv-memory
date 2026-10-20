@@ -9,6 +9,7 @@ import {
   MEMORY_RECALL_DESCRIPTION,
   createMemoryApplyExecute,
   createMemoryRecallExecute,
+  createMemorySearchExecute,
   registerMemoryTools,
   toolResult,
   type ApplyToolContext,
@@ -462,6 +463,7 @@ describe("tools", () => {
       "memory_apply",
       "memory_metrics",
       "memory_recall",
+      "memory_search",
     ]);
     for (const tool of added) {
       expect(tool.description.length).toBeGreaterThan(0);
@@ -472,7 +474,76 @@ describe("tools", () => {
     await expect(
       recall.execute({ file: "INDEX.md" }, TOOL_CTX),
     ).resolves.toEqual({ content: expect.stringContaining("wired: yes") });
+    const search = added.find((t) => t.name === "memory_search")!;
+    await expect(
+      search.execute({ query: "wired", file: "INDEX.md" }, TOOL_CTX),
+    ).resolves.toEqual({
+      content: expect.stringContaining("- INDEX.md:1: - wired: yes"),
+    });
+    await expect(
+      search.execute({ query: "", file: "INDEX.md" }, TOOL_CTX),
+    ).rejects.toThrow("[memory] memory_search query must be a non-empty string");
+    const direct = createMemorySearchExecute({ memoryRoot: root });
+    await expect(direct({ query: "x", file: 42 })).rejects.toThrow(
+      "[memory] memory_search file must be a string",
+    );
     await expect(registration.dispose()).resolves.toBeUndefined();
+  });
+
+  it("memory_search performs no storage operations", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-search-"));
+    const memoryDir = join(projectRoot, ".opencode", "memory");
+    await mkdir(memoryDir, { recursive: true });
+    await writeFile(join(memoryDir, "INDEX.md"), "- searchable: yes\n", "utf8");
+
+    const added: Array<{
+      name: string;
+      execute: (input: unknown, context: ApplyToolContext) => Promise<unknown>;
+    }> = [];
+    const guardedStorage = {
+      get: async (): Promise<unknown> => {
+        throw new Error("storage.get must not be called by memory_search");
+      },
+      set: async (): Promise<void> => {
+        throw new Error("storage.set must not be called by memory_search");
+      },
+      remove: async (): Promise<void> => {
+        throw new Error("storage.remove must not be called by memory_search");
+      },
+      scan: async (): Promise<never> => {
+        throw new Error("storage.scan must not be called by memory_search");
+      },
+    };
+    const fakeCtx = {
+      location: {
+        directory: projectRoot,
+        project: {
+          id: PROJECT,
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+      storage: guardedStorage,
+      permission: new FakePermission(),
+      tool: {
+        transform: async (
+          cb: (editor: {
+            add: (tool: (typeof added)[number]) => void;
+          }) => void,
+        ) => {
+          cb({ add: (tool) => added.push(tool) });
+          return { dispose: async () => undefined };
+        },
+      },
+    };
+
+    await registerMemoryTools(fakeCtx as never);
+    const search = added.find((tool) => tool.name === "memory_search")!;
+    await expect(
+      search.execute({ query: "searchable" }, TOOL_CTX),
+    ).resolves.toEqual({
+      content: expect.stringContaining("- INDEX.md:1: - searchable: yes"),
+    });
   });
 
   it("recall_bumps_file_or_handoff_and_error_keeps_thrown", async () => {

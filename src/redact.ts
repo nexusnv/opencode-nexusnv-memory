@@ -13,9 +13,12 @@
  * closing `</private>` (no attributes). An attributed closer such as
  * `</private note>` is NOT a close — inside a block it must not resume
  * copying (fail-closed to EOF redaction); outside a block it is left as-is.
+ *
+ * The slash sits inside the optional group so the two whitespace runs cannot
+ * split the same run; this avoids quadratic backtracking on hostile input
+ * such as `"<private "` repeated to EOF.
  */
-const PRIVATE_TAG =
-  /<\s*(\/?)\s*private((?:\s+[^>]*)?)\s*>/gi;
+const PRIVATE_TAG = /<(\s*\/)?\s*private((?:\s+[^>]*)?)\s*>/gi;
 
 const REDACTED = "[redacted]";
 
@@ -23,22 +26,33 @@ const REDACTED = "[redacted]";
  * Strip `<private>…</private>` blocks. Outermost-wins: nested opens deepen a
  * counter and only the outermost close ends the block. An unclosed opener
  * strips to EOF. Stray closers with no opener are left as-is.
+ *
+ * With `preserveLines`, the stripped span is replaced by `[redacted]` plus one
+ * newline per newline in the span, so line numbers after the block still match
+ * the on-disk file (`memory_search` hit locations).
  */
-function stripPrivateBlocks(text: string): string {
+function stripPrivateBlocks(text: string, preserveLines: boolean): string {
   PRIVATE_TAG.lastIndex = 0;
   let result = "";
   let pos = 0;
   let depth = 0;
+  let blockStart = 0;
   let match: RegExpExecArray | null;
+  // A tag cannot extend past the last `>`, so clamp the scan. Without this,
+  // input with no `>` (or a `>` only at EOF) makes every `<` candidate scan
+  // to EOF. `scan` is a prefix of `text`, so `match.index` stays valid.
+  const lastGt = text.lastIndexOf(">");
+  const scan = lastGt === -1 ? "" : text.slice(0, lastGt + 1);
   // Reset lastIndex on each exec via the shared regex; single-threaded use is
   // safe because the function is synchronous.
-  while ((match = PRIVATE_TAG.exec(text)) !== null) {
-    const isClose = match[1] === "/";
+  while ((match = PRIVATE_TAG.exec(scan)) !== null) {
+    const isClose = match[1] !== undefined;
     const hasAttrs = (match[2] ?? "").trim().length > 0;
     if (!isClose) {
       if (depth === 0) {
         result += text.slice(pos, match.index);
-        result += REDACTED;
+        if (!preserveLines) result += REDACTED;
+        blockStart = match.index;
       }
       depth += 1;
       pos = match.index + match[0].length;
@@ -46,6 +60,10 @@ function stripPrivateBlocks(text: string): string {
       if (depth > 0) {
         depth -= 1;
         pos = match.index + match[0].length;
+        if (depth === 0 && preserveLines) {
+          const block = text.slice(blockStart, pos);
+          result += `${REDACTED}${"\n".repeat(newlineCount(block))}`;
+        }
       } else {
         // Stray closer: leave it in the output (pos untouched).
       }
@@ -56,26 +74,50 @@ function stripPrivateBlocks(text: string): string {
   }
   if (depth > 0) {
     // Unclosed opener: everything from the outermost open to EOF is gone;
-    // the placeholder was already emitted.
+    // the placeholder was already emitted (or is emitted with preserved
+    // newlines for search).
+    if (preserveLines) {
+      const block = text.slice(blockStart);
+      result += `${REDACTED}${"\n".repeat(newlineCount(block))}`;
+    }
     return result;
   }
   result += text.slice(pos);
   return result;
 }
 
+function newlineCount(text: string): number {
+  let count = 0;
+  for (const char of text) {
+    if (char === "\n") count += 1;
+  }
+  return count;
+}
+
+/** Expand `$1`/`$3`-style templates against a regex match's captures. */
+function expandReplacement(
+  template: string,
+  groups: readonly unknown[],
+): string {
+  return template.replace(
+    /\$(\d)/g,
+    (_match, digit: string) => String(groups[Number(digit) - 1] ?? ""),
+  );
+}
+
 interface Pattern {
   readonly re: RegExp;
   readonly replacement: string;
+  /** Cheap pre-check: skip the regex entirely when it cannot match. */
+  readonly guard?: (text: string) => boolean;
 }
 
 const BLOCKLIST: readonly Pattern[] = [
-  // Private key blocks (full) first, then lone headers (truncated keys).
+  // Private key blocks. A BEGIN with no matching END redacts to EOF
+  // (fail-closed, like an unclosed `<private>`); this also avoids re-scanning
+  // to EOF from every header on hostile input.
   {
-    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-    replacement: "[redacted private key]",
-  },
-  {
-    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
     replacement: "[redacted private key]",
   },
   {
@@ -104,9 +146,20 @@ const BLOCKLIST: readonly Pattern[] = [
   // before `/`/whitespace so `user:p@ss@host` redacts `p@ss` (M-1). The
   // username stops at the first colon so `user:alpha:bravo@db` masks the
   // whole `alpha:bravo` instead of leaking `alpha:`.
+  //
+  // Linear-time guard (Tier-1): the scheme is bounded to 64 chars because an
+  // unbounded scheme scan was O(n²) on a long single-line file (100 KB took
+  // ~14 s; 1 MB would take minutes). Userinfo/password are matched to the `@`
+  // without a length cap so an overlong credential still fails closed; they
+  // are anchored after `://` and cannot cross `/`/whitespace, so the scan
+  // stays linear. No leading `\b`: it fails inside a long alphanumeric run;
+  // the bounded scheme keeps the scan linear and still covers a URL glued to
+  // a long token (e.g. `a…ahttps://user:pass@host`). A cheap `://` guard
+  // skips the pattern entirely for files with no URL.
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\s:]*:)([^\s/]+)(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]*:)([^\s/]+)(@)/g,
     replacement: "$1[redacted]$3",
+    guard: (text) => text.includes("://"),
   },
   // AWS secret access key with label.
   {
@@ -122,31 +175,72 @@ const BLOCKLIST: readonly Pattern[] = [
   // intentionally broad (M-1: OPENAI_KEY/GITHUB_KEY/AUTH/ENCRYPTION_KEY via
   // the generic KEY/AUTH/CREDENTIAL match — over-redaction like MONKEY= is
   // accepted over a leak).
+  //
+  // Linear-time guard (Tier-1): bound both runs around the keyword to 256
+  // characters. This keeps the pattern linear on hostile keyword runs; the
+  // deliberate fail-open trade-off is that a keyword more than 256 characters
+  // from the start/end of an unbroken run is not matched (far longer than any
+  // real env key name). A 200-character-prefix key still redacts.
   {
-    re: /\b([A-Z0-9_]*?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]*\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
+    re: /\b([A-Z0-9_]{0,256}?(?:SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|AUTH|CREDENTIALS?|CREDS?|KEY)[A-Z0-9_]{0,256}\b\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|"(?:[^"\n\\]|\\.)*|'(?:[^'\n\\]|\\.)*|[^\s'";,]+)/gi,
     replacement: "$1[redacted]",
   },
 ];
+
+/**
+ * Apply the secrets blocklist, optionally preserving the newline count of
+ * each match so line numbers survive redaction (search locations).
+ */
+function applyBlocklist(text: string, preserveLines: boolean): string {
+  let out = text;
+  for (const { re, replacement, guard } of BLOCKLIST) {
+    if (guard !== undefined && !guard(out)) continue;
+    re.lastIndex = 0;
+    if (!preserveLines) {
+      out = out.replace(re, replacement);
+      continue;
+    }
+    out = out.replace(re, (...args: unknown[]) => {
+      const matched = String(args[0] ?? "");
+      const groups = args.slice(1, -2);
+      const expanded = expandReplacement(replacement, groups);
+      const missing = newlineCount(matched) - newlineCount(expanded);
+      return missing > 0 ? `${expanded}${"\n".repeat(missing)}` : expanded;
+    });
+  }
+  return out;
+}
+
+function redactWith(text: string, preserveLines: boolean): string {
+  if (typeof text !== "string" || text.length === 0) return text;
+  let out: string;
+  try {
+    out = stripPrivateBlocks(text, preserveLines);
+  } catch {
+    return REDACTED;
+  }
+  try {
+    out = applyBlocklist(out, preserveLines);
+  } catch {
+    return REDACTED;
+  }
+  return out;
+}
 
 /**
  * Redact secrets and `<private>` blocks from text. Pure, synchronous, never
  * throws (fail-closed to the redacted placeholder on unexpected input).
  */
 export function redact(text: string): string {
-  if (typeof text !== "string" || text.length === 0) return text;
-  let out: string;
-  try {
-    out = stripPrivateBlocks(text);
-  } catch {
-    return REDACTED;
-  }
-  try {
-    for (const { re, replacement } of BLOCKLIST) {
-      re.lastIndex = 0;
-      out = out.replace(re, replacement);
-    }
-  } catch {
-    return REDACTED;
-  }
-  return out;
+  return redactWith(text, false);
+}
+
+/**
+ * Redact like `redact`, but preserve the number of newlines removed by each
+ * match. `memory_search` uses this so a hit's `line` still points at the
+ * on-disk line after a `<private>` block or a multiline secret earlier in the
+ * file. The content is still fully redacted; only blank lines are retained.
+ */
+export function redactPreservingLines(text: string): string {
+  return redactWith(text, true);
 }

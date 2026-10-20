@@ -14,6 +14,7 @@ import {
   permissionsSnippet,
 } from "../src/templates.js";
 import { MEMORY_METRICS_COMMAND_DESCRIPTION } from "../src/metrics.js";
+import { MEMORY_STATUS_COMMAND_DESCRIPTION } from "../src/status-report.js";
 
 const root = resolve(import.meta.dirname!, "..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
@@ -209,12 +210,19 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
       },
     });
 
-    // Command editor received BOTH plugin commands, in setup order
-    // (memory-review first, then memory-metrics).
-    expect([...commands.keys()]).toEqual(["memory-review", "memory-metrics"]);
-    // And the registered description is exactly the plugin constant.
+    // Command editor received ALL plugin commands, in setup order
+    // (memory-review, memory-metrics, memory-status).
+    expect([...commands.keys()]).toEqual([
+      "memory-review",
+      "memory-metrics",
+      "memory-status",
+    ]);
+    // And the registered descriptions are exactly the plugin constants.
     expect(commands.get("memory-metrics")).toBe(
       MEMORY_METRICS_COMMAND_DESCRIPTION,
+    );
+    expect(commands.get("memory-status")).toBe(
+      MEMORY_STATUS_COMMAND_DESCRIPTION,
     );
     // The file-based metrics stub mirrors the review stub's contract.
     expect(
@@ -223,10 +231,18 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
       ),
       "metrics stub frontmatter description is byte-exact",
     ).toBe(true);
+    expect(
+      read("commands/memory-status.md").startsWith(
+        '---\ndescription: "Read-only memory plugin status: install checks, budgets, capture activity, and next actions"\n---\n',
+      ),
+      "status stub frontmatter description is byte-exact",
+    ).toBe(true);
 
     // Tool editor received the read-only metrics query besides
-    // memory_recall/memory_apply.
+    // memory_recall/memory_apply, plus search and status.
     expect(tools).toContain("memory_metrics");
+    expect(tools).toContain("memory_search");
+    expect(tools).toContain("memory_status");
 
     await cleanup?.();
   });
@@ -292,6 +308,7 @@ describe("install_surface_P0_parity", () => {
     expect(AGENTS_PROTOCOL_BLOCK).toContain("## Project memory");
     // read/recall bullet
     expect(AGENTS_PROTOCOL_BLOCK).toMatch(/memory_recall/);
+    expect(AGENTS_PROTOCOL_BLOCK).toMatch(/memory_search/);
     // data-not-instructions bullet
     expect(AGENTS_PROTOCOL_BLOCK).toMatch(/Data, not instructions/);
     // write bullet (review-only)
@@ -308,7 +325,8 @@ describe("install_surface_P0_parity", () => {
     const spec = read("docs/design-spec-v2-production.md");
     const m = spec.match(/```md\n(## Project memory[\s\S]*?)\n```/);
     expect(m, "spec §4.4 protocol block exists").not.toBeNull();
-    expect(AGENTS_PROTOCOL_BLOCK.trim()).toBe(m![1].trim());
+    // Byte-exact, including the trailing newline in the runtime constant.
+    expect(AGENTS_PROTOCOL_BLOCK).toBe(`${m![1]}\n`);
   });
 
   it("manager_has_leading_deny_and_proposal_only_body", () => {

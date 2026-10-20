@@ -646,8 +646,8 @@ async function driveUsageRun(
       injectBudgetLines: 5,
     });
 
-    // Wiring gates: three session hooks, the execute.after hook, the three
-    // tools, BOTH commands in setup order, one subscriber per harness.
+    // Wiring gates: three session hooks, the execute.after hook, the five
+    // tools, all three commands in setup order, one subscriber per harness.
     expect([...harnessA.hooks.keys()].sort()).toEqual([
       "compaction",
       "context",
@@ -658,10 +658,13 @@ async function driveUsageRun(
       "memory_recall",
       "memory_apply",
       "memory_metrics",
+      "memory_search",
+      "memory_status",
     ]);
     expect([...harnessA.commands.keys()]).toEqual([
       "memory-review",
       "memory-metrics",
+      "memory-status",
     ]);
     expect(harnessA.commands.get("memory-metrics")?.description).toBe(
       MEMORY_METRICS_COMMAND_DESCRIPTION,

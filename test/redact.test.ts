@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { redact } from "../src/redact.js";
+import { redact, redactPreservingLines } from "../src/redact.js";
 
 const fixturePath = resolve(import.meta.dirname!, "fixtures/secrets.txt");
 const secrets = readFileSync(fixturePath, "utf8")
@@ -102,6 +102,30 @@ describe("quoted_env_values_with_spaces", () => {
   });
 });
 
+describe("line_preserving_redaction", () => {
+  it("keeps on-disk line numbers after a private block", () => {
+    const raw = "one\ntwo\n<private>\nsecret-line\n</private>\nfindme";
+    const out = redactPreservingLines(raw);
+    expect(out).not.toContain("secret-line");
+    expect(out.split("\n")).toHaveLength(raw.split("\n").length);
+    expect(out.split("\n").indexOf("findme")).toBe(5);
+  });
+
+  it("keeps line numbers after a multiline private key", () => {
+    const raw = [
+      "before",
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEow-secret-body",
+      "-----END RSA PRIVATE KEY-----",
+      "findme",
+    ].join("\n");
+    const out = redactPreservingLines(raw);
+    expect(out).not.toContain("MIIEow-secret-body");
+    expect(out.split("\n")).toHaveLength(raw.split("\n").length);
+    expect(out.split("\n").indexOf("findme")).toBe(4);
+  });
+});
+
 describe("escaped_quotes_in_values", () => {
   it("consumes escaped quotes inside double-quoted values", () => {
     const out = redact('PASSWORD="first\\"remaining-secret"');
@@ -114,5 +138,103 @@ describe("escaped_quotes_in_values", () => {
     const out = redact("TOKEN='it\\'s-secret-value'");
     expect(out).not.toContain("secret-value");
     expect(out).toContain("TOKEN=[redacted]");
+  });
+});
+
+describe("linear_time_guard", () => {
+  it("redacts URL credentials with an empty user", () => {
+    const out = redact("redis://:SuperSecretPW@host:6379/0");
+    expect(out).not.toContain("SuperSecretPW");
+    expect(out).toContain("redis://:[redacted]@host:6379/0");
+  });
+
+  it("redacts credentials in a URL embedded after word characters", () => {
+    const out = redact("prefix foo_postgres://user:SuperSecretPW@host/db");
+    expect(out).not.toContain("SuperSecretPW");
+    expect(out).toContain("foo_postgres://user:[redacted]@host/db");
+  });
+
+  it("redacts credentials in a URL glued to a long alphanumeric run", () => {
+    const out = redact(`${"a".repeat(60)}https://user:SuperSecretPW@host`);
+    expect(out).not.toContain("SuperSecretPW");
+  });
+
+  it("stays linear on a long single-line file (no catastrophic backtracking)", () => {
+    const line = "x".repeat(100_000);
+    const started = Date.now();
+    const out = redact(line);
+    expect(out).toBe(line);
+    // Before the bound, this took ~14s in the URL regex; 1s is a wide
+    // regression guard against reintroducing unbounded backtracking.
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("stays linear on hostile <private> tag runs", () => {
+    const cases = [
+      "<private ".repeat(11_112),
+      "</private ".repeat(10_000),
+      `<private${" ".repeat(100_000)}`,
+    ];
+    for (const text of cases) {
+      const started = Date.now();
+      redact(text);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
+  it("stays linear on hostile secret-key runs", () => {
+    for (const text of [
+      "KEY".repeat(33_334),
+      "SECRET".repeat(16_667),
+      "AUTH".repeat(25_000),
+    ]) {
+      const started = Date.now();
+      redact(text);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
+  it("redacts a key with a long but bounded prefix", () => {
+    const out = redact(`${"A".repeat(200)}KEY=secret-value`);
+    expect(out).not.toContain("secret-value");
+    expect(out).toContain("[redacted]");
+  });
+
+  it("fails closed for overlong URL credentials", () => {
+    const password = "p".repeat(2049);
+    const out = redact(`https://user:${password}@host`);
+    expect(out).not.toContain(password);
+    expect(out).toContain("https://user:[redacted]@host");
+
+    const longUser = "u".repeat(2049);
+    const withLongUser = redact(`https://${longUser}:${password}@host`);
+    expect(withLongUser).not.toContain(password);
+    expect(withLongUser).toContain("[redacted]");
+  });
+
+  it("redacts a long URL credential without quadratic backtracking", () => {
+    const password = "p".repeat(100_000);
+    const started = Date.now();
+    const out = redact(`https://user:${password}@host`);
+    expect(out).toBe("https://user:[redacted]@host");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("fail-closes a truncated private key to EOF and stays linear", () => {
+    // Build the PEM header from parts: the runtime string is identical, but
+    // the repo's gitleaks job would otherwise flag this test as a real key.
+    const begin = ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ");
+    const body = "MIIE-secret-body";
+    const truncated = `keep\n${begin}\n${body}\ntrailer`;
+    const out = redact(truncated);
+    expect(out).toContain("keep");
+    expect(out).not.toContain(body);
+    // Deliberate fail-closed: a lone BEGIN consumes the rest of the file.
+    expect(out).not.toContain("trailer");
+
+    const many = `${begin}\n`.repeat(2_000);
+    const started = Date.now();
+    redact(many);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });

@@ -18,7 +18,10 @@
 | `memory_apply` tool | The **only** channel that writes approved lines: executor-bound IDs, one `assert({action:"memory_write",resources:[file],save:[]})` per candidate sequentially (deny propagates; `candidates:[]` resets); requires shipped `memory_write → ask`; untrusted lines cannot be bulk-approved | `ctx.tool.transform` |
 | `/memory-review` command | Propose scratchpad → durable promotions (`decisions/architecture/style/issues`); validate `issues.md` manual edits; human approves | `ctx.command.transform` |
 | Metrics + dashboard | Count-only usage metrics at every intervention seam (fire-and-forget, never-throw, numbers only — no content, ADR-0008); deterministic markdown dashboard via the read-only `memory_metrics` tool and the `/memory-metrics [reset]` command; reset wipes the metrics namespace; posted without a model turn (`ctx.session.synthetic`, G-M1 gate + §5.5-style prompt fallback) | `ctx.tool.transform`, `ctx.command.transform`, `ctx.session.synthetic` |
-| Loaders | `indexWithinCap`, `loadBrief`, `loadPriors`, `matchIndex` (all async + awaited), `readCapped`/`writeCapped` (`node:fs/promises`, budget-enforcing) | async functions |
+| `memory_search` tool | Full-file literal grep across the same allowlist (`readFullRedacted`: allowlist/traversal choke point + redaction + 1 MB per-file guard); deterministic structural → handoffs → archive order; 200-candidate cap, 20 default / 50 max results; read-only (no counters, no writes, no new keys); results are untrusted data and never auto-injected | `ctx.tool.transform` |
+| Status report | Read-only `/memory-status` command + `memory_status` tool over one deterministic renderer: scaffold, INDEX attachability (missing = not attached), AGENTS.md block, advisory same-object `memory_write → ask` scan, optional agent, capture activity, budgets/version/since/latest handoff, next actions; synthetic post + §5.5 fallback; no body, no writes, no counter bumps | `ctx.tool.transform`, `ctx.command.transform`, `ctx.session.synthetic` |
+| Loaders | `indexWithinCap`, `loadBrief`, `loadPriors`, `matchIndex` (all async + awaited), `readCapped`/`writeCapped` (`node:fs/promises`, budget-enforcing), `readFullRedacted` (full allowlisted read under the search byte guard), `searchMemory` (`search.ts`) | async functions |
+| Status collectors | `collectStatus` + pure `renderStatusReport` (`status-report.ts`): existing counters/health/install markers only; whitespace-collapsed one-line bounds; no clock in the renderer | async + pure functions |
 | Redactor | Secrets blocklist + `<private>` stripping before any write/inject | pure function |
 
 ```mermaid
@@ -30,6 +33,8 @@ flowchart TD
   C[Model dispatch] --> CH[Context hook] --> Brief[Brief summary lines + status line + hint]
   K[Compaction] --> KH[Compaction hook: priors only, never event.result]
   Agent --> Tool[memory_recall: allowlisted, recall-only bodies] --> Files[Memory files]
+  Agent --> Search[memory_search: full-file literal grep, redacted] --> Files
+  Dev --> Status[/memory-status or memory_status: read-only install/health] --> Files
   U[User directive: remember] --> Prov2[source:user] --> Dec[decisions.md append-only, tagged]
   Dev --> Cmd[/memory-review] --> Prop[Proposal table + provenance + flags]
   Prop --> Approve[Human approves per line via memory_apply: assert per line] --> Durable[decisions/architecture/style/issues]
@@ -51,4 +56,5 @@ flowchart TD
 - `decisions.md` and `handoffs/` are append-only/immutable; `architecture.md`/`style.md`/`issues.md` are review-gated rewrites (git blame preserves lineage).
 - **Memory content is untrusted data, never instructions.** No component acts on text read from memory; the review writes no memory and only proposes (its only durable side effect is the §5.12 `review.invoked` counter — count diagnostics, no content), and every durable write is approved per line (`memory_apply`) — not merely a system-prompt instruction; captured command output never enters the auto-injected payload except as a tagged summary line; untrusted candidates are never bulk-approved (ADR-0007).
 - No component calls the network, embeddings, or an LLM in the default path.
+- Setup registers **five tools** (`memory_recall`, `memory_apply`, `memory_metrics`, `memory_search`, `memory_status`) and **three commands** (`/memory-review`, `/memory-metrics`, `/memory-status`); search/status are read-only and add no metrics or storage keys.
 - Decisions: ADR-0001 through ADR-0007.
