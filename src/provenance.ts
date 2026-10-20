@@ -97,6 +97,41 @@ export function extractAssertedFacts(text: string): string[] {
   return facts;
 }
 
+const NEAR_MISS_PREFIX =
+  /^(?:please\s+|kindly\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)?remember\b(.*)$/i;
+const NARRATIVE_AFTER_REMEMBER =
+  /^\s*(?:when|how|what|where|who|why)\b/i;
+
+/**
+ * True when `text` looks like a memory request but is not one of the
+ * documented line-start `remember:` / `remember that` forms. This is pure
+ * detection for the context-hook nudge: it never writes memory.
+ *
+ * Requires: no valid directive fact anywhere in the visible text; a visible
+ * (non-fenced, non-blockquoted) line whose inline-code-stripped form starts
+ * with an optional politeness prefix + `remember`; and a remainder that does
+ * not start with a narrative wh-word (`remember when…`, `remember how…`).
+ * Thus `Please remember: X`, `remember X`, and bare `remember:` nudge, while
+ * valid directives, `I remember…`, `we should remember…`, and fenced/quoted
+ * text do not. Never throws.
+ */
+export function isRememberNearMiss(text: unknown): boolean {
+  try {
+    if (typeof text !== "string" || text.length === 0) return false;
+    if (extractAssertedFacts(text).length > 0) return false;
+    for (const line of visibleLines(text)) {
+      const stripped = line.replace(INLINE_CODE, "").trim();
+      const match = stripped.match(NEAR_MISS_PREFIX);
+      if (match === null) continue;
+      if (NARRATIVE_AFTER_REMEMBER.test(match[1] ?? "")) continue;
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /** Stable content ID for a redacted user-asserted fact. */
 export function assertedContentID(fact: string): string {
   return createHash("sha256").update(`user-asserted\n${fact}`, "utf8").digest(

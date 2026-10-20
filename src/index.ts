@@ -18,7 +18,7 @@ import {
   loadPriors,
   truncateLinesWithNotice,
 } from "./brief.js";
-import { matchIndex } from "./hints.js";
+import { matchIndex, matchRememberNearMiss } from "./hints.js";
 import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
@@ -218,12 +218,27 @@ export default Plugin.define({
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
           });
-          const hint = await matchIndex(event.messages, {
+          // One hint slot: a remember near-miss outranks an INDEX hit for
+          // the same prompt (it is an explicit write attempt the user just
+          // missed). `matchRememberNearMiss` shares the prompt-hash throttle
+          // with `matchIndex`, so at most one of them can fire.
+          const rememberHint = await matchRememberNearMiss(event.messages, {
             storage: ledger,
             projectID,
             sessionID: event.sessionID,
             memoryRoot,
           });
+          const hint =
+            rememberHint ??
+            (await matchIndex(event.messages, {
+              storage: ledger,
+              projectID,
+              sessionID: event.sessionID,
+              memoryRoot,
+            }));
+          // Only an INDEX hint is a recall call-to-action. A near-miss nudge
+          // must never arm the hint→recall correlation.
+          const hintArms = rememberHint === undefined && hint !== undefined;
 
           // Budget: INDEX (≤indexLines) + brief (≤48) + status (≤1) +
           // hint (≤1) ≤ injectBudgetLines. Overflow truncates the brief
@@ -307,10 +322,12 @@ export default Plugin.define({
           if (hint !== undefined) {
             event.system.push({ type: "text", text: hint });
             bump("hint.shown");
-            // Arm the hint→recall correlation for this session (decision 4:
-            // awaited; `setArm` is itself never-throw/never-reject, so the
-            // await cannot surface a failure to this hook).
-            await setArm(ledger, projectID, event.sessionID);
+            // Arm the hint→recall correlation only for an INDEX hint
+            // (decision 4: awaited; `setArm` is itself never-throw/never-
+            // reject, so the await cannot surface a failure to this hook).
+            if (hintArms) {
+              await setArm(ledger, projectID, event.sessionID);
+            }
           }
 
           // Throttled handoff writer: fire-and-forget, never awaited.
