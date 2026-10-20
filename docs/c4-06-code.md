@@ -10,9 +10,9 @@ Production package (`src/`) and local drop-in (`.opencode/plugins/memory/`) shar
 src/ (or .opencode/plugins/memory/)
 └── index.ts        # Plugin.define({ id: "memory", setup }) — wiring only
     ├── brief.ts     # loadBrief, loadPriors (capped)
-    ├── hints.ts     # matchIndex (exact match + once-per-prompt throttle)
+    ├── hints.ts     # matchIndex + matchRememberNearMiss (one hint slot, once-per-prompt throttle)
     ├── status.ts    # statusLine (over-cap INDEX notice + rotation notice + skipped-capture notice + review-due nudge)
-    ├── capture.ts   # captureFailure, snapshotHandoffIfChanged, ledger helpers
+    ├── capture.ts   # captureFailure, snapshotHandoffIfChanged, pruneSeenTo500, pruneLedgerState, ledger helpers
     ├── provenance.ts# classifyProvenance, rememberAsserted (source:user fast path)
     ├── guard.ts     # flagInjection (advisory), untrusted labelling, sanitizeForBrief
     ├── tools.ts     # ctx.tool.transform: memory_recall, memory_apply, memory_metrics, memory_search, memory_status
@@ -20,7 +20,7 @@ src/ (or .opencode/plugins/memory/)
     ├── search.ts    # literal full-allowlist search core + deterministic renderer (spec §5.14)
     ├── status-report.ts # read-only status collectors + pure renderer + /memory-status + memory_status (spec §5.13)
     ├── redact.ts    # secrets blocklist + <private> stripping (bounded URL-credential regex for linear-time full-file reads)
-    ├── metrics.ts   # count-only counters (bump via ledger mutex), 90-day prune, dashboard renderer, /memory-metrics command (ADR-0008, spec §5.12)
+    ├── metrics.ts   # count-only counters (bump via ledger mutex), 90-day prune, METRIC_LABELS renderer, /memory-metrics command with two-step reset (ADR-0008, spec §5.12)
     ├── config.ts    # ≤5 options, defaults, validation (ctx.options)
     └── templates.ts # six-file scaffolds + AGENTS.md protocol block text
 commands/
@@ -50,13 +50,13 @@ test/
 - `sanitizeForBrief(entry)`: collapses the entry to one message-derived summary line (newlines collapsed, ≤120 chars) with its `source:` tag; the body is dropped, not truncated into the brief.
 - `flagInjection(text)`: returns advisory flags (imperative/instruction-shaped text, agent-directed directives, URL/`fetch` payloads, encoded blobs). Never blocks, never rejects, never labelled "detected".
 - `snapshotHandoffIfChanged(event, ledger)`: resolves the memory root for the **event's** session/location (`event.location` + `data.sessionID`, fallback `ctx.location`), never a root captured at load, and runs only for events in this location (`isThisLocation` compares directory + session/project IDs); `branch` via `(await ctx.vcs.get()).data.branch.current` (fallback `(await (ctx.vcs.branch?.list ?? ctx.vcs.branches)()).data[0] ?? "unknown"`, warn-only); open changes via `(await ctx.vcs.status()).data` (fallback `(await ctx.vcs.diff({mode:"working",context:3})).data`, normalized since the fallback changes `FileStatus[]` to `FileDiff[]`); hash(branch+status+pending); same hash as `<projectID>/snapshot/<sessionID>` → no-op, else new immutable `handoffs/YYYY-MM-DD-HHmmss-<session6>.md`; newest wins. Async, fire-and-forget, serialized, never-throw per dispatch (a throw on event N must not stop N+1). All VCS calls sit behind one adapter.
-- `ledger`: `ctx.storage` only — `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>` + `<projectID>/notice.indexOverCap` / `<projectID>/notice.captureFailed` (transient positive-int notices, cleared after the status line reports them), pruned via `scan({prefix:"<projectID>/seen/"})` with `after`/`next` pagination to ≤500; compaction `ended` replay-guarded via `<projectID>/seen/<event.id>`; persisted, never in-memory alone. The API has no compare-and-set, so a single-flight map keyed by content ID serializes concurrent `execute.after` checks; a duplicate that still slips through is benign.
+- `ledger`: `ctx.storage` only — `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` (`{hash, at}`; legacy strings accepted and normalized on the first prune) + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>` + `<projectID>/notice.indexOverCap` / `<projectID>/notice.captureFailed` (transient positive-int notices, cleared after the status line reports them); `seen` pruned via `scan({prefix:"<projectID>/seen/"})` with `after`/`next` pagination to ≤500, and `pruneLedgerState` removes aged attempt (30s), hint (7 UTC days), and snapshot/throttle (30 UTC days) keys with the scan outside the write lock and a value re-read inside it; compaction `ended` replay-guarded via `<projectID>/seen/<event.id>`; persisted, never in-memory alone. The API has no compare-and-set, so a single-flight map keyed by content ID serializes concurrent `execute.after` checks; a duplicate that still slips through is benign.
 - Lifecycle: capture each `Registration` returned by `hook`/`transform`; a **single shared** event `AbortController` (not one per subscriber) is aborted and every registration is disposed in the `setup` cleanup, which awaits `dispose()`. Unloading also disposes registrations; async cleanup awaiting is best-effort (G3).
 
 ## Setup / dev
 
 - Config location matters. If config is `.opencode/opencode.jsonc`: `"plugins": ["./plugins/memory"]`. If config is repo-root `opencode.jsonc`: `"plugins": ["./.opencode/plugins/memory"]`. Drop-in alternative: `.opencode/plugins/memory/` auto-discovery; `opencode plugin list` verifies load; touch the entry file or restart the runtime per its reload guidance if a stale load is suspected.
-- First run scaffolds templates + `handoffs/` and emits the commented ≤5-option snippet; it never edits `opencode.jsonc` or `AGENTS.md` (ADR-0006).
+- First run scaffolds templates + `handoffs/` and emits one consolidated install checklist (permission rule + protocol block + commented ≤5-option snippet + `/memory-status` pointer); later setups keep the unconditional permission warning. It never edits `opencode.jsonc` or `AGENTS.md` (ADR-0006).
 - Pin an exact tested `@opencode/plugin` release (2.0.x; tested `2.0.29`); never `latest`.
 
 ## Test list (pre-merge acceptance)
