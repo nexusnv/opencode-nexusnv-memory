@@ -1059,7 +1059,9 @@ envelope (`{ content }`). `/memory-status` takes no arguments and returns `void`
 report and posts it with `ctx.session.synthetic({ sessionID, text })`. If the synthetic post rejects,
 the executor falls back to the §5.5 prompt pattern (`ctx.session.prompt({ ...prompt, sessionID,
 delivery, text })`) asking the agent to call `memory_status` and echo the report verbatim. The command
-never throws: report-read failures are logged as a best-effort diagnostic and post nothing.
+never throws: report-read failures are logged as a best-effort diagnostic and post nothing. The tool
+surface returns the report or propagates a real collection error; it is not the never-throw fallback
+path.
 
 **Checks (fixed order).**
 1. **Memory directory** — present or missing (missing: "scaffolds on first run"; next action: restart/
