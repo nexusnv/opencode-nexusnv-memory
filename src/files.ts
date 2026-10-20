@@ -10,16 +10,22 @@
  */
 import { constants } from "node:fs";
 import {
+  link,
+  lstat,
   mkdir,
   open,
-  readFile,
+  readdir,
   realpath,
+  rename,
   stat,
+  unlink,
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
+import { acquireWriteLock, type FileLockOptions } from "./lock.js";
 import { redact, redactPreservingLines } from "./redact.js";
 
 export interface CappedFileOptions {
@@ -44,12 +50,15 @@ const HANDOFF_PATTERN = /^handoffs\/(?:archive\/)?[A-Za-z0-9._-]+\.md$/;
 
 const ENCODED_SEPARATOR = /%2e|%2f|%5c/i;
 
-/** One per-process write chain; every plugin write serializes through it. */
+/** Per-process chain for ledger/storage writes (not memory files). */
 let writeChain: Promise<void> = Promise.resolve();
+/** Per-process chain for memory-file lock acquisition and write bodies. */
+let fileWriteChain: Promise<void> = Promise.resolve();
 
 /**
- * Run `fn` under the per-process write mutex. Concurrent callers queue in
- * call order; a rejection never breaks the chain for the next waiter.
+ * Run `fn` under the per-process ledger/storage write mutex. Concurrent
+ * callers queue in call order; a rejection never breaks the chain for the
+ * next waiter.
  */
 export function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = writeChain.then(fn, fn);
@@ -60,9 +69,38 @@ export function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Test seam: reset the chain between isolated suites (no on-disk state). */
+function withFileMutex<T>(fn: () => Promise<T>): Promise<T> {
+  const run = fileWriteChain.then(fn, fn);
+  fileWriteChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** Test seam: reset both write chains between isolated suites (no on-disk state). */
 export function resetWriteChainForTests(): void {
   writeChain = Promise.resolve();
+  fileWriteChain = Promise.resolve();
+}
+
+/**
+ * Run `fn` while holding both the in-process file mutex and the root-level
+ * cross-process lock. The callback must not call `withFileWriteLock` again.
+ */
+export async function withFileWriteLock<T>(
+  root: string,
+  fn: () => Promise<T>,
+  options?: FileLockOptions,
+): Promise<T> {
+  return withFileMutex(async () => {
+    const release = await acquireWriteLock(root, options);
+    try {
+      return await fn();
+    } finally {
+      await release().catch(() => undefined);
+    }
+  });
 }
 
 export function resolveMemoryRoot(memoryRoot?: string): string {
@@ -200,6 +238,7 @@ async function openContainedRead(
   file: string,
 ): Promise<{ readonly handle: FileHandle; readonly size: number }> {
   const abs = resolveUnderRoot(root, file);
+  await assertContainedAncestors(root, dirname(abs));
   const handle = await open(abs, READ_OPEN_FLAGS);
   try {
     const opened = await handle.stat();
@@ -292,6 +331,17 @@ function knownErrorBlocks(
   }
   if (current) blocks.push(current);
   return blocks;
+}
+
+/** Known-Errors block ranges for `allLines`, or `[]` when no heading exists. */
+export function knownErrorBlockRanges(
+  allLines: readonly string[],
+): Array<{ readonly start: number; readonly end: number }> {
+  const headingIdx = allLines.findIndex((line) =>
+    KNOWN_ERRORS_HEADING.test(line.trim()),
+  );
+  if (headingIdx === -1) return [];
+  return knownErrorBlocks([...allLines], headingIdx);
 }
 
 /** Archive filename safe for the handoff allowlist (no colons). */
@@ -441,8 +491,320 @@ export async function readFullRedacted(
   }
 }
 
+export interface ContainedTextOptions {
+  readonly memoryRoot?: string;
+  readonly onMissing?: "skip";
+  readonly maxBytes?: number;
+}
+
+export interface ContainedTextResult {
+  readonly text: string;
+  readonly truncated: boolean;
+}
+
 /**
- * Inner write body: assumes the caller already holds `withWriteLock` and
+ * Bounded contained read (default 1 MiB). No search-specific line dropping;
+ * the caller decides whether a truncated result is usable.
+ */
+export async function readContainedText(
+  file: string,
+  opts?: ContainedTextOptions,
+): Promise<ContainedTextResult | undefined> {
+  assertAllowedPath(file);
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  let handle: FileHandle | undefined;
+  try {
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    const limit = Math.max(1, Math.trunc(opts?.maxBytes ?? 1_048_576));
+    const length = Math.min(opened.size, limit);
+    const buffer = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        length - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return {
+      text: buffer.subarray(0, offset).toString("utf8"),
+      truncated: opened.size > limit,
+    };
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException)?.code === "ENOENT" &&
+      opts?.onMissing === "skip"
+    ) {
+      return undefined;
+    }
+    throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+  }
+}
+
+export interface ContainedLinesOptions {
+  readonly memoryRoot?: string;
+  readonly maxLines: number;
+  readonly maxBytes?: number;
+  readonly onMissing?: "skip";
+}
+
+export interface ContainedLinesResult {
+  readonly lines: string[];
+  readonly truncated: boolean;
+}
+
+/**
+ * Bounded line read for hot prompt paths. Reads at most `maxLines` lines and
+ * `maxBytes` bytes; a byte hit before the line cap is reported as truncated so
+ * `indexLineCount` can fail closed. Junk-length lines never fully materialize.
+ */
+export async function readContainedLines(
+  file: string,
+  opts: ContainedLinesOptions,
+): Promise<ContainedLinesResult | undefined> {
+  assertAllowedPath(file);
+  const root = resolveMemoryRoot(opts.memoryRoot);
+  let handle: FileHandle | undefined;
+  const decoder = new StringDecoder("utf8");
+  const chunk = Buffer.alloc(64 * 1024);
+  const lines: string[] = [];
+  let carry = "";
+  let bytes = 0;
+  let truncated = false;
+  try {
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    const limit = Math.max(1, Math.trunc(opts.maxLines));
+    const maxBytes = Math.max(1, Math.trunc(opts.maxBytes ?? 1_048_576));
+    const accept = (line: string): boolean => {
+      const clean = line.endsWith("\r") ? line.slice(0, -1) : line;
+      const size = Buffer.byteLength(clean, "utf8") + 1;
+      if (lines.length >= limit || bytes + size > maxBytes) {
+        truncated = true;
+        return false;
+      }
+      lines.push(clean);
+      bytes += size;
+      return true;
+    };
+    outer: for (;;) {
+      const { bytesRead } = await handle.read(
+        chunk,
+        0,
+        chunk.length,
+        null,
+      );
+      if (bytesRead === 0) break;
+      carry += decoder.write(chunk.subarray(0, bytesRead));
+      let newline = carry.indexOf("\n");
+      while (newline !== -1) {
+        const line = carry.slice(0, newline);
+        carry = carry.slice(newline + 1);
+        if (!accept(line)) break outer;
+        newline = carry.indexOf("\n");
+      }
+      if (Buffer.byteLength(carry, "utf8") > maxBytes) {
+        truncated = true;
+        break;
+      }
+    }
+    if (!truncated) {
+      carry += decoder.end();
+      if (carry.length > 0) accept(carry);
+    }
+    return { lines, truncated };
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException)?.code === "ENOENT" &&
+      opts.onMissing === "skip"
+    ) {
+      return undefined;
+    }
+    throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Exact contained handoff directory listing. Aliases (including in-root
+ * symlinks such as `handoffs -> .` or `handoffs/archive -> ..`) and off-root
+ * targets yield an empty listing rather than filenames from the wrong dir.
+ */
+export async function readHandoffDirectory(
+  memoryRoot: string | undefined,
+  subdir: "root" | "archive",
+): Promise<string[]> {
+  const root = resolveMemoryRoot(memoryRoot);
+  const relativeDir =
+    subdir === "archive" ? join("handoffs", "archive") : "handoffs";
+  const directory = join(root, relativeDir);
+  const realRoot = await realpath(root);
+  const realDir = await realpath(directory);
+  if (realDir !== join(realRoot, relativeDir)) return [];
+  return readdir(realDir);
+}
+
+/** Reject escaping ancestors and handoff/archive symlink aliases. */
+async function assertContainedAncestors(
+  root: string,
+  directory: string,
+): Promise<void> {
+  const realRoot = await realpath(root);
+  const rel = relative(root, directory);
+  if (rel === "") return;
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`[memory] rejected escape from memory root: ${directory}`);
+  }
+  let current = root;
+  for (const segment of rel.split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    const info = await lstat(current).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (info === undefined) return;
+    if (info.isSymbolicLink()) {
+      const currentRel = relative(root, current);
+      if (
+        currentRel === "handoffs" ||
+        currentRel === join("handoffs", "archive")
+      ) {
+        throw new Error(
+          `[memory] rejected handoff symlink alias (symlink escape): ${current}`,
+        );
+      }
+      const target = await realpath(current);
+      if (target !== realRoot && !target.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(
+          `[memory] rejected symlink escape from memory root: ${current}`,
+        );
+      }
+      const targetInfo = await stat(current);
+      if (!targetInfo.isDirectory()) {
+        throw new Error(`[memory] rejected non-directory memory parent: ${current}`);
+      }
+    } else if (!info.isDirectory()) {
+      throw new Error(`[memory] rejected non-directory memory parent: ${current}`);
+    }
+  }
+}
+
+async function assertContainedDirectory(
+  root: string,
+  directory: string,
+): Promise<void> {
+  const realRoot = await realpath(root);
+  const realDir = await realpath(directory);
+  if (realDir !== realRoot && !realDir.startsWith(`${realRoot}${sep}`)) {
+    throw new Error(`[memory] rejected symlink escape from memory root: ${directory}`);
+  }
+}
+
+/**
+ * Validate existing ancestors, create the parent, then re-check the resolved
+ * parent. The first check prevents `mkdir` from following an outside symlink;
+ * the second detects a parent swapped during `mkdir`. A same-host attacker
+ * racing the path between those checks is outside the documented threat model.
+ */
+async function prepareParent(root: string, abs: string): Promise<void> {
+  const directory = dirname(abs);
+  // Exported writers may be called before the plugin scaffold exists.
+  await mkdir(root, { recursive: true });
+  await assertContainedAncestors(root, directory);
+  await mkdir(directory, { recursive: true });
+  await assertContainedDirectory(root, directory);
+}
+
+function tempPathFor(abs: string): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return join(dirname(abs), `.tmp-${process.pid}-${Date.now()}-${rand}`);
+}
+
+/** Publish `text` with same-directory temp + rename (old or new complete). */
+async function publishAtomic(
+  root: string,
+  abs: string,
+  text: string,
+  beforeRename?: () => Promise<void>,
+): Promise<void> {
+  await prepareParent(root, abs);
+  const tmp = tempPathFor(abs);
+  try {
+    await writeFile(tmp, text, { encoding: "utf8", flag: "wx" });
+    await beforeRename?.();
+    await rename(tmp, abs);
+  } catch (error) {
+    await unlink(tmp).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Test-only seam to pause between temp write and rename. */
+export async function publishAtomicForTests(
+  root: string,
+  abs: string,
+  text: string,
+  beforeRename?: () => Promise<void>,
+): Promise<void> {
+  return publishAtomic(root, abs, text, beforeRename);
+}
+
+/** Publish a new file with temp + hard link (no overwrite, no partial read). */
+async function publishExclusive(
+  root: string,
+  abs: string,
+  text: string,
+): Promise<"created" | "exists"> {
+  await prepareParent(root, abs);
+  const tmp = tempPathFor(abs);
+  try {
+    await writeFile(tmp, text, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    await unlink(tmp).catch(() => undefined);
+    throw error;
+  }
+  try {
+    await link(tmp, abs);
+    return "created";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return "exists";
+    throw error;
+  } finally {
+    await unlink(tmp).catch(() => undefined);
+  }
+}
+
+async function readRawForMutation(
+  file: string,
+  root: string,
+  onMissing: "throw" | "empty",
+): Promise<string> {
+  assertAllowedPath(file);
+  let handle: FileHandle | undefined;
+  try {
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    return await handle.readFile("utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      if (onMissing === "empty") return "";
+      throw new Error(`[memory] memory file not found: ${file}`);
+    }
+    throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Inner write body: assumes the caller already holds `withFileWriteLock` and
  * passes already-redacted text. Shared by `writeCapped` (overwrite) and
  * `updateCapped` (read-modify-write) so caps, rotation, and archive routing
  * cannot drift between the two paths. Never takes the lock itself.
@@ -458,8 +820,7 @@ async function writeRedactedCapped(
   const total = countLines(redactedText);
   const cap = getCapForFile(file, indexLines, fileLines);
   if (!Number.isFinite(cap) || total <= (cap as number)) {
-    await mkdir(dirname(abs), { recursive: true });
-    await writeFile(abs, redactedText, "utf8");
+    await publishAtomic(root, abs, redactedText);
     return;
   }
   const limit = cap as number;
@@ -481,7 +842,7 @@ async function writeRedactedCapped(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
     );
   }
-  const blocks = knownErrorBlocks(working, headingIdx);
+  const blocks = knownErrorBlockRanges(working);
   if (blocks.length === 0) {
     throw new Error(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
@@ -507,24 +868,30 @@ async function writeRedactedCapped(
       `[memory] write rejected: activeContext.md still over cap ${limit} after rotating ${rotated.length} lines`,
     );
   }
-  const archiveRel = rotatedArchiveName();
-  assertAllowedPath(archiveRel);
-  const archiveAbs = resolveUnderRoot(root, archiveRel);
-  await mkdir(dirname(archiveAbs), { recursive: true });
-  await writeFile(
-    archiveAbs,
-    `# Rotated Known-Errors block(s) from activeContext.md\n\n${rotated.join("\n")}\n`,
-    "utf8",
-  );
-  await mkdir(dirname(abs), { recursive: true });
-  await writeFile(abs, remaining.join("\n"), "utf8");
+  let archiveRel = rotatedArchiveName();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    assertAllowedPath(archiveRel);
+    const archiveAbs = resolveUnderRoot(root, archiveRel);
+    const outcome = await publishExclusive(
+      root,
+      archiveAbs,
+      `# Rotated Known-Errors block(s) from activeContext.md\n\n${rotated.join("\n")}\n`,
+    );
+    if (outcome === "created") break;
+    if (attempt === 4) {
+      throw new Error("[memory] could not allocate a unique rotation archive name");
+    }
+    archiveRel = rotatedArchiveName();
+  }
+  await publishAtomic(root, abs, remaining.join("\n"));
 }
 
 /**
  * Write one allowlisted file (full-content overwrite). Text is redacted
- * first, then the cap is enforced; writes serialize via the per-process
- * mutex. Over-cap writes throw — except `activeContext.md`, which rotates
- * the oldest Known-Errors block(s) to `handoffs/archive/` until under cap.
+ * first, then the cap is enforced; writes serialize via the in-process file
+ * mutex and the cross-process root lock, and publish atomically. Over-cap
+ * writes throw — except `activeContext.md`, which rotates the oldest
+ * Known-Errors block(s) to `handoffs/archive/` until under cap.
  */
 export async function writeCapped(
   file: string,
@@ -535,23 +902,21 @@ export async function writeCapped(
   if (typeof text !== "string") {
     throw new Error("[memory] writeCapped text must be a string");
   }
-  const redactedText = redact(text);
-  await withWriteLock(async () => {
-    const { indexLines, fileLines } = capsOf(opts);
-    const root = resolveMemoryRoot(opts?.memoryRoot);
-    await writeRedactedCapped(file, redactedText, root, indexLines, fileLines);
+  await withCappedTransaction(opts, async (tx) => {
+    await tx.write(file, text);
   });
 }
 
 /**
  * Exclusive create of one allowlisted file: redaction, caps, and the
- * per-process mutex apply exactly as in `writeCapped`, but the file must
- * not already exist (`wx` flag). Resolves `"created"` on success or
- * `"exists"` when a file is already there (caller decides: dedupe when the
- * content matches, or retry under a suffixed name). Never overwrites, so a
- * same-name collision between two different handoffs cannot destroy either.
- * Intended for immutable new files (`handoffs/`); appends use
- * `updateCapped`, overwrites use `writeCapped`.
+ * in-process/cross-process locks apply exactly as in `writeCapped`, but the
+ * file must not already exist. Publishing uses temp + hard link, so readers
+ * never observe a partial file. Resolves `"created"` on success or `"exists"`
+ * when a file is already there (caller decides: dedupe when the content
+ * matches, or retry under a suffixed name). Never overwrites, so a same-name
+ * collision between two different handoffs cannot destroy either. Intended
+ * for immutable new files (`handoffs/`); appends use `updateCapped`,
+ * overwrites use `writeCapped`.
  */
 export async function writeNewCapped(
   file: string,
@@ -563,9 +928,9 @@ export async function writeNewCapped(
     throw new Error("[memory] writeNewCapped text must be a string");
   }
   const redactedText = redact(text);
-  return withWriteLock(async () => {
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  return withFileWriteLock(root, async () => {
     const { indexLines, fileLines } = capsOf(opts);
-    const root = resolveMemoryRoot(opts?.memoryRoot);
     const abs = resolveUnderRoot(root, file);
     const total = countLines(redactedText);
     const cap = getCapForFile(file, indexLines, fileLines);
@@ -574,27 +939,92 @@ export async function writeNewCapped(
         `[memory] write rejected: ${file} has ${total} lines, cap is ${cap}; refusing to silently truncate`,
       );
     }
-    await mkdir(dirname(abs), { recursive: true });
-    try {
-      await writeFile(abs, redactedText, { encoding: "utf8", flag: "wx" });
-      return "created" as const;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
-        return "exists" as const;
-      }
-      throw error;
-    }
+    return publishExclusive(root, abs, redactedText);
+  });
+}
+
+export interface CappedTransaction {
+  /** Read raw current text (redaction happens on write). */
+  read(file: string): Promise<string>;
+  /** Redacted, capped overwrite. */
+  write(file: string, text: string): Promise<void>;
+  /** Exclusive archive create without a line cap (archive is recall-only). */
+  writeArchive(file: string, text: string): Promise<"created" | "exists">;
+  /** Contained delete for a root handoff; archive/root files are rejected. */
+  removeHandoff(file: string): Promise<"deleted" | "missing">;
+}
+
+/**
+ * Run a short read/plan/write transaction under one lock. Do NOT hold this
+ * open across a human permission prompt: plan, release, ask, then re-plan and
+ * compare before writing.
+ */
+export async function withCappedTransaction<T>(
+  opts: CappedFileOptions | undefined,
+  fn: (tx: CappedTransaction) => Promise<T>,
+): Promise<T> {
+  const { indexLines, fileLines } = capsOf(opts);
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  return withFileWriteLock(root, async () => {
+    return fn({
+      read: (file) => readRawForMutation(file, root, "throw"),
+      write: async (file, text) => {
+        assertAllowedPath(file);
+        await writeRedactedCapped(file, redact(text), root, indexLines, fileLines);
+      },
+      writeArchive: async (file, text) => {
+        assertAllowedPath(file);
+        if (!file.startsWith("handoffs/archive/")) {
+          throw new Error(
+            `[memory] archive write rejected outside handoffs/archive/: ${file}`,
+          );
+        }
+        return publishExclusive(
+          root,
+          resolveUnderRoot(root, file),
+          redact(text),
+        );
+      },
+      removeHandoff: async (file) => {
+        if (!HANDOFF_PATTERN.test(file) || file.startsWith("handoffs/archive/")) {
+          throw new Error(
+            `[memory] remove rejected: root handoffs only: ${file}`,
+          );
+        }
+        assertAllowedPath(file);
+        const abs = resolveUnderRoot(root, file);
+        const directory = dirname(abs);
+        try {
+          await assertContainedAncestors(root, directory);
+          await assertContainedDirectory(root, directory);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+            return "missing";
+          }
+          throw error;
+        }
+        try {
+          await unlink(abs);
+          return "deleted";
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+            return "missing";
+          }
+          throw error;
+        }
+      },
+    });
   });
 }
 
 /**
- * Atomic read-modify-write under the per-process mutex. The updater receives
- * the current raw content (`""` when the file does not exist yet) and
- * returns the next raw content; redaction, caps, rotation, and archive
- * routing apply exactly as in `writeCapped`. Use this (never a
- * read-outside/write-inside pair) whenever concurrent writers may append to
- * the same file — otherwise the second writer's read misses the first
- * writer's entry and silently drops it.
+ * Atomic read-modify-write under the in-process file mutex and the
+ * cross-process root lock. The updater receives the current raw content
+ * (`""` when the file does not exist yet) and returns the next raw content;
+ * redaction, caps, rotation, and archive routing apply exactly as in
+ * `writeCapped`. Use this (never a read-outside/write-inside pair) whenever
+ * concurrent writers may append to the same file — otherwise the second
+ * writer's read misses the first writer's entry and silently drops it.
  */
 export async function updateCapped(
   file: string,
@@ -602,16 +1032,10 @@ export async function updateCapped(
   updater: (current: string) => string | Promise<string>,
 ): Promise<void> {
   assertAllowedPath(file);
-  await withWriteLock(async () => {
-    const { indexLines, fileLines } = capsOf(opts);
-    const root = resolveMemoryRoot(opts?.memoryRoot);
-    const abs = resolveUnderRoot(root, file);
-    let current = "";
-    try {
-      current = await readFile(abs, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-    }
+  const { indexLines, fileLines } = capsOf(opts);
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  await withFileWriteLock(root, async () => {
+    const current = await readRawForMutation(file, root, "empty");
     const next = await updater(current);
     if (typeof next !== "string") {
       throw new Error("[memory] updateCapped updater must return a string");

@@ -12,10 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SEARCH_FILE_BYTES,
+  publishAtomicForTests,
   readCapped,
   readFullRedacted,
   updateCapped,
   writeCapped,
+  writeNewCapped,
   withWriteLock,
 } from "../src/files.js";
 
@@ -379,5 +381,78 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).not.toContain("https://");
     expect(full!.text).not.toContain("SuperSecretPW");
     expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
+  });
+});
+
+describe("atomic_publish_and_exclusive_create", () => {
+  it("swaps complete files at rename time and leaves no temp files", async () => {
+    await writeCapped("decisions.md", "old\n", opts());
+    const next = `${"new\n".repeat(10_000)}`;
+    const target = join(root, "decisions.md");
+    let duringRename = "";
+    await publishAtomicForTests(root, target, next, async () => {
+      duringRename = await readFile(target, "utf8");
+    });
+    expect(duringRename).toBe("old\n");
+    expect(await readFile(target, "utf8")).toBe(next);
+    const entries = await readdir(root);
+    expect(entries.some((name) => name.startsWith(".tmp-"))).toBe(false);
+  });
+
+  it("exclusive create never overwrites an existing handoff", async () => {
+    const name = "handoffs/2026-10-15-120000-abcdef.md";
+    expect(await writeNewCapped(name, "first", opts())).toBe("created");
+    expect(await writeNewCapped(name, "second", opts())).toBe("exists");
+    expect(await readCapped(name, opts())).toBe("first");
+  });
+
+  it("creates a fresh memory root on first write", async () => {
+    const fresh = join(root, "fresh-root");
+    await writeCapped("decisions.md", "first\n", { memoryRoot: fresh });
+    expect(await readCapped("decisions.md", { memoryRoot: fresh })).toContain(
+      "first",
+    );
+  });
+
+  it("refuses to publish through a symlinked handoffs parent", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await symlink(outside, join(root, "handoffs"), "dir");
+      await expect(
+        writeNewCapped("handoffs/2026-10-15-120000-abcdef.md", "x", opts()),
+      ).rejects.toThrow(/symlink escape/);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to publish through a symlinked archive parent", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await mkdir(join(root, "handoffs"));
+      await symlink(outside, join(root, "handoffs", "archive"), "dir");
+      await expect(
+        writeNewCapped("handoffs/archive/rotated-1.md", "x", opts()),
+      ).rejects.toThrow(/symlink escape/);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to publish through an in-root handoffs alias", async () => {
+    await symlink(root, join(root, "handoffs"), "dir");
+    await expect(
+      writeNewCapped("handoffs/2026-10-15-120000-abcdef.md", "x", opts()),
+    ).rejects.toThrow(/handoff symlink alias/);
+  });
+
+  it("refuses to publish through an in-root archive alias", async () => {
+    await mkdir(join(root, "handoffs"));
+    await symlink("..", join(root, "handoffs", "archive"), "dir");
+    await expect(
+      writeNewCapped("handoffs/archive/rotated-1.md", "x", opts()),
+    ).rejects.toThrow(/handoff symlink alias/);
   });
 });

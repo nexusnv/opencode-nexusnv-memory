@@ -271,7 +271,7 @@ describe("install_surface_P0_parity", () => {
     const index = read("src/index.ts");
     expect(index).toContain("HANDOFFS_DIR");
     expect(index).toContain("ARCHIVE_DIR");
-    expect(index).toMatch(/flag:\s*["']wx["']/);
+    expect(index).toMatch(/writeNewCapped/);
 
     // Commented options snippet: exactly the 5 spec §3 options, all commented.
     const options = optionsSnippet();

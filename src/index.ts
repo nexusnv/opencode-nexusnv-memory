@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -23,6 +23,7 @@ import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
+import { writeNewCapped } from "./files.js";
 import { registerMemoryTools } from "./tools.js";
 import {
   registerStatusCommand,
@@ -70,12 +71,10 @@ async function scaffoldMemoryDir(projectRoot: string): Promise<boolean> {
     await mkdir(join(dir, ARCHIVE_DIR), { recursive: true });
     let created = false;
     for (const [name, content] of Object.entries(getScaffoldFiles())) {
-      try {
-        await writeFile(join(dir, name), content, { flag: "wx" });
-        created = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
-      }
+      const outcome = await writeNewCapped(name, content, {
+        memoryRoot: dir,
+      });
+      if (outcome === "created") created = true;
     }
     return created;
   } catch {

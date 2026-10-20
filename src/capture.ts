@@ -12,10 +12,17 @@
  * later tasks (T4/T8) on top of these primitives.
  */
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { resolveMemoryRoot, updateCapped, withWriteLock, writeNewCapped, type CappedFileOptions } from "./files.js";
+import {
+  readContainedText,
+  readHandoffDirectory,
+  resolveMemoryRoot,
+  updateCapped,
+  withWriteLock,
+  writeNewCapped,
+  type CappedFileOptions,
+} from "./files.js";
 import { flagInjection } from "./guard.js";
 import type { MetricsBump } from "./metrics.js";
 import { redact } from "./redact.js";
@@ -774,7 +781,7 @@ export function failureContentID(summary: string, detail: string): string {
 
 async function listArchive(root: string): Promise<Set<string>> {
   try {
-    return new Set(await readdir(join(root, "handoffs", "archive")));
+    return new Set(await readHandoffDirectory(root, "archive"));
   } catch {
     return new Set();
   }
@@ -923,13 +930,15 @@ export async function captureFailure(
         let blocks = 0;
         for (const name of fresh) {
           try {
-            const archived = await readFile(
-              join(root, "handoffs", "archive", name),
-              "utf8",
+            const archived = await readContainedText(
+              `handoffs/archive/${name}`,
+              { memoryRoot: root, onMissing: "skip" },
             );
-            blocks += archived
-              .split("\n")
-              .filter((line) => /^\s*-\s+/.test(line)).length;
+            if (archived !== undefined) {
+              blocks += archived.text
+                .split("\n")
+                .filter((line) => /^\s*-\s+/.test(line)).length;
+            }
           } catch {
             // Fall through to the file-count fallback below.
           }
@@ -1262,13 +1271,17 @@ export async function writeHandoffUnique(
     const outcome = await writeNewCapped(file, body, opts);
     if (outcome === "created") return file;
     const root = resolveMemoryRoot(opts?.memoryRoot);
-    let current: string;
-    try {
-      current = await readFile(join(root, file), "utf8");
-    } catch {
-      continue;
+    const current = await readContainedText(file, {
+      memoryRoot: root,
+      onMissing: "skip",
+    });
+    if (
+      current !== undefined &&
+      !current.truncated &&
+      redact(current.text) === wanted
+    ) {
+      return file;
     }
-    if (current === wanted) return file;
   }
   throw new Error(
     `[memory] write rejected: too many handoff siblings for ${baseFile}`,
