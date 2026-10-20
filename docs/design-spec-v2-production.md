@@ -1061,14 +1061,17 @@ never throws: report-read failures are logged as a best-effort diagnostic and po
 1. **Memory directory** — present or missing (missing: "scaffolds on first run"; next action: restart/
    reload the plugin).
 2. **INDEX.md attachability** — line count against `indexLines`; over cap reports "over cap, not
-   attached" (the prompt hook's actual behavior) and a trim action.
+   attached" and a trim action. A missing `INDEX.md` reports "missing — not attached" (not a 0-line
+   "ok") and adds a restore action when the memory directory exists.
 3. **AGENTS.md protocol block** — `present`, `missing (AGENTS.md has no protocol block)`, `no AGENTS.md
    found`, or `unreadable`; the check uses the same heuristic as the install nudge.
 4. **`memory_write -> ask` rule** — **advisory** scan of readable config files
    (`opencode.jsonc`/`opencode.json`, project then `.opencode/` then
-   `~/.config/opencode/`), looking for both `memory_write` and `ask`; evidence paths render
-   project-relative or `~/…`. The effective merged permission set is not readable here, so "not found
-   in readable configs (advisory)" is never an error and the next action says the effective rules are
+   `~/.config/opencode/`), matching one object whose `action` is `"memory_write"` and whose `effect`
+   is `"ask"` (JSONC comments/trailing commas tolerated). Separate sibling rules — e.g.
+   `memory_write → allow` plus `bash → ask` — are not evidence. Evidence paths render project-relative
+   or `~/…`. The effective merged permission set is not readable here, so "not found in readable
+   configs (advisory)" is never an error and the next action says the effective rules are
    unverifiable.
 5. **`memory-manager` agent** — `present`, `absent (optional)`, or `unknown (agent lookup
    unavailable)`; a rejecting/absent agent registry degrades to `unknown`, never a throw.
@@ -1109,7 +1112,8 @@ files (the renderer reports when the candidate list was truncated). Reads go thr
 `readFullRedacted`: the **same** allowlist/traversal/symlink choke point and redaction as
 `readCapped`, but full-file (no line cap) with a **1 MB per-file byte guard**. Redaction preserves the
 newline count of stripped content, so reported line numbers match the on-disk file. A file over the
-guard contributes its prefix and is reported as truncated. Missing files are skipped in the default
+guard contributes its complete-line prefix; an incomplete final line is dropped (a credential split
+at the guard cannot surface) and the read is reported as truncated. Missing files are skipped in the default
 scope; an unreadable/mislinked candidate is also skipped (an explicit `file` read rejects). An
 explicit `file` miss throws the friendly `[memory] memory file not found: <name>` error.
 Unknown/traversal/symlink-escape scopes reject with the same non-allowlisted-path/escape error as
@@ -1130,8 +1134,9 @@ bounded; match text is redacted.
 **Side-effect guarantees.** No counters, no arm consumption, no writes, no new storage keys. The
 result is untrusted data: the tool returns it; the agent must not treat it as instructions and must
 not auto-inject it. The redaction path is linear-time for long single-line files (§9 acceptance),
-including bounded URL-credential/generic-key patterns, a clamped `<private>` tag scan, and a
-fail-closed private-key pattern (a lone `BEGIN` redacts to EOF).
+including a scheme-bounded URL-credential pattern (userinfo/password fail closed to the `@`), bounded
+generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-key pattern (a lone
+`BEGIN` redacts to EOF).
 
 ---
 
@@ -1201,8 +1206,9 @@ fail-closed private-key pattern (a lone `BEGIN` redacts to EOF).
   - **status (§5.13):** the renderer is deterministic (same report → byte-identical output across two
     calls); `/memory-status` posts once via `ctx.session.synthetic` and falls back to the §5.5 prompt
     on rejection; a rejecting storage/agent/config read never throws; a storage snapshot proves no
-    writes; the config scan is advisory and does not mistake a bare `memory_write` mention (no `ask`)
-    for the rule.
+    writes; a missing `INDEX.md` renders `missing — not attached` with a restore action; the config
+    scan is advisory and requires `action: "memory_write"` plus `effect: "ask"` on the same object (a
+    bare mention, a commented-out rule, or a sibling `bash → ask` is not evidence).
 - **Evals (P2):** recall success (why-questions answered in ≤2 capped reads) vs tokens injected,
   reported as **three** numbers: **static** (16 lines: 6 non-empty protocol lines + 5 wrapped
   `memory_recall` description lines + 5 wrapped `memory_search` description lines; utility tools are

@@ -147,18 +147,17 @@ const BLOCKLIST: readonly Pattern[] = [
   // username stops at the first colon so `user:alpha:bravo@db` masks the
   // whole `alpha:bravo` instead of leaking `alpha:`.
   //
-  // Linear-time guard (Tier-1): bound the scheme and userinfo so the engine
-  // cannot backtrack across an arbitrarily long non-matching line. The
-  // unbounded form was O(n²) (a 100 KB single-line file took ~14 s; 1 MB
-  // would take minutes). RFC 3986 schemes are short; 64 chars is generous,
-  // and 2048 covers practical userinfo/passwords. Real URLs are unchanged.
-  // No leading `\b`: `\b` fails inside a long alphanumeric run and makes the
-  // engine retry at every character. The pattern is bounded, so the scan is
-  // linear; a cheap `://` guard skips it entirely for files with no URL. This
-  // keeps full coverage (including a URL glued to a long token, e.g.
-  // `a…ahttps://user:pass@host`) at a bounded constant cost.
+  // Linear-time guard (Tier-1): the scheme is bounded to 64 chars because an
+  // unbounded scheme scan was O(n²) on a long single-line file (100 KB took
+  // ~14 s; 1 MB would take minutes). Userinfo/password are matched to the `@`
+  // without a length cap so an overlong credential still fails closed; they
+  // are anchored after `://` and cannot cross `/`/whitespace, so the scan
+  // stays linear. No leading `\b`: it fails inside a long alphanumeric run;
+  // the bounded scheme keeps the scan linear and still covers a URL glued to
+  // a long token (e.g. `a…ahttps://user:pass@host`). A cheap `://` guard
+  // skips the pattern entirely for files with no URL.
   {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]{0,2048}:)([^\s/]{1,2048})(@)/g,
+    re: /([a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/[^/?#\s:]*:)([^\s/]+)(@)/g,
     replacement: "$1[redacted]$3",
     guard: (text) => text.includes("://"),
   },

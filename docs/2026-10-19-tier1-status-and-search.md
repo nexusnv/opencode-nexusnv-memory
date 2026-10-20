@@ -14,7 +14,7 @@ make the plugin explainable and make older memory reachable:
   deterministic answer to "did I install this correctly, why is INDEX not attached, and what should I
   fix next?" without reading the source or guessing at `ctx.storage`. The report covers scaffold
   presence, per-file budgets, INDEX attachability, the `AGENTS.md` protocol block, the
-  `memory_write → ask` rule (best-effort config scan), the optional `memory-manager` agent,
+  `memory_write → ask` rule (same-object JSONC config scan), the optional `memory-manager` agent,
   idle/compaction activity, and derived next actions. It posts through `ctx.session.synthetic`
   (no model turn), falls back to the §5.5 prompt pattern, and bumps **no** counters.
 - **E7 — `memory_search`:** exact literal search across the allowlisted memory corpus, including the
@@ -136,8 +136,10 @@ must wait for both lanes. Task 6 (docs) runs after Tasks 1a–5; Task 7 is the f
 5. **Status is read-only and uncounted.** It reads counters, line counts, and install markers; it
    never emits a memory body and never writes. No `status.*` metric names (vocabulary frozen).
 6. **Status config detection is advisory.** It scans project-root and global config candidates for
-   `memory_write` plus `ask`; the report says "declared" / "not found in readable configs (advisory)".
-   Effective merged rules are unverifiable at runtime (the README already says so).
+   one object whose `action` is `memory_write` and whose `effect` is `ask` (JSONC comments/trailing
+   commas tolerated); sibling rules do not combine. The report says "declared" / "not found in
+   readable configs (advisory)". Effective merged rules are unverifiable at runtime (the README
+   already says so).
 7. **Status renderer is deterministic.** Fixed strings, allowlisted file names, integers, a sanitized
    one-line version, relative config paths, and the validated ISO `since` stamp. No clock, no fs, no
    storage inside `renderStatusReport`.
@@ -1734,7 +1736,9 @@ async function permissionRuleOf(
     } catch {
       continue;
     }
-    if (/\bmemory_write\b/.test(text) && /\bask\b/.test(text)) {
+    // parseJsonc/hasAskPermission: require action+effect on the same object.
+    const parsed = parseJsonc(text);
+    if (parsed !== undefined && hasAskPermission(parsed)) {
       evidence.push(displayPath(path, projectRoot, home));
     }
   }
@@ -1893,6 +1897,14 @@ export function renderStatusReport(report: StatusReport): string {
   const indexCap = indexRow?.cap;
   const indexOver =
     indexRow?.cap !== undefined && indexRow.lines > indexRow.cap;
+  const indexCount = report.indexExists
+    ? `${indexLines}/${indexCap ?? "-"} lines — `
+    : "";
+  const indexState = !report.indexExists
+    ? "missing — not attached"
+    : indexOver
+      ? "over cap, not attached"
+      : "within cap (attached when budget allows)";
 
   const lines: string[] = [];
   lines.push("# [memory] status (local-only)");
@@ -1920,9 +1932,7 @@ export function renderStatusReport(report: StatusReport): string {
   lines.push(
     `| memory directory | ${report.memoryDirExists ? "present" : "missing — scaffolds on first run"} |`,
   );
-  lines.push(
-    `| INDEX.md | ${indexLines}/${indexCap ?? "-"} lines — ${indexOver ? "over cap, not attached" : "within cap (attached when budget allows)"} |`,
-  );
+  lines.push(`| INDEX.md | ${indexCount}${indexState} |`);
   lines.push(`| AGENTS.md protocol block | ${protocolLabel(report.protocol)} |`);
   lines.push(`| memory_write -> ask rule | ${permissionLabel(report)} |`);
   lines.push(`| memory-manager agent | ${agentLabel(report.agent)} |`);
@@ -2317,10 +2327,31 @@ branch's linear-time contract was false for hostile input):
    redacts to EOF (same fail-closed semantics as an unclosed `<private>`), and hostile 100 KB
    header runs are linear.
 
-Also: the URL pattern uses the bounded no-`\b` form plus a cheap `://` guard, so glued URLs
+Also: the URL pattern started as the bounded no-`\b` form plus a cheap `://` guard, so glued URLs
 (including `a…ahttps://user:pass@host`) stay covered without scanning every char of a URL-free file;
-the worst case is a bounded linear constant when `://` is present. CHANGELOG literal `\n`, a collapsed
-test block, and the symlinked-directory/root-as-symlink test coverage were fixed.
+the PR review round below removes the userinfo/password cap after it was found to fail open. CHANGELOG
+literal `\n`, a collapsed test block, and the symlinked-directory/root-as-symlink test coverage were
+fixed.
+
+### PR review round (CodeRabbit, 2026-10-20)
+
+CodeRabbit requested changes with four findings; all were valid:
+
+1. **Truncated read split a credential.** A >1 MB file cut inside a URL password exposed the prefix
+   before the `@`. `readFullRedacted` now drops the incomplete final line when the byte guard
+   triggers; complete lines keep their on-disk numbers. Tests cover both the reader and `memory_search`.
+2. **Overlong URL credentials failed open.** The 2048-char userinfo/password bound left
+   `https://u:${"p".repeat(2049)}@host` untouched. The scheme stays bounded at 64 (the actual O(n²)
+   source); userinfo/password are matched to the `@` without a length cap, anchored after `://` and
+   unable to cross `/`/whitespace. Benchmarks stay linear; 2049-char and 1 MB credentials redact.
+3. **Permission scan combined unrelated tokens.** The old `memory_write` + `ask` token test
+   false-positived on `memory_write → allow` plus `bash → ask`. A string-aware JSONC parser
+   (comments/trailing commas tolerated) now requires `action: "memory_write"` and `effect: "ask"` on
+   the same object; commented-out rules and strings are ignored.
+4. **Missing INDEX.md looked healthy.** A missing file resolved to 0 lines and rendered "within cap";
+   the prompt hook never attaches it. `StatusReport.indexExists` now drives
+   `missing — not attached`, a `missing` files-table status, and a restore action when the memory
+   directory exists.
 
 ---
 

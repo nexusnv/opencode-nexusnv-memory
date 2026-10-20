@@ -39,7 +39,7 @@
 ## `memory_status` tool
 
 - Input: `{}` (empty object; `additionalProperties:false`; read-only, no arguments). Normative contract: `design-spec-v2-production.md` §5.13.
-- Output: `{ content: <markdown report> }` via `toolResult`: scaffold presence, INDEX lines/cap/attachability, AGENTS.md protocol block, advisory `memory_write → ask` evidence, optional `memory-manager` agent, capture/health counts, budgets, version, validated `since`, newest root handoff name, and next actions. The renderer is deterministic (fixed strings, allowlisted names, integers, one-line bounded version, relative/`~/` config paths); no memory body or captured content is emitted.
+- Output: `{ content: <markdown report> }` via `toolResult`: scaffold presence, INDEX lines/cap/attachability (missing INDEX = `missing — not attached`, not a 0-line ok), AGENTS.md protocol block, advisory same-object `memory_write → ask` evidence, optional `memory-manager` agent, capture/health counts, budgets, version, validated `since`, newest root handoff name, and next actions. The renderer is deterministic (fixed strings, allowlisted names, integers, one-line bounded version, relative/`~/` config paths); no memory body or captured content is emitted.
 - Side effects: none. It reads existing counters/health/install markers only, writes no storage, and bumps no counter. Degraded reads render `unknown`/`unreadable`/`not-found` (the config scan is advisory; effective merged permissions are unverifiable).
 
 ## `/memory-metrics` command

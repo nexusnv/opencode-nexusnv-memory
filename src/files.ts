@@ -396,10 +396,16 @@ export async function readFullRedacted(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
+    const raw = buffer.subarray(0, offset).toString("utf8");
+    // A byte-limited read can cut through a URL credential before the `@`
+    // that redaction needs. Drop the incomplete final line; complete lines
+    // before the guard keep their on-disk line numbers.
+    const text =
+      size > SEARCH_FILE_BYTES
+        ? raw.slice(0, raw.lastIndexOf("\n") + 1)
+        : raw;
     return {
-      text: redactPreservingLines(
-        buffer.subarray(0, offset).toString("utf8"),
-      ),
+      text: redactPreservingLines(text),
       truncated: size > SEARCH_FILE_BYTES,
     };
   } finally {

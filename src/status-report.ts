@@ -87,6 +87,7 @@ export interface StatusReport {
   readonly versionSupported?: boolean;
   readonly budgets: StatusReportCaps;
   readonly memoryDirExists: boolean;
+  readonly indexExists: boolean;
   readonly health: MemoryHealth;
   readonly protocol: ProtocolStatus;
   readonly permission: PermissionStatus;
@@ -151,6 +152,107 @@ function displayPath(path: string, projectRoot: string, home: string): string {
   return oneLine(path);
 }
 
+/** Strip JSONC line/block comments without touching quoted strings. */
+function stripJsonComments(text: string): string {
+  let out = "";
+  let inString = false;
+  let escape = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    const next = text[i + 1];
+    if (lineComment) {
+      if (ch === "\n") {
+        lineComment = false;
+        out += ch;
+      }
+      continue;
+    }
+    if (blockComment) {
+      if (ch === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      } else if (ch === "\n") {
+        out += ch;
+      }
+      continue;
+    }
+    if (inString) {
+      out += ch;
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Remove trailing commas before `}`/`]` without touching quoted strings. */
+function stripTrailingCommas(text: string): string {
+  let out = "";
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (inString) {
+      out += ch;
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === ",") {
+      let next = i + 1;
+      while (next < text.length && /\s/.test(text[next]!)) next += 1;
+      if (text[next] === "}" || text[next] === "]") continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Parse the common JSONC config shape; undefined means "advisory skip". */
+function parseJsonc(text: string): unknown | undefined {
+  try {
+    const withoutBom = text.replace(/^\uFEFF/, "");
+    return JSON.parse(stripTrailingCommas(stripJsonComments(withoutBom)));
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when one object directly declares the documented ask rule. */
+function hasAskPermission(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasAskPermission);
+  if (value === null || typeof value !== "object") return false;
+  const object = value as Record<string, unknown>;
+  if (object.action === "memory_write" && object.effect === "ask") return true;
+  return Object.values(object).some(hasAskPermission);
+}
+
 async function permissionRuleOf(
   projectRoot: string,
   home: string,
@@ -163,7 +265,8 @@ async function permissionRuleOf(
     } catch {
       continue;
     }
-    if (/\bmemory_write\b/.test(text) && /\bask\b/.test(text)) {
+    const parsed = parseJsonc(text);
+    if (parsed !== undefined && hasAskPermission(parsed)) {
       evidence.push(displayPath(path, projectRoot, home));
     }
   }
@@ -189,6 +292,10 @@ function deriveActions(report: StatusReportBase): string[] {
   }
   if (!report.memoryDirExists) {
     actions.push("restart/reload the plugin to scaffold .opencode/memory");
+  } else if (!report.indexExists) {
+    actions.push(
+      "restore .opencode/memory/INDEX.md (not attached while missing)",
+    );
   }
   if (report.protocol === "no-file" || report.protocol === "missing") {
     actions.push("install the AGENTS.md protocol block (README install)");
@@ -235,16 +342,25 @@ export async function collectStatus(
   deps: StatusReportDeps,
 ): Promise<StatusReport> {
   const home = deps.home ?? homedir();
-  const [health, protocol, permission, since, totals, newestHandoff, exists] =
-    await Promise.all([
-      collectHealth(deps.memoryRoot, deps.storage, deps.projectID, deps.caps),
-      protocolStatusOf(deps.projectRoot),
-      permissionRuleOf(deps.projectRoot, home),
-      readSince(deps.storage, deps.projectID),
-      readTotals(deps.storage, deps.projectID),
-      newestHandoffName(deps.memoryRoot),
-      pathExists(deps.memoryRoot),
-    ]);
+  const [
+    health,
+    protocol,
+    permission,
+    since,
+    totals,
+    newestHandoff,
+    exists,
+    indexExists,
+  ] = await Promise.all([
+    collectHealth(deps.memoryRoot, deps.storage, deps.projectID, deps.caps),
+    protocolStatusOf(deps.projectRoot),
+    permissionRuleOf(deps.projectRoot, home),
+    readSince(deps.storage, deps.projectID),
+    readTotals(deps.storage, deps.projectID),
+    newestHandoffName(deps.memoryRoot),
+    pathExists(deps.memoryRoot),
+    pathExists(join(deps.memoryRoot, "INDEX.md")),
+  ]);
 
   const version =
     typeof deps.version === "string" && deps.version.length > 0
@@ -263,6 +379,7 @@ export async function collectStatus(
       version === undefined ? undefined : /^2\.0\./.test(version),
     budgets: deps.caps,
     memoryDirExists: exists,
+    indexExists,
     health,
     protocol,
     permission: permission.status,
@@ -321,6 +438,14 @@ export function renderStatusReport(report: StatusReport): string {
   const indexLines = indexRow?.lines ?? 0;
   const indexCap = indexRow?.cap;
   const indexOver = indexRow?.cap !== undefined && indexRow.lines > indexRow.cap;
+  const indexCount = report.indexExists
+    ? `${indexLines}/${indexCap ?? "-"} lines — `
+    : "";
+  const indexState = !report.indexExists
+    ? "missing — not attached"
+    : indexOver
+      ? "over cap, not attached"
+      : "within cap (attached when budget allows)";
 
   const lines: string[] = [];
   lines.push("# [memory] status (local-only)");
@@ -348,11 +473,7 @@ export function renderStatusReport(report: StatusReport): string {
   lines.push(
     `| memory directory | ${report.memoryDirExists ? "present" : "missing — scaffolds on first run"} |`,
   );
-  lines.push(
-    `| INDEX.md | ${indexLines}/${indexCap ?? "-"} lines — ${
-      indexOver ? "over cap, not attached" : "within cap (attached when budget allows)"
-    } |`,
-  );
+  lines.push(`| INDEX.md | ${indexCount}${indexState} |`);
   lines.push(
     `| AGENTS.md protocol block | ${protocolLabel(report.protocol)} |`,
   );
@@ -365,7 +486,12 @@ export function renderStatusReport(report: StatusReport): string {
   lines.push("| --- | --- | --- | --- |");
   for (const row of report.health.files) {
     const cap = row.cap === undefined ? "-" : String(row.cap);
-    const status = row.cap === undefined || row.lines <= row.cap ? "ok" : "over";
+    const status =
+      row.file === "INDEX.md" && !report.indexExists
+        ? "missing"
+        : row.cap === undefined || row.lines <= row.cap
+          ? "ok"
+          : "over";
     lines.push(`| ${row.file} | ${row.lines} | ${cap} | ${status} |`);
   }
   lines.push("");

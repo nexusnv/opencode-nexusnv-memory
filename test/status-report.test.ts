@@ -227,6 +227,7 @@ describe("collectStatus + renderStatusReport", () => {
       "Budgets: INDEX ≤ 30 lines, files ≤ 60, injected ≤ 120",
     );
     expect(text).toContain("| memory directory | present |");
+    expect(report.indexExists).toBe(true);
     expect(text).toContain("| INDEX.md | 2/30 lines — within cap");
     expect(text).toContain("| AGENTS.md protocol block | present |");
     expect(text).toContain(
@@ -256,11 +257,13 @@ describe("collectStatus + renderStatusReport", () => {
     const text = renderStatusReport(report);
 
     expect(text).toContain("| memory directory | missing");
+    expect(text).toContain("| INDEX.md | missing — not attached |");
     expect(text).toContain("| AGENTS.md protocol block | no AGENTS.md found |");
     expect(text).toContain(
       "| memory_write -> ask rule | not found in readable configs (advisory) |",
     );
     expect(text).toContain("| memory-manager agent | unknown");
+    expect(report.indexExists).toBe(false);
     expect(report.actions).toEqual(
       expect.arrayContaining([
         "restart/reload the plugin to scaffold .opencode/memory",
@@ -268,6 +271,11 @@ describe("collectStatus + renderStatusReport", () => {
         "declare the memory_write -> ask permission rule (README install; effective rules are unverifiable here)",
         "no idle/compaction captures observed yet — run the README deploy check",
       ]),
+    );
+    // The missing memory directory already has the scaffold action; do not
+    // also ask the user to restore a file that does not exist yet.
+    expect(report.actions).not.toContain(
+      "restore .opencode/memory/INDEX.md (not attached while missing)",
     );
   });
 
@@ -348,6 +356,101 @@ describe("collectStatus + renderStatusReport", () => {
       caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
     });
     expect(report.permission).toBe("not-found");
+  });
+
+  it("does not combine separate permission rules", async () => {
+    const { projectRoot, home } = await newProject();
+    await seedProject(projectRoot);
+    await writeFile(
+      join(projectRoot, "opencode.jsonc"),
+      `{
+        "permissions": [
+          { "action": "memory_write", "resource": "*", "effect": "allow" },
+          { "action": "bash", "resource": "*", "effect": "ask" }
+        ]
+      }`,
+    );
+    const report = await collectStatus({
+      memoryRoot: join(projectRoot, ".opencode", "memory"),
+      projectRoot,
+      home,
+      storage: new FakeStorage(),
+      projectID: PROJECT,
+      caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
+    });
+    expect(report.permission).toBe("not-found");
+  });
+
+  it("finds the ask rule in JSONC with comments and trailing commas", async () => {
+    const { projectRoot, home } = await newProject();
+    await seedProject(projectRoot);
+    await writeFile(
+      join(projectRoot, "opencode.jsonc"),
+      `{
+        // per-line review writes still prompt
+        "permissions": [
+          { "effect": "ask", "action": "memory_write", "resource": "*" },
+        ],
+      }`,
+    );
+    const report = await collectStatus({
+      memoryRoot: join(projectRoot, ".opencode", "memory"),
+      projectRoot,
+      home,
+      storage: new FakeStorage(),
+      projectID: PROJECT,
+      caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
+    });
+    expect(report.permission).toBe("declared");
+  });
+
+  it("ignores an ask rule inside a comment", async () => {
+    const { projectRoot, home } = await newProject();
+    await seedProject(projectRoot);
+    await writeFile(
+      join(projectRoot, "opencode.jsonc"),
+      `{
+        // { "action": "memory_write", "effect": "ask" }
+        "permissions": []
+      }`,
+    );
+    const report = await collectStatus({
+      memoryRoot: join(projectRoot, ".opencode", "memory"),
+      projectRoot,
+      home,
+      storage: new FakeStorage(),
+      projectID: PROJECT,
+      caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
+    });
+    expect(report.permission).toBe("not-found");
+  });
+
+  it("reports a missing INDEX.md as not attached", async () => {
+    const { projectRoot, home } = await newProject();
+    await seedHealthyInstall(projectRoot, home);
+    const memoryRoot = join(projectRoot, ".opencode", "memory");
+    await rm(join(memoryRoot, "INDEX.md"));
+    const storage = new FakeStorage();
+    await storage.set(totalKey(PROJECT, "snapshot.written"), 1);
+
+    const report = await collectStatus({
+      memoryRoot,
+      projectRoot,
+      home,
+      storage,
+      projectID: PROJECT,
+      caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
+      version: "2.0.29",
+      agentNames: ["memory-manager"],
+    });
+    const text = renderStatusReport(report);
+
+    expect(report.indexExists).toBe(false);
+    expect(text).toContain("| INDEX.md | missing — not attached |");
+    expect(text).toContain("| INDEX.md | 0 | 30 | missing |");
+    expect(report.actions).toContain(
+      "restore .opencode/memory/INDEX.md (not attached while missing)",
+    );
   });
 
   it("reports capture failures and unsupported versions", async () => {

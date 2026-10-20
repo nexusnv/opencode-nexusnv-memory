@@ -200,6 +200,26 @@ describe("linear_time_guard", () => {
     expect(out).toContain("[redacted]");
   });
 
+  it("fails closed for overlong URL credentials", () => {
+    const password = "p".repeat(2049);
+    const out = redact(`https://user:${password}@host`);
+    expect(out).not.toContain(password);
+    expect(out).toContain("https://user:[redacted]@host");
+
+    const longUser = "u".repeat(2049);
+    const withLongUser = redact(`https://${longUser}:${password}@host`);
+    expect(withLongUser).not.toContain(password);
+    expect(withLongUser).toContain("[redacted]");
+  });
+
+  it("redacts a long URL credential without quadratic backtracking", () => {
+    const password = "p".repeat(100_000);
+    const started = Date.now();
+    const out = redact(`https://user:${password}@host`);
+    expect(out).toBe("https://user:[redacted]@host");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("fail-closes a truncated private key to EOF and stays linear", () => {
     // Build the PEM header from parts: the runtime string is identical, but
     // the repo's gitleaks job would otherwise flag this test as a real key.

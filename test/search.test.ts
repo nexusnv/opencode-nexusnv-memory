@@ -233,6 +233,14 @@ describe("searchMemory", () => {
     expect(renderSearchResults(result)).toContain("read guard");
   });
 
+  it("does not expose a credential split at the byte guard", async () => {
+    const head = `${"a".repeat(SEARCH_FILE_BYTES - 20)}\n`;
+    await put("decisions.md", `${head}https://user:SuperSecretPW@host`);
+    const result = await searchMemory({ memoryRoot: root, query: "SuperS" });
+    expect(result.matches).toEqual([]);
+    expect(result.truncatedFiles).toBe(1);
+  });
+
   it("reports candidate-file truncation at the file cap", async () => {
     for (const file of [
       "INDEX.md",

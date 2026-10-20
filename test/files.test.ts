@@ -354,4 +354,19 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).not.toContain("needle-after-guard");
     expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
   });
+
+  it("drops an incomplete final line at the byte guard", async () => {
+    const head = `${"x".repeat(SEARCH_FILE_BYTES - 20)}\n`;
+    await writeFile(
+      join(root, "decisions.md"),
+      `${head}https://user:SuperSecretPW@host`,
+    );
+    const full = await readFullRedacted("decisions.md", opts());
+    expect(full!.truncated).toBe(true);
+    // The cut lands inside the URL; the partial line must not survive,
+    // because redaction cannot see the `@` that would identify the password.
+    expect(full!.text).not.toContain("https://");
+    expect(full!.text).not.toContain("SuperSecretPW");
+    expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
+  });
 });
