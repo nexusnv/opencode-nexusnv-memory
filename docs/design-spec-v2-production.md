@@ -504,10 +504,13 @@ registrations.push(await ctx.tool.transform((editor) => {
   function; `Tool.TextContent` (`{ type: "text", text }`) is the persisted **message**-content shape,
   not the executor envelope (§1.3 G2).
 - `readCapped` is the single choke point: it resolves the path under `.opencode/memory`, rejects any
-  escape (`..`, absolute, backslash, percent-encoded separators), resolves the real path and rejects
-  symlinks that leave the memory root, checks allowlist membership or the handoff pattern
-  `/^handoffs\/(?:archive\/)?[A-Za-z0-9._-]+\.md$/`, then reads with cap + notice + redaction.
-  Unknown/invalid → throw. Never lists the filesystem.
+  escape (`..`, absolute, backslash, percent-encoded separators), checks allowlist membership or the
+  handoff pattern `/^handoffs\/(?:archive\/)?[A-Za-z0-9._-]+\.md$/`, then opens the target and
+  validates the **opened inode** (realpath containment plus `dev`/`ino` identity against the
+  contained path) before reading with cap + notice + redaction. Opening first closes the
+  check-then-open race where a concurrent replace could redirect the read; non-regular files reject
+  and `O_NONBLOCK` keeps an outside FIFO from blocking validation. Unknown/invalid → throw. Never
+  lists the filesystem.
 - Archive paths are recallable on demand and never auto-injected.
 - The description doubles as the retrieval policy (`c4-04`).
 
@@ -611,8 +614,9 @@ registrations.push(await ctx.session.hook("compaction", async (event) => {
 ### 5.7 Loaders, redactor, ledger, status (HS-05, US-15/25, `c4-06`)
 
 - IO channel: `node:fs/promises` server-side only (no `ctx.filesystem` domain exists for plugins). All file IO is async; the prompt-hook cap check is an async read + line count (never sync-block the event loop).
-- `readCapped(file)` / `writeCapped(file, text)`: allowlisted paths only; `readCapped` returns text
-  with a truncation notice; `writeCapped` enforces `indexLines`/`fileLines` on every **plugin** write
+- `readCapped(file)` / `writeCapped(file, text)`: allowlisted paths only; `readCapped` opens then
+  validates the opened inode (see §5.4) and returns text with a truncation notice; `writeCapped`
+  enforces `indexLines`/`fileLines` on every **plugin** write
   (throws on violation for a capped rule file — never silently truncates); both
   always redact; unknown/traversal → error. Writes are **serialized through one per-process mutex**
   (single-flight per content ID + append lock). `activeContext.md` is append-until-60 and **rotates**
@@ -1109,8 +1113,10 @@ listing sentinels (`handoffs`, `handoffs/archive`) are rejected — use `memory_
 **Scope and read path.** With no `file`, candidates are the six structural files in `MEMORY_FILES`
 order, then `handoffs/` newest-first, then `handoffs/archive/` newest-first, capped at 200 candidate
 files (the renderer reports when the candidate list was truncated). Reads go through
-`readFullRedacted`: the **same** allowlist/traversal/symlink choke point and redaction as
-`readCapped`, but full-file (no line cap) with a **1 MB per-file byte guard**. Redaction preserves the
+`readFullRedacted`: the **same** open-then-validate allowlist/traversal/symlink choke point and
+redaction as `readCapped` — the opened inode is checked with realpath containment plus a `dev`/`ino`
+identity match, so a concurrent path swap cannot redirect the read — but full-file (no line cap)
+with a **1 MB per-file byte guard**. Redaction preserves the
 newline count of stripped content, so reported line numbers match the on-disk file. A file over the
 guard contributes its complete-line prefix; an incomplete final line is dropped (a credential split
 at the guard cannot surface) and the read is reported as truncated. Missing files are skipped in the default
@@ -1196,8 +1202,10 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
     failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
     `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
     first post in the deploy check.
-  - **`memory_search` (§5.14):** the same traversal/allowlist/symlink choke point (unknown/traversal
-    scopes reject); an old `decisions.md` line beyond the recall tail is found; redaction runs before
+  - **`memory_search` (§5.14):** the same open-then-validate traversal/allowlist/symlink choke point
+    (opened-inode realpath + `dev`/`ino` validation closes the path-swap race; non-regular files
+    reject; unknown/traversal scopes reject); an old `decisions.md` line beyond the recall tail is
+    found; redaction runs before
     matching; result bounds (20 default / 50 max), the 200-candidate cap, and the 1 MB per-file guard
     are asserted; deterministic order is structural files → `handoffs/` newest-first →
     `handoffs/archive/` newest-first; a storage snapshot before/after proves no counters or keys are

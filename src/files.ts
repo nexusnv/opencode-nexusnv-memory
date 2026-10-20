@@ -8,11 +8,13 @@
  *
  * All file IO via `node:fs/promises` (async only).
  */
+import { constants } from "node:fs";
 import {
   mkdir,
   open,
   readFile,
   realpath,
+  stat,
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
@@ -177,32 +179,53 @@ function resolveUnderRoot(root: string, file: string): string {
 }
 
 /**
- * Resolve an allowlisted path to its real location and reject symlinks that
- * leave the memory root. Lexical checks alone are insufficient because
- * `open`/`readFile` follow symlinks. A missing root resolves lexically so
- * callers keep the friendly missing-file behavior; a missing target
- * propagates ENOENT. A root that is itself a symlink is allowed: its real
- * destination is the configured memory root.
+ * O_NONBLOCK keeps a symlink to an outside FIFO from blocking before the
+ * opened handle is validated; regular files ignore it. Platforms without the
+ * flag fall back to a normal read-only open.
  */
-async function resolveContainedReadPath(
+const READ_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
+
+/**
+ * Open an allowlisted path, then validate the *opened inode* against the
+ * memory root. Resolving first and opening second left a check-then-open race:
+ * a concurrent replace could swap the validated path for an outside symlink
+ * before `open`, and the read would follow it. Opening first fixes the
+ * descriptor; `realpath` plus a `dev`/`ino` comparison prove that inode is
+ * still reachable inside the root, and no bytes are read until that holds.
+ * In-root symlinks and a root that is itself a symlink keep working. A missing
+ * root/target still propagates ENOENT so callers keep the friendly error.
+ */
+async function openContainedRead(
   root: string,
   file: string,
-): Promise<string> {
+): Promise<{ readonly handle: FileHandle; readonly size: number }> {
   const abs = resolveUnderRoot(root, file);
-  let realRoot: string;
+  const handle = await open(abs, READ_OPEN_FLAGS);
   try {
-    realRoot = await realpath(root);
+    const opened = await handle.stat();
+    if (!opened.isFile()) {
+      throw new Error(`[memory] rejected non-regular memory file: ${file}`);
+    }
+    const realRoot = await realpath(root);
+    const realAbs = await realpath(abs);
+    if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
+      throw new Error(
+        `[memory] rejected symlink escape from memory root: ${file}`,
+      );
+    }
+    // The path may have been swapped after `open`; only accept the read when
+    // the descriptor still names the file the contained path resolves to.
+    const target = await stat(realAbs);
+    if (target.dev !== opened.dev || target.ino !== opened.ino) {
+      throw new Error(
+        `[memory] rejected symlink escape from memory root: ${file}`,
+      );
+    }
+    return { handle, size: opened.size };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return abs;
+    await handle.close().catch(() => undefined);
     throw error;
   }
-  const realAbs = await realpath(abs);
-  if (realAbs === realRoot || !realAbs.startsWith(`${realRoot}${sep}`)) {
-    throw new Error(
-      `[memory] rejected symlink escape from memory root: ${file}`,
-    );
-  }
-  return realAbs;
 }
 
 function truncationNotice(
@@ -307,9 +330,11 @@ export async function readCapped(
   const { indexLines, fileLines } = capsOf(opts);
   const root = resolveMemoryRoot(opts?.memoryRoot);
   let raw: string;
+  let handle: FileHandle | undefined;
   try {
-    const abs = await resolveContainedReadPath(root, file);
-    raw = await readFile(abs, "utf8");
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    raw = await handle.readFile("utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       throw new Error(
@@ -317,6 +342,8 @@ export async function readCapped(
       );
     }
     throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
   }
   const redactedText = redact(raw);
   const total = countLines(redactedText);
@@ -367,9 +394,11 @@ export async function readFullRedacted(
   assertAllowedPath(file);
   const root = resolveMemoryRoot(opts?.memoryRoot);
   let handle: FileHandle;
+  let size: number;
   try {
-    const abs = await resolveContainedReadPath(root, file);
-    handle = await open(abs, "r");
+    const opened = await openContainedRead(root, file);
+    handle = opened.handle;
+    size = opened.size;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       if (opts?.onMissing === "skip") return undefined;
@@ -380,7 +409,6 @@ export async function readFullRedacted(
     throw error;
   }
   try {
-    const { size } = await handle.stat();
     const length = Math.min(size, SEARCH_FILE_BYTES);
     const buffer = Buffer.alloc(length);
     let offset = 0;

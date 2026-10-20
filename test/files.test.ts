@@ -297,6 +297,17 @@ describe("readFullRedacted (memory_search support)", () => {
     }
   });
 
+  it("rejects a non-regular memory file", async () => {
+    await mkdir(join(root, "handoffs"), { recursive: true });
+    await symlink(join(root, "handoffs"), join(root, "style.md"));
+    await expect(readFullRedacted("style.md", opts())).rejects.toThrow(
+      /non-regular memory file/,
+    );
+    await expect(readCapped("style.md", opts())).rejects.toThrow(
+      /non-regular memory file/,
+    );
+  });
+
   it("allows a memory root that is itself a symlink", async () => {
     await writeFile(join(root, "decisions.md"), "root-link-target\n");
     const linkRoot = await mkdtemp(join(tmpdir(), "memory-files-root-link-"));

@@ -2353,6 +2353,16 @@ CodeRabbit requested changes with four findings; all were valid:
    `missing — not attached`, a `missing` files-table status, and a restore action when the memory
    directory exists.
 
+A second review found one more valid boundary issue and one contract mismatch:
+
+5. **Read-boundary TOCTOU (Major).** Validation was path-before-open; a concurrent replace could
+   redirect `open`. Both readers now open first, fstat the descriptor, then prove the opened inode is
+   contained (realpath + `dev`/`ino`) before reading from that handle. Non-regular files reject and
+   `O_NONBLOCK` prevents an outside FIFO from blocking validation.
+6. **`memory_status` tool throw (declined).** The agreed contract (item 8 above; spec §5.13) is
+   command-never-throws, tool-propagates-real-errors. The command's fallback text asks the agent to
+   call `memory_status`; returning it from `memory_status` would be circular. No code change.
+
 ---
 
 ## Task 7: Final gate
