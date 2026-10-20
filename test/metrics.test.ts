@@ -20,6 +20,7 @@ import {
   MEMORY_METRICS_COMMAND_DESCRIPTION,
   MEMORY_METRICS_COMMAND_NAME,
   METRICS_FALLBACK_ASK,
+  METRICS_RESET_CONFIRM_NOTICE,
   METRIC_LABELS,
   METRIC_NAMES,
   metricsBumpOf,
@@ -1357,6 +1358,76 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
     await expect(registration.dispose()).resolves.toBeUndefined();
   });
 
+  it("bare reset explains and never wipes", async () => {
+    const storage = new FakeStorage();
+    await storage.set(totalKey(PROJECT, "hook.prompt"), 3);
+    await storage.set(dayKey(PROJECT, "20300101", "hook.prompt"), 2);
+    await storage.set(sinceKey(PROJECT), "2030-01-01T00:00:00.000Z");
+    const { added, fakeCtx, synthetic } = fakeForMetricsCommand({ storage });
+    await registerMetricsCommand(fakeCtx);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "  RESET " },
+      delivery: "steer",
+    });
+    await settle();
+
+    expect(synthetic).toHaveBeenCalledTimes(1);
+    const posted = synthetic.mock.calls[0]![0]! as { text: string };
+    expect(posted.text).toContain(METRICS_RESET_CONFIRM_NOTICE);
+    expect(posted.text).toContain("# [memory] metrics (local-only)");
+    expect(posted.text).toContain("| hook.prompt | prompt hook runs | 3 |");
+    // Nothing wiped, no reset count, but the render+post counted.
+    expect(await storage.get(totalKey(PROJECT, "hook.prompt"))).toBe(3);
+    expect(await storage.get(dayKey(PROJECT, "20300101", "hook.prompt"))).toBe(
+      2,
+    );
+    expect(await storage.get(sinceKey(PROJECT))).toBe(
+      "2030-01-01T00:00:00.000Z",
+    );
+    expect(
+      await storage.get(totalKey(PROJECT, "dashboard.reset")),
+    ).toBeUndefined();
+    expect(await storage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
+    expect(gm1Lines(warn)).toHaveLength(1);
+  });
+
+  it("bare-reset fallback carries the confirmation notice", async () => {
+    const storage = new FakeStorage();
+    await storage.set(totalKey(PROJECT, "hook.prompt"), 2);
+    const { added, fakeCtx, prompt } = fakeForMetricsCommand({
+      storage,
+      synthetic: async () => {
+        throw new Error("synthetic surface drifted");
+      },
+    });
+    await registerMetricsCommand(fakeCtx);
+
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "reset", files: [{ uri: "file:///x" }] },
+      delivery: "steer",
+    });
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    const call = prompt.mock.calls[0]![0]! as {
+      text: string;
+      files?: unknown;
+    };
+    expect(call.text).toContain(METRICS_RESET_CONFIRM_NOTICE);
+    expect(call.text).toContain(METRICS_FALLBACK_ASK);
+    expect(call.files).toEqual([{ uri: "file:///x" }]);
+    expect(await storage.get(totalKey(PROJECT, "hook.prompt"))).toBe(2);
+    expect(
+      await storage.get(totalKey(PROJECT, "dashboard.reset")),
+    ).toBeUndefined();
+    expect(await storage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(
+      undefined,
+    );
+  });
+
   it("reset_removes_metrics_and_re_stamps_since", async () => {
     const storage = new FakeStorage();
     await storage.set(totalKey(PROJECT, "hook.prompt"), 3);
@@ -1378,7 +1449,7 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
 
     await added[0]!.execute({
       sessionID: SESSION,
-      prompt: { text: "reset" },
+      prompt: { text: "reset confirm" },
       delivery: "queue",
     });
     await settle();
@@ -1429,14 +1500,14 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
     await expect(registration.dispose()).resolves.toBeUndefined();
   });
 
-  it("reset_token_is_case_insensitive_and_unrelated_arguments_change_nothing", async () => {
-    // "RESET" (incl. surrounding whitespace) resets.
+  it("reset_confirm_token_is_case_insensitive_and_unrelated_arguments_change_nothing", async () => {
+    // "RESET CONFIRM" (incl. collapsed whitespace/case) wipes.
     const upper = fakeForMetricsCommand();
     await registerMetricsCommand(upper.fakeCtx);
     await upper.storage.set(sinceKey(PROJECT), "2030-01-01T00:00:00.000Z");
     await upper.added[0]!.execute({
       sessionID: SESSION,
-      prompt: { text: "  RESET " },
+      prompt: { text: "  RESET   CONFIRM " },
       delivery: "steer",
     });
     await settle();
@@ -1463,7 +1534,11 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
       await other.storage.get(totalKey(PROJECT, "dashboard.reset")),
     ).toBeUndefined();
     expect(other.synthetic).toHaveBeenCalledTimes(1);
-    // The seeded stamp was not re-stamped: only "reset" restarts metrics.
+    expect(
+      (other.synthetic.mock.calls[0]![0] as { text: string }).text,
+    ).not.toContain(METRICS_RESET_CONFIRM_NOTICE);
+    // The seeded stamp was not re-stamped: only "reset confirm" restarts
+    // metrics.
     expect(await readSince(other.storage, PROJECT)).toBe(
       "2030-01-01T00:00:00.000Z",
     );
@@ -1482,7 +1557,7 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
 
     await added[0]!.execute({
       sessionID: SESSION,
-      prompt: { text: "reset" },
+      prompt: { text: "reset confirm" },
       delivery: "steer",
     });
     await settle();

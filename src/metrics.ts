@@ -1064,6 +1064,17 @@ export const MEMORY_METRICS_COMMAND_DESCRIPTION =
 export const METRICS_FALLBACK_ASK =
   "The metrics dashboard could not be delivered as a synthetic post. Call the memory_metrics tool and echo the markdown table it returns verbatim, exactly as received — every count, name, and row in place. Counts only: do not paraphrase, summarize, reorder, or round any numbers, and add no commentary beyond the table (it is count-only plugin statistics).";
 
+/** Exact second-step token for a destructive metrics reset (E10b). */
+export const METRICS_RESET_CONFIRM_ARG = "reset confirm";
+
+/**
+ * Fixed notice prepended to the dashboard for a bare `reset`: the wipe did
+ * not happen, and the user must re-run with the confirm token. Furniture,
+ * never input-derived (ADR-0008).
+ */
+export const METRICS_RESET_CONFIRM_NOTICE =
+  "> Reset not applied. Re-run `/memory-metrics reset confirm` to wipe all local metrics.";
+
 /** Adapt the plugin-scoped `ctx.storage` to the ledger's structural port. */
 function ledgerOf(ctx: Plugin.Context): LedgerStorage {
   return {
@@ -1099,20 +1110,26 @@ function memoryRootOf(ctx: Plugin.Context): string {
  *   text})` → on a RESOLVED post: the G-M1 first-post line (once per
  *   process, module-level stamp) + a fired-and-forgotten `dashboard.shown`
  *   bump (§5.12 "successful /memory-metrics render+post").
- * - case-insensitive `reset` token → `resetMetrics` (awaited, never
- *   rejecting — like the arm ops), `dashboard.reset` on a completed wipe,
- *   then the fresh (restarted) table through the SAME channel below.
+ * - bare, case-insensitive `reset` token (whitespace-normalized) → NEVER
+ *   wipes: the intact table is posted prefixed with the fixed
+ *   `METRICS_RESET_CONFIRM_NOTICE` so the user can see what would be lost
+ *   and must re-run with `reset confirm`.
+ * - `reset confirm` → `resetMetrics` (awaited, never rejecting — like the
+ *   arm ops), `dashboard.reset` on a completed wipe, then the fresh
+ *   (restarted) table through the SAME channel below.
  * - a rejected post → the §5.5 spread `{ ...prompt, sessionID, delivery,
- *   text: METRICS_FALLBACK_ASK }` (text last, wins; files/agents/skills
- *   survive, P7) — degraded to one model turn; no `dashboard.shown` bump on
- *   either degraded path.
+ *   text: <notice + METRICS_FALLBACK_ASK | METRICS_FALLBACK_ASK> }` (text
+ *   last, wins; files/agents/skills survive, P7) — degraded to one model
+ *   turn; no `dashboard.shown` bump on either degraded path. The notice
+ *   rides along for a bare reset so the confirmation instruction is never
+ *   lost when the synthetic channel fails.
  * - never throws: any failure (storage down, publish/fallback rejecting,
  *   a broken context) is caught here and degraded to `logDiagnostic` only,
  *   so the executor always resolves.
  *
  * Wiring note: `index.ts` registers this alongside `registerMemoryReview`;
  * the command never writes durable memory and resets nothing except on
- * `reset`.
+ * `reset confirm`.
  */
 export function registerMetricsCommand(
   ctx: Plugin.Context,
@@ -1127,11 +1144,17 @@ export function registerMetricsCommand(
           // All deps for THIS call resolve from the live context (P22).
           const ledger = ledgerOf(ctx);
           const projectID = projectIDOf(ctx);
-          // One argument: the (trimmed, case-insensitive) reset token.
-          // Anything else renders the plain dashboard.
+          // One argument: the (trimmed, case-insensitive, whitespace-
+          // normalized) reset token. Bare `reset` asks for confirmation;
+          // only `reset confirm` wipes. Anything else renders the plain
+          // dashboard.
           const arg =
-            typeof prompt?.text === "string" ? prompt.text.trim() : "";
-          if (arg.toLowerCase() === "reset") {
+            typeof prompt?.text === "string"
+              ? prompt.text.trim().toLowerCase().replace(/\s+/g, " ")
+              : "";
+          const confirmReset = arg === METRICS_RESET_CONFIRM_ARG;
+          const resetRequested = arg === "reset";
+          if (confirmReset) {
             const reset = await resetMetrics(ledger, projectID);
             // Only a wipe that actually completed counts; the fire-and-
             // forget bump cannot delay or fail the command (ADR-0008 §3).
@@ -1155,8 +1178,11 @@ export function registerMetricsCommand(
           // runs only after a RESOLVED post and can never co-fire with the
           // fallback (no `shown` bump and no G-M1 line on either degraded
           // path — enforced by shape, not by call-site convention).
+          const text = resetRequested
+            ? `${METRICS_RESET_CONFIRM_NOTICE}\n\n${table}`
+            : table;
           try {
-            await ctx.session.synthetic({ sessionID, text: table });
+            await ctx.session.synthetic({ sessionID, text });
           } catch {
             // Synthetic rejected: degrade to the §5.5 pattern. Awaited here
             // so its rejection is caught by the outer body.
@@ -1164,7 +1190,9 @@ export function registerMetricsCommand(
               ...prompt,
               sessionID,
               delivery,
-              text: METRICS_FALLBACK_ASK,
+              text: resetRequested
+                ? `${METRICS_RESET_CONFIRM_NOTICE}\n\n${METRICS_FALLBACK_ASK}`
+                : METRICS_FALLBACK_ASK,
             });
             return;
           }

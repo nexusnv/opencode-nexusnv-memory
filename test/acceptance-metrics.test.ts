@@ -1216,7 +1216,7 @@ async function driveUsageRun(
     const sinceBefore = dataChecks ? await readSince(store, PROJECT) : undefined;
     await record.metricsCommand!.execute({
       sessionID: SESSION,
-      prompt: { text: "reset" },
+      prompt: { text: "reset confirm" },
       delivery: "steer",
     });
     await settle();
