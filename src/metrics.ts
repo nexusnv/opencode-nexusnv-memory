@@ -35,10 +35,11 @@
  * The `/memory-metrics` command (spec §5.12 command row + §1.3 G-M1; M-T5)
  * also lives here: its deps resolve per execute call (spec P22), a no-arg
  * invocation renders `collectAndRender` and posts the table through
- * `ctx.session.synthetic`, and a case-insensitive `reset` argument wipes the
- * whole `<projectID>/metrics/…` namespace (`resetMetrics`: one locked body
- * covering the paginated scan, the removes, and the fresh `since` stamp)
- * and reports the restarted table
+ * `ctx.session.synthetic`; a bare `reset` argument renders the intact table
+ * plus the confirmation notice, and `reset confirm` wipes the whole
+ * `<projectID>/metrics/…` namespace (`resetMetrics`: one locked body covering
+ * the paginated scan, the removes, and the fresh `since` stamp) and reports
+ * the restarted table
  * through the same channel. G-M1 is a deploy-time human check: the FIRST
  * RESOLVED synthetic post of the process logs the §1.3 line once (module-
  * level stamp; a rejected post logs nothing — the line claims "posted").
@@ -57,7 +58,12 @@ import {
   resolveMemoryRoot,
   withWriteLock,
 } from "./files.js";
-import { getPending, SEEN_LIMIT, type LedgerStorage } from "./capture.js";
+import {
+  getPending,
+  pruneLedgerState,
+  SEEN_LIMIT,
+  type LedgerStorage,
+} from "./capture.js";
 import { DEFAULT_MEMORY_OPTIONS, parseMemoryOptions } from "./config.js";
 import type { Plugin } from "@opencode/plugin";
 
@@ -116,6 +122,60 @@ const METRIC_NAME_LIST = [
 
 /** One enumerated §5.12 counter name. */
 export type MetricName = (typeof METRIC_NAME_LIST)[number];
+
+/**
+ * Fixed display labels for the dashboard's `meaning` column. This is
+ * furniture, not input: the renderer can only ever emit these exact strings,
+ * and every counter name has exactly one label (the `satisfies` keeps the map
+ * exhaustive when the vocabulary changes).
+ */
+export const METRIC_LABELS = {
+  "hook.prompt": "prompt hook runs",
+  "hook.context": "context hook runs",
+  "hook.compaction": "compaction hook runs",
+  "index.attach": "INDEX attached",
+  "index.overCap": "INDEX over cap (not attached)",
+  "index.already": "INDEX already attached",
+  "remember.caught": "remember directives captured",
+  "brief.empty": "brief empty",
+  "brief.injected": "brief injected",
+  "brief.lines": "brief lines injected",
+  "brief.truncated": "brief truncated by budget",
+  "status.shown": "status line shown",
+  "status.dropped": "status line dropped by budget",
+  "hint.shown": "memory hints shown",
+  "compaction.priors": "priors injected on compaction",
+  "priors.lines": "priors lines injected",
+  "failure.captured": "failures captured",
+  "failure.duplicate": "failure captures deduped",
+  "failure.retry": "failure captures retried",
+  "failure.failed": "failure captures failed",
+  "snapshot.written": "handoff snapshots written",
+  "snapshot.unchanged": "handoff snapshots unchanged",
+  "snapshot.dropped": "handoff snapshots dropped",
+  "snapshot.failed": "handoff snapshots failed",
+  "compactionCapture.captured": "compaction summaries captured",
+  "compactionCapture.duplicate": "compaction summaries deduped",
+  "compactionCapture.dropped": "compaction summaries dropped",
+  "compactionCapture.failed": "compaction summaries failed",
+  "recall.INDEX.md": "recall INDEX.md",
+  "recall.activeContext.md": "recall activeContext.md",
+  "recall.decisions.md": "recall decisions.md",
+  "recall.architecture.md": "recall architecture.md",
+  "recall.style.md": "recall style.md",
+  "recall.issues.md": "recall issues.md",
+  "recall.handoff": "recall handoffs",
+  "recall.error": "recall errors",
+  "apply.batch": "apply calls",
+  "apply.lines": "candidate lines applied",
+  "apply.denied": "candidate lines denied",
+  "apply.partialError": "apply partial failures",
+  "apply.reset": "apply resets",
+  "review.invoked": "review invocations",
+  "dashboard.shown": "dashboard renders",
+  "dashboard.reset": "metric resets",
+  "hint.recall": "hints followed by recall",
+} as const satisfies Record<MetricName, string>;
 
 /** Exhaustive fail-closed vocabulary: unknown names are warned + dropped. */
 export const METRIC_NAMES: ReadonlySet<string> = new Set<string>(
@@ -304,6 +364,7 @@ export function createBump(
       if (stamp !== lastPruneStamps.get(projectID)) {
         lastPruneStamps.set(projectID, stamp);
         void pruneDayBuckets(storage, projectID).catch(logDiagnostic);
+        void pruneLedgerState(storage, projectID).catch(logDiagnostic);
       }
     } catch (error) {
       logDiagnostic(error);
@@ -519,7 +580,7 @@ export async function consumeArm(
 }
 
 /**
- * `/memory-metrics reset` (spec §5.12 storage keys + US-29): wipe the whole
+ * `/memory-metrics reset confirm` (spec §5.12 storage keys + US-29): wipe the whole
  * `<projectID>/metrics/…` namespace — every total counter, day bucket, the
  * `since` stamp, and every arm flag — never another project's namespace and
  * never any key outside it (the wipe is namespace-scoped numbers-only state;
@@ -724,15 +785,17 @@ const BUDGET_WINDOW_DAYS = 7;
  * health}` — §5.12 renderer contract: no fs, no storage, no clock inside
  * (the 7-day budget window is derived purely from the input's day
  * stamps). The only strings it can emit are the fixed furniture below,
- * counter names, the six structural file names, UTC day stamps, integers,
- * and the validated ISO `since` stamp — ADR-0008's numbers-only rule, with
- * the dashboard as the one deliberate (constrained) text surface.
+ * counter names, the fixed `METRIC_LABELS` display vocabulary, the six
+ * structural file names, UTC day stamps, integers, and the validated ISO
+ * `since` stamp — ADR-0008's numbers-only rule, with the dashboard as the
+ * one deliberate (constrained) text surface.
  *
  * Titles, tables, and rows:
  * `# [memory] metrics (local-only)` + `Since: <ISO|->`; `## Explicit calls`
  * and `## Behind the scenes` render the whole vocabulary (present-but-0
  * rows for stability, §5.12 leaves the zero-row policy unspecified), name
- * sorted; `## Memory health` renders the six structural file rows (cap
+ * sorted, one `counter | meaning | count` row each; `## Memory health`
+ * renders the six structural file rows (cap
  * column `-` where unbounded) then the §5.12 scalar block (handoffs,
  * archive, pending, seen, decisionsLines) in §5.12's field order;
  * `## Budget pressure` renders the last `BUDGET_WINDOW_DAYS` day stamps of
@@ -756,10 +819,12 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
     names: ReadonlyArray<MetricName>,
     record: Readonly<Partial<Record<MetricName, number>>>,
   ): void => {
-    lines.push("| counter | count |");
-    lines.push("|---|---:|");
+    lines.push("| counter | meaning | count |");
+    lines.push("|---|---|---:|");
     for (const name of names) {
-      lines.push(`| ${name} | ${asCount(record[name])} |`);
+      lines.push(
+        `| ${name} | ${METRIC_LABELS[name]} | ${asCount(record[name])} |`,
+      );
     }
   };
 
@@ -794,8 +859,8 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
 
   lines.push("");
   lines.push("## Budget pressure");
-  lines.push("| day | counter | count |");
-  lines.push("|---|---|---:|");
+  lines.push("| day | counter | meaning | count |");
+  lines.push("|---|---|---|---:|");
   for (const stamp of Object.keys(input.days)
     .filter((candidate) => DAY_STAMP.test(candidate))
     .sort()
@@ -807,7 +872,9 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
       // unspecified; present-in-bucket is the compact, deterministic
       // choice). Unknown keys in the record are skipped by construction.
       if (value === undefined) continue;
-      lines.push(`| ${stamp} | ${name} | ${asCount(value)} |`);
+      lines.push(
+        `| ${stamp} | ${name} | ${METRIC_LABELS[name]} | ${asCount(value)} |`,
+      );
     }
   }
   return lines.join("\n") + "\n";
@@ -998,6 +1065,17 @@ export const MEMORY_METRICS_COMMAND_DESCRIPTION =
 export const METRICS_FALLBACK_ASK =
   "The metrics dashboard could not be delivered as a synthetic post. Call the memory_metrics tool and echo the markdown table it returns verbatim, exactly as received — every count, name, and row in place. Counts only: do not paraphrase, summarize, reorder, or round any numbers, and add no commentary beyond the table (it is count-only plugin statistics).";
 
+/** Exact second-step token for a destructive metrics reset (E10b). */
+export const METRICS_RESET_CONFIRM_ARG = "reset confirm";
+
+/**
+ * Fixed notice prepended to the dashboard for a bare `reset`: the wipe did
+ * not happen, and the user must re-run with the confirm token. Furniture,
+ * never input-derived (ADR-0008).
+ */
+export const METRICS_RESET_CONFIRM_NOTICE =
+  "> Reset not applied. Re-run `/memory-metrics reset confirm` to wipe all local metrics.";
+
 /** Adapt the plugin-scoped `ctx.storage` to the ledger's structural port. */
 function ledgerOf(ctx: Plugin.Context): LedgerStorage {
   return {
@@ -1025,7 +1103,7 @@ function memoryRootOf(ctx: Plugin.Context): string {
 }
 
 /**
- * The `/memory-metrics [reset]` command (spec §5.12 command row). Execution
+ * The `/memory-metrics [reset | reset confirm]` command (spec §5.12 command row). Execution
  * shape, per call (spec P22 — ledger, projectID, memory root, and caps all
  * resolve from the live context; nothing is captured at load):
  *
@@ -1033,20 +1111,26 @@ function memoryRootOf(ctx: Plugin.Context): string {
  *   text})` → on a RESOLVED post: the G-M1 first-post line (once per
  *   process, module-level stamp) + a fired-and-forgotten `dashboard.shown`
  *   bump (§5.12 "successful /memory-metrics render+post").
- * - case-insensitive `reset` token → `resetMetrics` (awaited, never
- *   rejecting — like the arm ops), `dashboard.reset` on a completed wipe,
- *   then the fresh (restarted) table through the SAME channel below.
+ * - bare, case-insensitive `reset` token (whitespace-normalized) → NEVER
+ *   wipes: the intact table is posted prefixed with the fixed
+ *   `METRICS_RESET_CONFIRM_NOTICE` so the user can see what would be lost
+ *   and must re-run with `reset confirm`.
+ * - `reset confirm` → `resetMetrics` (awaited, never rejecting — like the
+ *   arm ops), `dashboard.reset` on a completed wipe, then the fresh
+ *   (restarted) table through the SAME channel below.
  * - a rejected post → the §5.5 spread `{ ...prompt, sessionID, delivery,
- *   text: METRICS_FALLBACK_ASK }` (text last, wins; files/agents/skills
- *   survive, P7) — degraded to one model turn; no `dashboard.shown` bump on
- *   either degraded path.
+ *   text: <notice + METRICS_FALLBACK_ASK | METRICS_FALLBACK_ASK> }` (text
+ *   last, wins; files/agents/skills survive, P7) — degraded to one model
+ *   turn; no `dashboard.shown` bump on either degraded path. The notice
+ *   rides along for a bare reset so the confirmation instruction is never
+ *   lost when the synthetic channel fails.
  * - never throws: any failure (storage down, publish/fallback rejecting,
  *   a broken context) is caught here and degraded to `logDiagnostic` only,
  *   so the executor always resolves.
  *
  * Wiring note: `index.ts` registers this alongside `registerMemoryReview`;
  * the command never writes durable memory and resets nothing except on
- * `reset`.
+ * `reset confirm`.
  */
 export function registerMetricsCommand(
   ctx: Plugin.Context,
@@ -1061,11 +1145,17 @@ export function registerMetricsCommand(
           // All deps for THIS call resolve from the live context (P22).
           const ledger = ledgerOf(ctx);
           const projectID = projectIDOf(ctx);
-          // One argument: the (trimmed, case-insensitive) reset token.
-          // Anything else renders the plain dashboard.
+          // One argument: the (trimmed, case-insensitive, whitespace-
+          // normalized) reset token. Bare `reset` asks for confirmation;
+          // only `reset confirm` wipes. Anything else renders the plain
+          // dashboard.
           const arg =
-            typeof prompt?.text === "string" ? prompt.text.trim() : "";
-          if (arg.toLowerCase() === "reset") {
+            typeof prompt?.text === "string"
+              ? prompt.text.trim().toLowerCase().replace(/\s+/g, " ")
+              : "";
+          const confirmReset = arg === METRICS_RESET_CONFIRM_ARG;
+          const resetRequested = arg === "reset";
+          if (confirmReset) {
             const reset = await resetMetrics(ledger, projectID);
             // Only a wipe that actually completed counts; the fire-and-
             // forget bump cannot delay or fail the command (ADR-0008 §3).
@@ -1089,8 +1179,11 @@ export function registerMetricsCommand(
           // runs only after a RESOLVED post and can never co-fire with the
           // fallback (no `shown` bump and no G-M1 line on either degraded
           // path — enforced by shape, not by call-site convention).
+          const text = resetRequested
+            ? `${METRICS_RESET_CONFIRM_NOTICE}\n\n${table}`
+            : table;
           try {
-            await ctx.session.synthetic({ sessionID, text: table });
+            await ctx.session.synthetic({ sessionID, text });
           } catch {
             // Synthetic rejected: degrade to the §5.5 pattern. Awaited here
             // so its rejection is caught by the outer body.
@@ -1098,7 +1191,9 @@ export function registerMetricsCommand(
               ...prompt,
               sessionID,
               delivery,
-              text: METRICS_FALLBACK_ASK,
+              text: resetRequested
+                ? `${METRICS_RESET_CONFIRM_NOTICE}\n\n${METRICS_FALLBACK_ASK}`
+                : METRICS_FALLBACK_ASK,
             });
             return;
           }

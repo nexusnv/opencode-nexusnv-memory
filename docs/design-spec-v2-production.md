@@ -5,8 +5,8 @@
 `/references/` + `/instructions/` + `/compaction/` + `/api/` (fetched 2026-10-15) and the published
 `@opencode/plugin` package (latest `2.0.29`, published 2026-10-14).
 
-**Sources:** `motivation.md` §§1–6 (background), `docs/c4-01`–`c4-06`, `docs/adr/0001–0007`,
-`docs/user-stories.md` (US-01–27, AS-01–09, HS-01–11), `README.md`.
+**Sources:** `motivation.md` §§1–6 (background), `docs/c4-01`–`c4-06`, `docs/adr/0001–0008`,
+`docs/user-stories.md` (US-01–32, AS-01–09, HS-01–13), `README.md`.
 
 **Precedence (resolves all cross-document conflicts):**
 
@@ -278,7 +278,7 @@ Ship this user-pasted rule so `memory_apply` prompts instead of failing open (ba
 }
 ```
 
-The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. On setup the plugin emits an unconditional loud warning (log + first-run print) that the `memory_write → ask` rule must be installed — effective rules cannot be verified at setup (no acting agent; `ctx.agent.get` returns only that agent's own permissions, never the global array; `ctx.permission.list` returns pending requests, not rules). The scaffold + first-run print remain the channel; optionally re-check lazily at apply time. Never set `compaction` thresholds or `auto`. V2 does
+The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. On first run the plugin emits one consolidated install checklist (this permission rule, the `AGENTS.md` protocol block, the optional options snippet, and a `/memory-status` pointer) instead of separate warning + dump. On later setups it keeps the unconditional loud permission warning; effective rules cannot be verified at setup (no acting agent; `ctx.agent.get` returns only that agent's own permissions, never the global array; `ctx.permission.list` returns pending requests, not rules). The scaffold + first-run print remain the channel; optionally re-check lazily at apply time. The snippet and protocol-block bytes are unchanged by the consolidation. Never set `compaction` thresholds or `auto`. V2 does
 resolve the `instructions` array, but this design deliberately does not use it: memory rides
 `AGENTS.md` + the `prompt` hook so injection has one owner and needs no client config edit.
 
@@ -415,6 +415,12 @@ registrations.push(await ctx.session.hook("context", async (event) => {
   from `event.messages: Message[]` (the `context` event has no `prompt.text`; `sessionID` is also on
   the event for throttle scoping); it is **throttled to once per prompt/session** via the ledger key
   `<projectID>/hint/<sessionID>/<promptHash>` so tool-driven continuations do not re-inject the same hint.
+- The same ≤1 hint slot is filled by either the INDEX hint above or a `remember:` near-miss nudge
+  (§5.11). The nudge is fixed prose (one line: nothing was recorded; start a line with `remember:` or
+  `remember that`); it outranks an INDEX hit for the same prompt, shares the exact prompt-hash
+  throttle key, and never names a file to recall. **Only the INDEX hint arms** the
+  `hint → recall` correlation; the near-miss nudge never sets the arm key (the user was not asked to
+  recall anything).
 - Budget (fixed allocation): `INDEX attach ≤30 + brief ≤48 + hint ≤1 + status ≤1 = ≤80`
   (`injectBudgetLines`). Overflow truncates the brief first; the hint line is never dropped on a hit,
   and the status line is dropped before the hint. All text is truncated-with-notice by the loaders.
@@ -670,11 +676,14 @@ registrations.push(await ctx.session.hook("compaction", async (event) => {
     cleared after `statusLine()` reports it.
   - `<projectID>/notice.indexOverCap` / `<projectID>/notice.captureFailed` → transient positive-int notice
     values, cleared after `statusLine()` reports them (same read-then-clear semantics as the rotation marker).
-  - `<projectID>/snapshot/<sessionID>` → last snapshot content hash for hash-guarded idempotency.
+  - `<projectID>/snapshot/<sessionID>` → `{ hash, at }` (content hash + write time; legacy bare-hash strings are read and normalized out on the first prune) for hash-guarded idempotency.
   - `<projectID>/snapshotThrottle/<sessionID>` → last fallback-snapshot timestamp for the `context`-hook writer.
-  - `<projectID>/hint/<sessionID>/<promptHash>` → hint already emitted for this prompt (once-per-prompt throttle).
-  - Pruning uses `ctx.storage.scan({ prefix: "<projectID>/seen/" })` (paginating via `after`/`next`) and
-    `ctx.storage.remove(key)` to keep the set bounded (target ≤500 entries, oldest evicted by stored timestamp).
+  - `<projectID>/hint/<sessionID>/<promptHash>` → hint (INDEX or fixed near-miss nudge) already emitted for this prompt (once-per-prompt throttle).
+  - Pruning uses `ctx.storage.scan({ prefix: … })` (paginating via `after`/`next`) and
+    `ctx.storage.remove(key)` to keep the set bounded: `seen` targets ≤500 entries (oldest evicted by
+    stored timestamp), and `pruneLedgerState` removes aged `attempt/` (30s), `hint/` (7 UTC days), and
+    `snapshot/` + `snapshotThrottle/` (30 UTC days) keys on the once-per-UTC-day metrics piggyback —
+    scanning outside the write lock, then re-reading each victim under it so a fresh write wins.
 - `redact`: secrets blocklist (`.env`, keys, tokens by pattern — patterns enumerated in
   `test/fixtures/secrets.*`) + `<private>…</private>` strip (case-insensitive, multiline,
   outermost-wins, unclosed tag strips to EOF) before any write/inject. Memory is untrusted input and
@@ -827,6 +836,14 @@ Provenance classes and the routing they imply:
   from typed text in `prompt.text`; it is covered only by the fence/quote heuristic, and anything
   ambiguous falls back to scratchpad + nudge. The accepted
   forms are documented in the `AGENTS.md` protocol block so behaviour is predictable, not inferred.
+- **Near-miss detector (nudge only).** `isRememberNearMiss(text)` is a pure helper used by the
+  `context` hook. It requires: no valid directive fact anywhere in the visible text; a visible
+  (non-fenced, non-blockquoted) line whose inline-code-stripped form starts with an optional
+  politeness prefix (`please` / `kindly` / `can you` / `could you` / `would you`) + `remember`; and
+  a remainder that does not start with a narrative wh-word (`remember when/how/what/where/who/why…`).
+  Valid directives, `I remember…`, `we should remember…`, and fenced/quoted text stay silent. The
+  detector **never writes memory**; it only returns one fixed `[memory-hint]` line explaining the
+  documented form (§5.2), and that nudge never arms hint→recall.
 - **Execution site for the fast path.** `classifyProvenance`/`rememberAsserted` run in the `prompt` hook
   — the only hook that sees `event.prompt.text` before admission. The append is serialized (per-process
   mutex), ledger-idempotent by content ID, and **never throws** (§5, §5.1). The **plugin is the sole
@@ -870,7 +887,7 @@ with a fail-closed guard):
 | event dispatch (§5.9) + throttled context-hook writer (§5.2) | `snapshot.written` / `snapshot.unchanged` / `snapshot.dropped` / `snapshot.failed` (`SnapshotOutcome.reason` — bumped at each site internally via an optional metrics tap: the direct `session.idle` handler and the `snapshotIfDue` throttle gate, whose boolean signature and behavior stay unchanged; the `skipped` reason (arises on the direct dispatch path) bumps nothing); `compactionCapture.captured` / `compactionCapture.duplicate` / `compactionCapture.dropped` / `compactionCapture.failed` (`CompactionOutcome.reason`, direct dispatch path; `skipped` likewise uncounted) |
 | `memory_recall` (§5.4) | `recall.<structural-name>` for the six allowlisted files (`recall.INDEX.md`, `recall.activeContext.md`, `recall.decisions.md`, `recall.architecture.md`, `recall.style.md`, `recall.issues.md`), `recall.handoff` for any `handoffs/…` path, `recall.error` on rejection (the thrown error propagates unchanged — metrics never mask a failure) |
 | `memory_apply` (§5.4) | `apply.batch` (one per call); `apply.lines` (by candidate count); `apply.denied` (per line whose `permission.assert` rejected); `apply.partialError` (a mid-batch write failure after ≥1 applied); `apply.reset` on the completion reset incl. `candidates: []` |
-| commands | `review.invoked` (`/memory-review` — count diagnostics only, no memory write); `dashboard.shown` (successful `/memory-metrics` render+post); `dashboard.reset` |
+| commands | `review.invoked` (`/memory-review` — count diagnostics only, no memory write); `dashboard.shown` (successful `/memory-metrics` render+post, including a bare-reset confirmation render); `dashboard.reset` (only after a completed `reset confirm` wipe) |
 | hint→recall correlation | `hint.shown` arms a session entry (`<projectID>/metrics/arm/hint/<sessionID>`, a positive-int arming timestamp — armed for at most one UTC day after that stamp); a successful `memory_recall` **in that session while armed (and fresh)** bumps `hint.recall` and clears the entry — the one session-scoped flag (numeric storage, no content, never any text; stale hints never convert and the daily prune clears unaged-out leftovers) |
 
 Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
@@ -888,8 +905,9 @@ Storage keys (`ctx.storage`, plugin-scoped; identical namespace rules as §5.7):
   also clears `metrics/arm/…` entries older than one UTC day.
   Total counter names are capped by the enumeration above, so the namespace is small and flat.
 - Writes serialize through the existing per-process mutex (§5.7); each bump is a single locked body
-  writing the total + day pair (+ a lazy `since` set when absent). `reset` removes all
-  `<projectID>/metrics/…` keys (paginated scan + remove) and stamps a fresh `since`.
+  writing the total + day pair (+ a lazy `since` set when absent). `reset confirm` removes all
+  `<projectID>/metrics/…` keys (paginated scan + remove) and stamps a fresh `since`; a bare `reset`
+  never reaches the wipe path.
 
 ```ts
 registrations.push(await ctx.tool.transform((editor) => {
@@ -904,14 +922,23 @@ registrations.push(await ctx.tool.transform((editor) => {
 
 - **Renderer contract (normative):** `renderMetricsDashboard(input)` is a **pure** function over
   `{ totals, days, health, since }` → one markdown table block; deterministic given inputs; the only
-  free text it can emit is counter names, structural file names, day stamps, and numbers — it has no
-  parameter carrying content. `health` reads on request: per-file line counts vs caps, `handoffs/`
-  and `handoffs/archive/` file counts, `pending`, `seen` set size (scan), decisions tail size — counts
-  only, obtained by `readFile` + line counting, never by rendering file bodies.
+  text it can emit is fixed furniture, counter names, the fixed `METRIC_LABELS` display map, structural
+  file names, day stamps, and numbers — it has no parameter carrying content. Counter tables use
+  `counter | meaning | count`; the day-budget view uses `day | counter | meaning | count`. `METRIC_LABELS`
+  is an exhaustive `Record<MetricName, string>` (display prose only, never input-derived). `health`
+  reads on request: per-file line counts vs caps, `handoffs/` and `handoffs/archive/` file counts,
+  `pending`, `seen` set size (scan), decisions tail size — counts only, obtained by `readFile` + line
+  counting, never by rendering file bodies.
 - **Command (normative):** `ctx.command.transform` registers `memory-metrics` (invocation
-  `/memory-metrics [reset]`):
-  - `reset` argument (case-insensitive): removes all `<projectID>/metrics/…` keys, stamps a fresh
-    `since`, then reports via the same output channel that metrics restarted.
+  `/memory-metrics [reset | reset confirm]`):
+  - bare `reset` (case-insensitive, whitespace-normalized): **never wipes**. It renders the intact
+    table prefixed with the fixed confirmation notice
+    (``> Reset not applied. Re-run `/memory-metrics reset confirm` to wipe all local metrics.``) and
+    bumps only `dashboard.shown`. If the synthetic post rejects, the fallback prompt carries the same
+    notice before the echo ask, so the instruction is never lost.
+  - `reset confirm`: removes all `<projectID>/metrics/…` keys under one lock, stamps a fresh `since`,
+    bumps `dashboard.reset` only when the wipe completed, then reports the restarted table through
+    the same channel.
   - otherwise: compute counts → render → `ctx.session.synthetic({ sessionID, text: table })`
     → bump `dashboard.shown`. **G-M1:** the **first synthetic post of the process** (which is the
     deploy event — one line per deploy) logs
@@ -921,7 +948,7 @@ registrations.push(await ctx.tool.transform((editor) => {
     §5.5 pattern: `ctx.session.prompt({ ...prompt, sessionID, delivery, text: metricsFallbackAsk })`,
     where the ask instructs the agent to call `memory_metrics` and **echo the table verbatim**. The
     executor never throws; a fallback failure degrades to `logDiagnostic` only.
-  - The command writes no durable memory file and resets nothing except on `reset`.
+  - The command writes no durable memory file and resets nothing except on `reset confirm`.
 
 ---
 
@@ -943,8 +970,8 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `issues.md` | one line each: todo/doing/done + issue ref | 60 lines |
 | `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
-| Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); pruned via `scan({prefix:"<projectID>/seen/"})` to ≤500; 30s retry window | bounded |
-| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient arm entry: a positive-int arming timestamp when armed, armed ≤ one UTC day, cleared on first use or the daily prune); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset` wipes the namespace | ≤ enumerated totals + ≤90 day buckets × bumped names + ≤ hinted sessions in the last UTC day |
+| Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` (`{hash, at}`; legacy bare-hash strings are normalized out on the first prune) + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); `seen` pruned via paginated `scan` to ≤500; attempts expire at the 30s retry window, hints after 7 UTC days, snapshot/throttle stamps after 30 UTC days (scan outside the lock; each victim re-read under its own lock), piggybacked on the same once-per-UTC-day metrics bump | bounded |
+| Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient arm entry: a positive-int arming timestamp when armed, armed ≤ one UTC day, cleared on first use or the daily prune); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset confirm` wipes the namespace (bare `reset` only explains) | ≤ enumerated totals + ≤90 day buckets × bumped names + ≤ hinted sessions in the last UTC day |
 
 Retention = **reachability** (ADR-0005): active (retain + injectable suffix) / causal (one hop behind,
 follow-on-demand) / conditional (INDEX one-liner) / archived (`handoffs/archive/`, recallable, never
@@ -963,9 +990,10 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
 
 ## 7. Lifecycle (normative flow)
 
-0. **Init (once):** scaffold `.opencode/memory/` + six templates + `handoffs/`; emit the commented
-   ≤5-option snippet. Root `AGENTS.md` is hand-edited only (the plugin emits the block text). Nothing
-   injects beyond INDEX until content exists.
+0. **Init (once):** scaffold `.opencode/memory/` + six templates + `handoffs/`; emit one consolidated
+   install checklist (permission rule, protocol block, commented ≤5-option snippet, `/memory-status`
+   pointer). Later setups keep the unconditional permission warning. Root `AGENTS.md` is hand-edited
+   only (the plugin emits the block text). Nothing injects beyond INDEX until content exists.
 1. **Capture (zero-LLM, provenance-tagged):** tool-hook failure path (§5.3) → scratchpad as
    `source:tool` (message-derived summary line + optional recall-only detail, plus advisory injection flags;
    increments `<projectID>/curation.pending`). A
@@ -974,10 +1002,11 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
    pending; everything ambiguous or
    inferred takes the scratchpad path and is flagged for review. Each real scratchpad write increments
    pending; a rotation sets `<projectID>/curation.rotated`. Ledger check-before-write; ~30s retry;
-   restarts/replays are no-ops.
+   restarts/replays are no-ops. The same once-per-UTC-day metrics piggyback also prunes aged ledger
+   attempts (30s), hints (7 days), and snapshot/throttle stamps (30 days); `seen` stays capped at 500.
 2. **Dedup:** persisted `ctx.storage` ledger only.
 3. **Snapshots:** `session.idle` (`data.sessionID`, G1 proven) with hash guard
-   (`<projectID>/snapshot/<sessionID>`), else an async, fire-and-forget, serialized,
+   (`<projectID>/snapshot/<sessionID>` → `{hash, at}`), else an async, fire-and-forget, serialized,
    hash-guarded writer in the `context` hook (§5.2, §5.9, throttle `<projectID>/snapshotThrottle/<sessionID>`),
    filtered to this location via `event.location`: at most once per
    `snapshotThrottleMinutes` per session AND hash changed; writes `handoffs/` only (`branch` via
@@ -1001,6 +1030,15 @@ re-emitted **per model call** (context hook), so a long turn pays that portion o
    announced once via the status line (§5.7); Phase-2 TTL/decay/FTS only as explicit opt-in commands.
 8. **Invalidation:** auto-memory lives only in `.opencode/memory/`, never in nested `AGENTS.md`
    (already-loaded nested files do not live-reload) (ADR-0002).
+
+**Bounded ledger and reset control (Tier 2).** Ledger idempotency guarantees are unchanged; the only
+new ledger behavior is age-based pruning of the existing keys and timestamping the snapshot value.
+A pruned `attempt/` record no longer suppresses a later identical failure (that failure may be
+attempted once more, recovering captures whose append previously failed) and a pruned legacy snapshot
+string can hand off once more; the `seen` key still blocks duplicates of successfully captured
+content. The control for the count-only metrics namespace is explicitly two-step: `/memory-metrics reset`
+renders a confirmation notice and changes nothing, while `/memory-metrics reset confirm` wipes
+`<projectID>/metrics/…` and re-stamps `since`.
 
 ---
 
@@ -1188,6 +1226,15 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   - **provenance gate (P15):** a documented directive form in the user's turn appends to `decisions.md`
     immediately and tagged **without** incrementing `curation.pending`, while an ambiguous or tool-origin "remember" lands in the scratchpad and
     needs review;
+  - **bounded ledger (Tier 2):** snapshot values are `{hash, at}` (legacy strings normalize on the first
+    prune); aged attempts/hints/snapshot/throttle keys are removed by paginated scan + remove with
+    each victim re-read under its own lock, scoped to the project, leaving malformed values alone; the daily
+    metrics piggyback runs both the day-bucket and ledger housekeeping once per UTC day;
+  - **dashboard/reset/onboarding (Tier 2):** `METRIC_LABELS` is exhaustive and fixed (labels are the only
+    display prose; renderer stays deterministic); bare `/memory-metrics reset` renders the notice without
+    wiping and `reset confirm` wipes (no new metric names); the `remember:` near-miss nudge shares the
+    one hint slot and prompt-hash throttle, keeps one line, and never arms hint→recall; first run emits
+    one consolidated checklist whose snippet/block bytes match the originals;
   - **G1–G4 type-proven and recorded in the PR**; deploy-time `event.type` log confirms `session.idle` /
     `session.compaction.ended` delivery; `scan` uses the `<projectID>/seen/` prefix with pagination;
     VCS branch comes from `vcs.get()` (status = changes). (G5 was **retired** — see §1.3.)
@@ -1202,8 +1249,9 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
     a fixed fixture: same inputs → byte-identical table, no content parameters);
     `/memory-metrics` posts via `ctx.session.synthetic` and its executor never throws; the post
     failure path re-issues the §5.5-style prompt asking the agent to call `memory_metrics`; the
-    `reset` argument wipes `<projectID>/metrics/…` and stamps a fresh `since`; **G-M1** logged at
-    first post in the deploy check.
+    bare `reset` renders the confirmation notice without wiping, `reset confirm` wipes
+    `<projectID>/metrics/…` and stamps a fresh `since`, and counter rows carry `METRIC_LABELS`
+    meaning text; **G-M1** logged at first post in the deploy check.
   - **`memory_search` (§5.14):** the same open-then-validate traversal/allowlist/symlink choke point
     (opened-inode realpath + `dev`/`ino` validation closes the path-swap race; non-regular files
     reject; unknown/traversal scopes reject); an old `decisions.md` line beyond the recall tail is
@@ -1248,4 +1296,10 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   and type-proven on `@opencode/plugin` 2.0.29).
   **Tier-1 delivered (2026-10-19):** E2 `/memory-status` + `memory_status` (§5.13) and E7
   `memory_search` (§5.14), both read-only, no new options/metric names/storage keys, no FTS/embeddings/
-  fuzzy search. E8–E14 remain deferred.
+  fuzzy search.
+  **Tier-2 delivered (2026-10-20):** E9 bounded ledger retention (snapshot `{hash, at}`, aged
+  attempt/hint/snapshot/throttle prune piggybacked on the daily metrics pass), E10 dashboard labels +
+  two-step reset confirmation (no new counter; still exactly five ADR-0006 options and 45 frozen metric
+  names), E11 `remember:` near-miss nudge (one hint slot, never writes memory, never arms hint→recall),
+  E12 consolidated first-run checklist + README quickstart. Still deferred: E8 and E13/E14 (no FTS/TTL/
+  embeddings, no rich TUI panel).

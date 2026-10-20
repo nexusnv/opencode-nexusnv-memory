@@ -997,8 +997,8 @@ describe("tools", () => {
       content: expect.stringContaining("# [memory] metrics (local-only)"),
     });
     const table = out.content;
-    expect(table).toContain("| hook.prompt | 1 |");
-    expect(table).toContain("| recall.style.md | 1 |");
+    expect(table).toContain("| hook.prompt | prompt hook runs | 1 |");
+    expect(table).toContain("| recall.style.md | recall style.md | 1 |");
     // Health from the on-disk memory root, with the OPERATIVE cap from
     // parseMemoryOptions(ctx.options) (12, not the 30 default).
     expect(table).toContain("| INDEX.md | 3 | 12 |");
@@ -1010,7 +1010,9 @@ describe("tools", () => {
     // otherwise desync the two and flake.
     const stamp = Object.keys(await readDays(store, PROJECT))[0] ?? "";
     expect(stamp).toMatch(/^\d{8}$/);
-    expect(table).toContain(`| ${stamp} | apply.lines | 3 |`);
+    expect(table).toContain(
+      `| ${stamp} | apply.lines | candidate lines applied | 3 |`,
+    );
   });
 
   it("index.ts wires registerMemoryTools", () => {

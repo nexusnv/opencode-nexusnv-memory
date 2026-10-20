@@ -43,8 +43,9 @@ ever collecting content?
      IDs (opaque hashes, ADR-0004) extends to metrics by construction.
 2. **Always on — no sixth option.** The five-option config contract stands (ADR-0006). Count-only
    int metrics are the same data class the ledger already persists locally, so they ship on by
-   default. The user's control is the dashboard command's `/memory-metrics reset`, which removes all
-   `<projectID>/metrics/…` keys and stamps a fresh `since`. Uninstall orphans the keys like the
+   default. The user's control is the dashboard command's two-step `reset`: bare `/memory-metrics reset`
+   renders a confirmation notice without wiping, and `/memory-metrics reset confirm` removes all
+   `<projectID>/metrics/…` keys and stamps a fresh `since` (Revision 2026-10-20). Uninstall orphans the keys like the
    ledger (US-24 parity; the storage location and manual `rm` are documented).
 3. **Fire-and-forget, never-throw taps.** Every bump is dispatched off the hook's awaited path
    (`void bump(...)` with its own catch) through the existing per-process write mutex. A bump must
@@ -61,7 +62,7 @@ ever collecting content?
    on-disk read) by a pure renderer. It surfaces two ways:
    - `memory_metrics` — a read-only tool registered beside `memory_recall`/`memory_apply`,
      returning the table through the same `toolResult` envelope (G2).
-   - `/memory-metrics [reset]` — a plugin-registered command (`ctx.command.transform`) whose
+   - `/memory-metrics [reset | reset confirm]` — a plugin-registered command (`ctx.command.transform`) whose
      executor posts the table via `ctx.session.synthetic({ sessionID, text })`, **type-proven
      against `@opencode/plugin` / `@opencode/client` 2.0.29**. The one property types cannot prove —
      that the TUI renders the post without triggering a model turn — gets a deploy-time
@@ -104,13 +105,35 @@ ever collecting content?
 - Residual risk, stated honestly: on-machine usage-pattern metadata (counts + timestamps) is still
   metadata; a user may not want it even locally. The mitigations are the same class the repo already
   trusts — on-machine residence inside the plugin's own namespace, a documented storage location, a
-  one-command reset, and plugin removal. It is smaller in kind than the ledger's existing
+  two-step reset (`reset` then `reset confirm`), and plugin removal. It is smaller in kind than the ledger's existing
   opaque session-scoped keys and than what OpenCode itself records about sessions.
 - Once published, counter names are load-bearing output (tests assert the enumeration and the
   fail-closed behavior). Renaming a counter breaks only the continuity of self-comparison, never any
   memory data. The CSV/JSON export is deliberately absent — the on-demand dashboard surfaces
   (`memory_metrics` tool + `/memory-metrics` command) are the only intended channels, which keeps the
   "no egress" property trivially true.
+
+## Revision (2026-10-20) — display labels + two-step reset
+
+**Problem.** The dashboard's counter names (`hook.prompt`, `brief.truncated`, `hint.recall`, …) are
+opaque to a new user, and a bare `/memory-metrics reset` destroyed all local history in one
+irreversible step — the one destructive action in an otherwise read-only dashboard.
+
+**Revision.**
+
+- **Display labels are fixed prose.** `METRIC_LABELS` is an exhaustive `Record<MetricName, string>` in
+  `src/metrics.ts`; counter tables render `counter | meaning | count` (budget view:
+  `day | counter | meaning | count`). Labels are static display furniture — never input-derived, never
+  content, and the renderer's purity/determinism guarantee is unchanged. No counter is added or renamed.
+- **Reset is two-step.** Bare `/memory-metrics reset` (case-insensitive, whitespace-normalized) renders
+  the intact dashboard prefixed with the fixed confirmation notice and bumps only `dashboard.shown`;
+  `/memory-metrics reset confirm` wipes the namespace, bumps `dashboard.reset` only on a completed wipe,
+  and re-stamps `since`. The fallback prompt for a bare reset carries the notice too, so the instruction
+  survives a rejected synthetic post.
+- **Contracts untouched.** The metric vocabulary stays exactly the frozen 45 names, every persisted
+  value stays a JSON number, and the ADR-0006 five-option contract is not amended (collection stays on;
+  `/memory-metrics reset confirm` is the control). ADR-0004's ledger retention (E9) is a separate,
+  age-based housekeeping change; it does not alter metrics.
 
 ## Related
 

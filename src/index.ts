@@ -18,7 +18,7 @@ import {
   loadPriors,
   truncateLinesWithNotice,
 } from "./brief.js";
-import { matchIndex } from "./hints.js";
+import { matchIndex, matchRememberNearMiss } from "./hints.js";
 import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
@@ -30,12 +30,11 @@ import {
 } from "./status-report.js";
 import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
-  AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
   HANDOFFS_DIR,
+  firstRunInstallText,
   getScaffoldFiles,
   hasMemoryProtocolBlock,
-  optionsSnippet,
   permissionsSnippet,
 } from "./templates.js";
 
@@ -218,12 +217,27 @@ export default Plugin.define({
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
           });
-          const hint = await matchIndex(event.messages, {
+          // One hint slot: a remember near-miss outranks an INDEX hit for
+          // the same prompt (it is an explicit write attempt the user just
+          // missed). `matchRememberNearMiss` shares the prompt-hash throttle
+          // with `matchIndex`, so at most one of them can fire.
+          const rememberHint = await matchRememberNearMiss(event.messages, {
             storage: ledger,
             projectID,
             sessionID: event.sessionID,
             memoryRoot,
           });
+          const hint =
+            rememberHint ??
+            (await matchIndex(event.messages, {
+              storage: ledger,
+              projectID,
+              sessionID: event.sessionID,
+              memoryRoot,
+            }));
+          // Only an INDEX hint is a recall call-to-action. A near-miss nudge
+          // must never arm the hint→recall correlation.
+          const hintArms = rememberHint === undefined && hint !== undefined;
 
           // Budget: INDEX (≤indexLines) + brief (≤48) + status (≤1) +
           // hint (≤1) ≤ injectBudgetLines. Overflow truncates the brief
@@ -307,10 +321,12 @@ export default Plugin.define({
           if (hint !== undefined) {
             event.system.push({ type: "text", text: hint });
             bump("hint.shown");
-            // Arm the hint→recall correlation for this session (decision 4:
-            // awaited; `setArm` is itself never-throw/never-reject, so the
-            // await cannot surface a failure to this hook).
-            await setArm(ledger, projectID, event.sessionID);
+            // Arm the hint→recall correlation only for an INDEX hint
+            // (decision 4: awaited; `setArm` is itself never-throw/never-
+            // reject, so the await cannot surface a failure to this hook).
+            if (hintArms) {
+              await setArm(ledger, projectID, event.sessionID);
+            }
           }
 
           // Throttled handoff writer: fire-and-forget, never awaited.
@@ -424,8 +440,9 @@ export default Plugin.define({
     registrations.push(await registerMemoryReview(ctx));
 
     // /memory-metrics command: local-only count dashboard — never writes a
-    // memory file (wipes counter keys only on `reset`); deps resolve per
-    // call from the live context (spec P22).
+    // memory file (wipes counter keys only on `reset confirm`; bare `reset`
+    // renders the confirmation notice); deps resolve per call from the live
+    // context (spec P22).
     registrations.push(await registerMetricsCommand(ctx));
 
     // /memory-status command + memory_status tool: read-only install/health
@@ -475,26 +492,19 @@ export default Plugin.define({
 
     // Unconditional loud warning: effective rules are unverifiable at setup
     // (no acting agent), so scaffold + first-run print are the install channel.
+    // First run consolidates every install action into ONE message (E12); the
+    // non-first-run path keeps the spec §4.4 standalone permission warning.
     try {
-      console.warn(
-        "[memory] install the memory_write → ask rule or per-line approval fails open:\n" +
-          permissionsSnippet(),
-      );
+      if (firstRun) {
+        console.warn(firstRunInstallText());
+      } else {
+        console.warn(
+          "[memory] install the memory_write → ask rule or per-line approval fails open:\n" +
+            permissionsSnippet(),
+        );
+      }
     } catch {
       // Logging must never break plugin load.
-    }
-
-    if (firstRun) {
-      try {
-        console.log(
-          `[memory] scaffolded ${MEMORY_DIR}/ (+ ${HANDOFFS_DIR}/). Options snippet:\n` +
-            optionsSnippet() +
-            `\nPaste this protocol block into root AGENTS.md (hand-owned, never auto-written):\n` +
-            AGENTS_PROTOCOL_BLOCK,
-        );
-      } catch {
-        // Logging must never break plugin load.
-      }
     }
 
     if (!firstRun) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ATTEMPT_RETENTION_MS,
   attemptKey,
   clearRotated,
   getPending,
@@ -8,11 +9,13 @@ import {
   getThrottle,
   hasHint,
   hasSeen,
+  HINT_RETENTION_MS,
   hintKey,
   incPending,
   markAttempt,
   markSeen,
   pendingKey,
+  pruneLedgerState,
   pruneSeenTo500,
   resetPending,
   RETRY_WINDOW_MS,
@@ -24,6 +27,7 @@ import {
   setSnapshotHash,
   setThrottle,
   shouldRetry,
+  SNAPSHOT_RETENTION_MS,
   snapshotKey,
   throttleKey,
   type LedgerStorage,
@@ -82,6 +86,32 @@ class FakeStorage implements LedgerStorage {
       if (page.next === undefined) return total;
       after = page.next;
     }
+  }
+}
+
+/** Every method rejects: prune callers must surface or catch, never hang. */
+class ThrowingStorage implements LedgerStorage {
+  async get(_key: string): Promise<unknown> {
+    throw new Error("storage down");
+  }
+  async set(_key: string, _value: unknown): Promise<void> {
+    throw new Error("storage down");
+  }
+  async remove(_key: string): Promise<void> {
+    throw new Error("storage down");
+  }
+  async scan(_options: {
+    readonly prefix: string;
+    readonly after?: string;
+    readonly limit?: number;
+  }): Promise<{
+    readonly entries: ReadonlyArray<{
+      readonly key: string;
+      readonly value: unknown;
+    }>;
+    readonly next?: string;
+  }> {
+    throw new Error("storage down");
   }
 }
 
@@ -193,5 +223,136 @@ describe("ledger", () => {
     await setHint(storage, PROJECT, "s1", "p", T0);
     expect(await hasHint(storage, PROJECT, "s1", "p")).toBe(true);
     expect(await hasHint(storage, PROJECT, "s1", "other")).toBe(false);
+  });
+
+  it("stores snapshot records with an age and reads legacy strings", async () => {
+    const storage = new FakeStorage();
+    const at = Date.UTC(2035, 0, 1);
+    await setSnapshotHash(storage, PROJECT, "s1", "hash-a", at);
+    expect(await storage.get(snapshotKey(PROJECT, "s1"))).toEqual({
+      hash: "hash-a",
+      at,
+    });
+    expect(await getSnapshotHash(storage, PROJECT, "s1")).toBe("hash-a");
+    // Legacy value written by an older version still reads.
+    await storage.set(snapshotKey(PROJECT, "s2"), "hash-legacy");
+    expect(await getSnapshotHash(storage, PROJECT, "s2")).toBe("hash-legacy");
+  });
+});
+
+describe("pruneLedgerState (bounded ledger keys)", () => {
+  it("removes abandoned attempts, aged hints, and aged session state", async () => {
+    const storage = new FakeStorage();
+    const now = Date.UTC(2035, 0, 1);
+    // attempt: aged by the existing 30s retry window
+    await storage.set(
+      attemptKey(PROJECT, "old"),
+      now - ATTEMPT_RETENTION_MS - 1,
+    );
+    await storage.set(attemptKey(PROJECT, "fresh"), now - 1000);
+    await storage.set(attemptKey(PROJECT, "future"), now + 1000);
+    await storage.set(attemptKey(PROJECT, "junk"), "not-a-number");
+    // hint: 7-day retention
+    await storage.set(
+      hintKey(PROJECT, "s1", "old"),
+      now - HINT_RETENTION_MS - 1,
+    );
+    await storage.set(hintKey(PROJECT, "s1", "fresh"), now - 1000);
+    await storage.set(hintKey(PROJECT, "s1", "junk"), "not-a-number");
+    // snapshot records: 30-day retention; legacy strings are normalized out
+    await storage.set(snapshotKey(PROJECT, "old"), {
+      hash: "hash-old",
+      at: now - SNAPSHOT_RETENTION_MS - 1,
+    });
+    await storage.set(snapshotKey(PROJECT, "fresh"), {
+      hash: "hash-fresh",
+      at: now - 1000,
+    });
+    await storage.set(snapshotKey(PROJECT, "legacy"), "hash-legacy");
+    // throttle: 30-day retention
+    await storage.set(
+      throttleKey(PROJECT, "old"),
+      now - SNAPSHOT_RETENTION_MS - 1,
+    );
+    await storage.set(throttleKey(PROJECT, "fresh"), now - 1000);
+    // other project / unrelated keys are untouched
+    await storage.set("other/attempt/old", now - 10 * ATTEMPT_RETENTION_MS);
+    await storage.set(`${PROJECT}/curation.pending`, 2);
+
+    expect(await pruneLedgerState(storage, PROJECT, now)).toBe(5);
+
+    expect(await storage.get(attemptKey(PROJECT, "old"))).toBeUndefined();
+    expect(await storage.get(attemptKey(PROJECT, "fresh"))).toBeDefined();
+    expect(await storage.get(attemptKey(PROJECT, "future"))).toBeDefined();
+    expect(await storage.get(attemptKey(PROJECT, "junk"))).toBeDefined();
+    expect(await storage.get(hintKey(PROJECT, "s1", "old"))).toBeUndefined();
+    expect(await storage.get(hintKey(PROJECT, "s1", "fresh"))).toBeDefined();
+    expect(await storage.get(hintKey(PROJECT, "s1", "junk"))).toBeDefined();
+    expect(await storage.get(snapshotKey(PROJECT, "old"))).toBeUndefined();
+    expect(await storage.get(snapshotKey(PROJECT, "fresh"))).toBeDefined();
+    expect(await storage.get(snapshotKey(PROJECT, "legacy"))).toBeUndefined();
+    expect(await storage.get(throttleKey(PROJECT, "old"))).toBeUndefined();
+    expect(await storage.get(throttleKey(PROJECT, "fresh"))).toBeDefined();
+    expect(await storage.get("other/attempt/old")).toBeDefined();
+    expect(await storage.get(`${PROJECT}/curation.pending`)).toBe(2);
+  });
+
+  it("paginates across scan pages", async () => {
+    const storage = new FakeStorage(37);
+    const now = Date.UTC(2035, 0, 1);
+    for (let i = 0; i < 120; i += 1) {
+      await storage.set(
+        hintKey(PROJECT, "s1", `p-${String(i).padStart(3, "0")}`),
+        now - HINT_RETENTION_MS - 1000,
+      );
+    }
+    expect(await pruneLedgerState(storage, PROJECT, now)).toBe(120);
+    expect(
+      [...storage.data.keys()].filter((key) =>
+        key.startsWith(`${PROJECT}/hint/`),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("re-checks a key under the lock before removing it", async () => {
+    // Simulate a write landing between scan and remove: `scan` reports the
+    // value as aged, while the durable `get` returns the fresh timestamp.
+    class StaleScanStorage extends FakeStorage {
+      override async scan(options: {
+        readonly prefix: string;
+        readonly after?: string;
+        readonly limit?: number;
+      }) {
+        const page = await super.scan(options);
+        return {
+          ...page,
+          entries: page.entries.map((entry) =>
+            entry.key === hintKey(PROJECT, "s1", "p")
+              ? { key: entry.key, value: 0 }
+              : entry,
+          ),
+        };
+      }
+    }
+    const storage = new StaleScanStorage();
+    const now = Date.UTC(2035, 0, 1);
+    await storage.set(hintKey(PROJECT, "s1", "p"), now - 1000);
+
+    expect(await pruneLedgerState(storage, PROJECT, now)).toBe(0);
+    expect(await storage.get(hintKey(PROJECT, "s1", "p"))).toBe(now - 1000);
+  });
+
+  it("never touches another project's aged keys", async () => {
+    const storage = new FakeStorage();
+    const now = Date.UTC(2035, 0, 1);
+    await storage.set("other/hint/s1/old", now - HINT_RETENTION_MS - 1);
+    expect(await pruneLedgerState(storage, PROJECT, now)).toBe(0);
+    expect(await storage.get("other/hint/s1/old")).toBeDefined();
+  });
+
+  it("propagates storage failures to the caller (which catches)", async () => {
+    await expect(
+      pruneLedgerState(new ThrowingStorage(), PROJECT),
+    ).rejects.toThrow("storage down");
   });
 });

@@ -10,7 +10,12 @@ import {
   loadBrief,
   loadPriors,
 } from "../src/brief.js";
-import { extractLatestUserText, matchIndex } from "../src/hints.js";
+import {
+  extractLatestUserText,
+  matchIndex,
+  matchRememberNearMiss,
+  REMEMBER_NEAR_MISS_HINT,
+} from "../src/hints.js";
 import { getScaffoldFiles } from "../src/templates.js";
 import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
@@ -509,6 +514,49 @@ describe("matchIndex", () => {
   });
 });
 
+describe("matchRememberNearMiss", () => {
+  it("emits one line and throttles per prompt", async () => {
+    const messages = [userMessage("Please remember: deploy on Fridays")];
+    const opts = { storage, projectID: PROJECT, sessionID: SESSION };
+    const hint = await matchRememberNearMiss(messages, opts);
+    expect(hint).toBe(REMEMBER_NEAR_MISS_HINT);
+    expect(hint!.split("\n")).toHaveLength(1);
+    expect(hint).toContain("Nothing was recorded");
+    expect(await matchRememberNearMiss(messages, opts)).toBeUndefined();
+    // The throttle is shared with `matchIndex`: the same prompt/session
+    // cannot also receive an INDEX tell-tale hint.
+    expect(
+      await matchIndex(messages, {
+        ...opts,
+        indexContent: "- deploy: Fridays\n",
+      }),
+    ).toBeUndefined();
+    // A different prompt can nudge again.
+    expect(
+      await matchRememberNearMiss(
+        [userMessage("Please remember: rotate keys")],
+        opts,
+      ),
+    ).toBe(REMEMBER_NEAR_MISS_HINT);
+  });
+
+  it("stays silent for valid directives and returns undefined on errors", async () => {
+    expect(
+      await matchRememberNearMiss(
+        [userMessage("remember: deploy on Fridays")],
+        { storage, projectID: PROJECT, sessionID: SESSION },
+      ),
+    ).toBeUndefined();
+    await expect(
+      matchRememberNearMiss([userMessage("Please remember: x")], {
+        storage: new ThrowingStorage(),
+        projectID: PROJECT,
+        sessionID: SESSION,
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("statusLine", () => {
   it("is undefined when nothing is pending", async () => {
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
@@ -766,6 +814,65 @@ describe("context hook", () => {
     // Fire-and-forget writer ran without blocking the hook.
     await new Promise((r) => setTimeout(r, 25));
     expect(await getThrottle(storage, PROJECT, SESSION)).toBeDefined();
+  });
+
+  it("prefers the near-miss nudge and does not arm", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
+    const { hooks } = await setupHooks();
+    const event = contextEvent([
+      userMessage("Please remember: auth-service deploys on Fridays"),
+    ]);
+    await runHook(hooks, "context", event);
+
+    const hints = event.system.filter((p) =>
+      p.text.startsWith("[memory-hint]"),
+    );
+    expect(hints).toHaveLength(1);
+    expect(hints[0]!.text).toBe(REMEMBER_NEAR_MISS_HINT);
+    expect(
+      await storage.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
+    ).toBeUndefined();
+    // Flush the fire-and-forget metric bump before reading totals.
+    await withWriteLock(async () => undefined);
+    expect((await readTotals(storage, PROJECT))["hint.shown"]).toBe(1);
+  });
+
+  it("a real INDEX hint still arms after a near-miss on a different prompt", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
+    const { hooks } = await setupHooks();
+    const armKey = `${PROJECT}/metrics/arm/hint/${SESSION}`;
+
+    await runHook(
+      hooks,
+      "context",
+      contextEvent([userMessage("Please remember: deploy Fridays")]),
+    );
+    expect(await storage.get(armKey)).toBeUndefined();
+
+    await runHook(
+      hooks,
+      "context",
+      contextEvent([userMessage("how does auth-service work?")]),
+    );
+    expect(await storage.get(armKey)).toBeDefined();
+  });
+
+  it("narrative remember text still gets the ordinary INDEX hint", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
+    const { hooks } = await setupHooks();
+    const event = contextEvent([
+      userMessage("remember when auth-service changed?"),
+    ]);
+    await runHook(hooks, "context", event);
+
+    expect(
+      event.system.some((part) => part.text.includes("Nothing was recorded")),
+    ).toBe(false);
+    expect(
+      event.system.some((part) =>
+        part.text.startsWith("[memory-hint] Past decisions mention"),
+      ),
+    ).toBe(true);
   });
 
   it("never throws with hostile storage", async () => {

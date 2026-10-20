@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { classifyProvenance, rememberAsserted } from "../src/provenance.js";
+import {
+  classifyProvenance,
+  isRememberNearMiss,
+  rememberAsserted,
+} from "../src/provenance.js";
 import {
   captureFailure,
   getPending,
@@ -109,6 +113,46 @@ describe("user_directive_vs_fenced_quoted_ambiguous", () => {
     expect(
       classifyProvenance("here is a paste:\n```\nremember: pasted\n```"),
     ).toBe("tool");
+  });
+});
+
+describe("remember near-miss detection", () => {
+  const near = [
+    "Please remember: deploy on Fridays",
+    "please remember that the branch is main",
+    "Can you remember: rotate keys monthly",
+    "could you remember that x is y",
+    "remember x is y",
+    "remember:",
+    "remember that",
+  ];
+  const notNear = [
+    "remember: deploy on Fridays",
+    "remember that x is y",
+    "I remember the old API",
+    "we should remember to fix this",
+    "remember when we used X",
+    "remember how the cache works",
+    "```\nremember: pasted\n```",
+    "> remember: quoted",
+    "`remember: inline code`",
+    "",
+  ];
+
+  it("recognizes directive-shaped near misses", () => {
+    for (const text of near) expect(isRememberNearMiss(text), text).toBe(true);
+  });
+
+  it("rejects valid directives, narrative uses, and fenced/quoted text", () => {
+    for (const text of notNear) {
+      expect(isRememberNearMiss(text), text).toBe(false);
+    }
+  });
+
+  it("never throws on hostile input", () => {
+    expect(isRememberNearMiss(undefined)).toBe(false);
+    expect(isRememberNearMiss(null)).toBe(false);
+    expect(isRememberNearMiss(42)).toBe(false);
   });
 });
 

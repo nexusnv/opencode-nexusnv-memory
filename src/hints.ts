@@ -8,7 +8,13 @@
  * matched INDEX line (first stem on the line; default `decisions.md`).
  * Throttled to once per prompt per session via the
  * ledger key `<projectID>/hint/<sessionID>/<promptHash>` so tool-driven
- * continuations do not re-inject the same hint. Async, never throws.
+ * continuations do not re-inject the same hint.
+ *
+ * `matchRememberNearMiss` (E11) is the other filler of the same one-line hint
+ * slot: when the latest user text looks like a `remember:` attempt but is not
+ * the documented line-start form, it returns a fixed nudge. It shares the
+ * prompt-hash throttle key, never reads memory, and never arms the
+ * hint→recall correlation (the caller decides that). Async, never throws.
  */
 import { createHash } from "node:crypto";
 import {
@@ -17,6 +23,7 @@ import {
   type LedgerStorage,
 } from "./capture.js";
 import { readCapped } from "./files.js";
+import { isRememberNearMiss } from "./provenance.js";
 
 export interface MatchIndexOptions {
   readonly storage: LedgerStorage;
@@ -278,6 +285,52 @@ export async function matchIndex(
       options.now,
     );
     return `[memory-hint] Past decisions mention \`${hit.term}\`. Call memory_recall("${hit.file}") for the why.`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fixed one-line nudge for a directive-shaped `remember` miss (E11). It
+ * explains the documented forms; it never records anything and never names a
+ * memory file to recall, so the context hook must not arm the hint→recall
+ * correlation for it.
+ */
+export const REMEMBER_NEAR_MISS_HINT =
+  "[memory-hint] Nothing was recorded — start a line with `remember:` or `remember that` to save a fact to decisions.md.";
+
+/**
+ * At most one near-miss nudge for the latest user text, or `undefined`.
+ * Shares the exact prompt-hash throttle key with `matchIndex`, so the two
+ * hint kinds cannot both fire for one prompt. Async, never throws.
+ */
+export async function matchRememberNearMiss(
+  input: unknown,
+  options: MatchIndexOptions,
+): Promise<string | undefined> {
+  try {
+    if (!options || !options.storage) return undefined;
+    const text = extractLatestUserText(input);
+    if (text === undefined || !isRememberNearMiss(text)) return undefined;
+    const promptHash = options.promptHash ?? promptHashFor(text);
+    if (
+      await hasHint(
+        options.storage,
+        options.projectID,
+        options.sessionID,
+        promptHash,
+      )
+    ) {
+      return undefined;
+    }
+    await setHint(
+      options.storage,
+      options.projectID,
+      options.sessionID,
+      promptHash,
+      options.now,
+    );
+    return REMEMBER_NEAR_MISS_HINT;
   } catch {
     return undefined;
   }

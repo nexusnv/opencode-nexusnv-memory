@@ -1216,7 +1216,7 @@ async function driveUsageRun(
     const sinceBefore = dataChecks ? await readSince(store, PROJECT) : undefined;
     await record.metricsCommand!.execute({
       sessionID: SESSION,
-      prompt: { text: "reset" },
+      prompt: { text: "reset confirm" },
       delivery: "steer",
     });
     await settle();
@@ -1229,7 +1229,9 @@ async function driveUsageRun(
       const resetText = record.resetPost as { sessionID: string; text: string };
       expect(resetText.sessionID).toBe(SESSION);
       expect(resetText.text).toContain(`Since: ${sinceAfter}`);
-      expect(resetText.text).toContain("| hook.prompt | 0 |");
+      expect(resetText.text).toContain(
+        "| hook.prompt | prompt hook runs | 0 |",
+      );
       // Post-reset namespace exactly: the fresh since + the reset/shown
       // counters + their day pair (stamps derived from the data).
       const dayStamps = Object.keys(await readDays(store, PROJECT));
@@ -1519,8 +1521,8 @@ describe("acceptance-metrics §9 gates (real plugin.setup end-to-end)", () => {
     const tableB = (harnessB.posts[0] as { text: string }).text;
     // Data-equal inputs through the real command path → byte-identical.
     expect(tableB).toStrictEqual(tableA);
-    expect(tableA).toContain("| hook.prompt | 1 |");
-    expect(tableA).toContain("| recall.INDEX.md | 2 |");
+    expect(tableA).toContain("| hook.prompt | prompt hook runs | 1 |");
+    expect(tableA).toContain("| recall.INDEX.md | recall INDEX.md | 2 |");
     expect(tableA).toContain("| INDEX.md | 3 | 30 |");
     expect(tableA).toContain(`Since: ${pinnedSince}`);
 
@@ -1550,7 +1552,9 @@ describe("acceptance-metrics §9 gates (real plugin.setup end-to-end)", () => {
       cursor = at + heading.length;
     }
     // The pre-bump deterministic ordering: shown renders 0 before its bump.
-    expect(posted.text).toContain("| dashboard.shown | 0 |");
+    expect(posted.text).toContain(
+      "| dashboard.shown | dashboard renders | 0 |",
+    );
     for (const line of posted.text.split("\n")) {
       if (line.startsWith("|")) {
         // Counts only: no free-text fixture word can appear in the table.
