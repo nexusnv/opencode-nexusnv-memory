@@ -29,6 +29,16 @@ AGENTS.md (repo root)         # hand-owned protocol + links only (never auto-wri
 
 The memory directory is fixed at `.opencode/memory` — not configurable — because the `readCapped`/`writeCapped` choke point and the recall allowlist depend on a stable root (ADR-0006). The plugin never edits `opencode.jsonc` or `AGENTS.md`; it scaffolds templates and emits a commented options snippet.
 
+## Quickstart (5 minutes)
+
+1. Install the plugin using one row of the [Install](#install) matrix, then restart/reload OpenCode.
+2. Add the required `memory_write → ask` rule from [Permissions](#permissions-required) to the same `opencode.jsonc` — without it, per-line approval fails open.
+3. Paste the protocol block printed on first run (or from `AGENTS_PROTOCOL_BLOCK` in `src/templates.ts`) into root `AGENTS.md`.
+4. Run `/memory-status` and fix every action it lists.
+5. Use `/memory-metrics` to see the local count-only dashboard; nothing leaves the machine.
+
+First run scaffolds `.opencode/memory/` and prints that checklist once. The plugin never edits `opencode.jsonc` or `AGENTS.md`.
+
 ## Try it without code (P0)
 
 Create the six memory files by hand, add the protocol block to root `AGENTS.md`, and use the `memory-manager` subagent manually. A new session should restore context from `INDEX.md` + `activeContext.md` with no re-explaining.

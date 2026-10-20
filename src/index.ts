@@ -30,12 +30,11 @@ import {
 } from "./status-report.js";
 import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
-  AGENTS_PROTOCOL_BLOCK,
   ARCHIVE_DIR,
   HANDOFFS_DIR,
+  firstRunInstallText,
   getScaffoldFiles,
   hasMemoryProtocolBlock,
-  optionsSnippet,
   permissionsSnippet,
 } from "./templates.js";
 
@@ -492,26 +491,19 @@ export default Plugin.define({
 
     // Unconditional loud warning: effective rules are unverifiable at setup
     // (no acting agent), so scaffold + first-run print are the install channel.
+    // First run consolidates every install action into ONE message (E12); the
+    // non-first-run path keeps the spec §4.4 standalone permission warning.
     try {
-      console.warn(
-        "[memory] install the memory_write → ask rule or per-line approval fails open:\n" +
-          permissionsSnippet(),
-      );
+      if (firstRun) {
+        console.warn(firstRunInstallText());
+      } else {
+        console.warn(
+          "[memory] install the memory_write → ask rule or per-line approval fails open:\n" +
+            permissionsSnippet(),
+        );
+      }
     } catch {
       // Logging must never break plugin load.
-    }
-
-    if (firstRun) {
-      try {
-        console.log(
-          `[memory] scaffolded ${MEMORY_DIR}/ (+ ${HANDOFFS_DIR}/). Options snippet:\n` +
-            optionsSnippet() +
-            `\nPaste this protocol block into root AGENTS.md (hand-owned, never auto-written):\n` +
-            AGENTS_PROTOCOL_BLOCK,
-        );
-      } catch {
-        // Logging must never break plugin load.
-      }
     }
 
     if (!firstRun) {

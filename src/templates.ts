@@ -146,3 +146,22 @@ const PROTOCOL_BLOCK_PATTERN = /\bmemory_recall\b|\.opencode\/memory\b/;
 export function hasMemoryProtocolBlock(text: string): boolean {
   return typeof text === "string" && PROTOCOL_BLOCK_PATTERN.test(text);
 }
+
+/**
+ * One consolidated first-run install message (E12): required permission rule,
+ * protocol block, optional options snippet, and the status-doctor pointer.
+ * Fixed prose + the existing snippets only; no content channel. The
+ * non-first-run setup path keeps the spec §4.4 unconditional permission
+ * warning separately.
+ */
+export function firstRunInstallText(): string {
+  return `[memory] first run: scaffolded .opencode/memory/ (+ handoffs/).
+Next steps:
+1. Required — add the memory_write → ask rule to opencode.jsonc (without it, per-line approval fails open):
+${permissionsSnippet()}
+2. Paste this protocol block into root AGENTS.md (hand-owned, never auto-written):
+${AGENTS_PROTOCOL_BLOCK}
+3. Optional — paste the commented options into the same plugin entry:
+${optionsSnippet()}
+Verify the install anytime with /memory-status. The plugin never edits opencode.jsonc or AGENTS.md.`;
+}

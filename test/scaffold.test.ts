@@ -9,6 +9,7 @@ import {
   ARCHIVE_DIR,
   HANDOFFS_DIR,
   MEMORY_FILES,
+  firstRunInstallText,
   getScaffoldFiles,
   optionsSnippet,
   permissionsSnippet,
@@ -420,6 +421,78 @@ async function preScaffold(projectRoot: string): Promise<void> {
     await writeFile(join(memoryDir, name), content, "utf8");
   }
 }
+
+describe("first_run_install_checklist", () => {
+  it("is one checklist with all install actions", () => {
+    const text = firstRunInstallText();
+    expect(text).toContain("scaffolded .opencode/memory/");
+    expect(text).toContain("memory_write");
+    expect(text).toContain('"effect": "ask"');
+    expect(text).toContain(AGENTS_PROTOCOL_BLOCK);
+    expect(text).toContain("indexLines");
+    expect(text).toContain("snapshotThrottleMinutes");
+    expect(text).toContain("/memory-status");
+    expect(text).toContain("never edits");
+    // One message, no duplicate permission snippet. Count the snippet itself,
+    // not the word `memory_write` (the prose also names the action).
+    expect(text.split(permissionsSnippet()).length - 1).toBe(1);
+    expect(text.split(AGENTS_PROTOCOL_BLOCK).length - 1).toBe(1);
+    expect(text.split(optionsSnippet()).length - 1).toBe(1);
+  });
+
+  it("first run emits the consolidated checklist once and no separate log", async () => {
+    resetInstallNudgesForTests();
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-first-run-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      const cleanup = await setup(installCtx(projectRoot));
+      const checklist = warn.mock.calls.filter((c) =>
+        String(c[0]).includes("first run"),
+      );
+      expect(checklist).toHaveLength(1);
+      expect(String(checklist[0]![0])).toContain(permissionsSnippet());
+      expect(String(checklist[0]![0])).toContain("/memory-status");
+      expect(log).not.toHaveBeenCalled();
+      await cleanup?.();
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it("non-first-run keeps the unconditional permission warning", async () => {
+    resetInstallNudgesForTests();
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-non-first-"));
+    await preScaffold(projectRoot);
+    await writeFile(
+      join(projectRoot, "AGENTS.md"),
+      "## Project memory (.opencode/memory)\n- call memory_recall before editing contracts\n",
+      "utf8",
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const setup = plugin.setup as unknown as (
+        ctx: unknown,
+      ) => Promise<(() => Promise<void>) | void>;
+      await setup(installCtx(projectRoot));
+      const permissionWarnings = warn.mock.calls.filter((c) =>
+        String(c[0]).includes("install the memory_write"),
+      );
+      expect(permissionWarnings).toHaveLength(1);
+      expect(String(permissionWarnings[0]![0])).toContain(permissionsSnippet());
+      // The first-run checklist is not printed on a pre-scaffolded project.
+      expect(
+        warn.mock.calls.some((c) => String(c[0]).includes("first run")),
+      ).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe("agents_protocol_nudge", () => {
   it("warns once when a non-first-run AGENTS.md lacks the protocol block", async () => {
