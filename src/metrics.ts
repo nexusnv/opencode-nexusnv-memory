@@ -580,7 +580,7 @@ export async function consumeArm(
 }
 
 /**
- * `/memory-metrics reset` (spec §5.12 storage keys + US-29): wipe the whole
+ * `/memory-metrics reset confirm` (spec §5.12 storage keys + US-29): wipe the whole
  * `<projectID>/metrics/…` namespace — every total counter, day bucket, the
  * `since` stamp, and every arm flag — never another project's namespace and
  * never any key outside it (the wipe is namespace-scoped numbers-only state;
