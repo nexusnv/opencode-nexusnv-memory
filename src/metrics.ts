@@ -122,6 +122,60 @@ const METRIC_NAME_LIST = [
 /** One enumerated §5.12 counter name. */
 export type MetricName = (typeof METRIC_NAME_LIST)[number];
 
+/**
+ * Fixed display labels for the dashboard's `meaning` column. This is
+ * furniture, not input: the renderer can only ever emit these exact strings,
+ * and every counter name has exactly one label (the `satisfies` keeps the map
+ * exhaustive when the vocabulary changes).
+ */
+export const METRIC_LABELS = {
+  "hook.prompt": "prompt hook runs",
+  "hook.context": "context hook runs",
+  "hook.compaction": "compaction hook runs",
+  "index.attach": "INDEX attached",
+  "index.overCap": "INDEX over cap (not attached)",
+  "index.already": "INDEX already attached",
+  "remember.caught": "remember directives captured",
+  "brief.empty": "brief empty",
+  "brief.injected": "brief injected",
+  "brief.lines": "brief lines injected",
+  "brief.truncated": "brief truncated by budget",
+  "status.shown": "status line shown",
+  "status.dropped": "status line dropped by budget",
+  "hint.shown": "memory hints shown",
+  "compaction.priors": "priors injected on compaction",
+  "priors.lines": "priors lines injected",
+  "failure.captured": "failures captured",
+  "failure.duplicate": "failure captures deduped",
+  "failure.retry": "failure captures retried",
+  "failure.failed": "failure captures failed",
+  "snapshot.written": "handoff snapshots written",
+  "snapshot.unchanged": "handoff snapshots unchanged",
+  "snapshot.dropped": "handoff snapshots dropped",
+  "snapshot.failed": "handoff snapshots failed",
+  "compactionCapture.captured": "compaction summaries captured",
+  "compactionCapture.duplicate": "compaction summaries deduped",
+  "compactionCapture.dropped": "compaction summaries dropped",
+  "compactionCapture.failed": "compaction summaries failed",
+  "recall.INDEX.md": "recall INDEX.md",
+  "recall.activeContext.md": "recall activeContext.md",
+  "recall.decisions.md": "recall decisions.md",
+  "recall.architecture.md": "recall architecture.md",
+  "recall.style.md": "recall style.md",
+  "recall.issues.md": "recall issues.md",
+  "recall.handoff": "recall handoffs",
+  "recall.error": "recall errors",
+  "apply.batch": "apply calls",
+  "apply.lines": "candidate lines applied",
+  "apply.denied": "candidate lines denied",
+  "apply.partialError": "apply partial failures",
+  "apply.reset": "apply resets",
+  "review.invoked": "review invocations",
+  "dashboard.shown": "dashboard renders",
+  "dashboard.reset": "metric resets",
+  "hint.recall": "hints followed by recall",
+} as const satisfies Record<MetricName, string>;
+
 /** Exhaustive fail-closed vocabulary: unknown names are warned + dropped. */
 export const METRIC_NAMES: ReadonlySet<string> = new Set<string>(
   METRIC_NAME_LIST,
@@ -730,15 +784,17 @@ const BUDGET_WINDOW_DAYS = 7;
  * health}` — §5.12 renderer contract: no fs, no storage, no clock inside
  * (the 7-day budget window is derived purely from the input's day
  * stamps). The only strings it can emit are the fixed furniture below,
- * counter names, the six structural file names, UTC day stamps, integers,
- * and the validated ISO `since` stamp — ADR-0008's numbers-only rule, with
- * the dashboard as the one deliberate (constrained) text surface.
+ * counter names, the fixed `METRIC_LABELS` display vocabulary, the six
+ * structural file names, UTC day stamps, integers, and the validated ISO
+ * `since` stamp — ADR-0008's numbers-only rule, with the dashboard as the
+ * one deliberate (constrained) text surface.
  *
  * Titles, tables, and rows:
  * `# [memory] metrics (local-only)` + `Since: <ISO|->`; `## Explicit calls`
  * and `## Behind the scenes` render the whole vocabulary (present-but-0
  * rows for stability, §5.12 leaves the zero-row policy unspecified), name
- * sorted; `## Memory health` renders the six structural file rows (cap
+ * sorted, one `counter | meaning | count` row each; `## Memory health`
+ * renders the six structural file rows (cap
  * column `-` where unbounded) then the §5.12 scalar block (handoffs,
  * archive, pending, seen, decisionsLines) in §5.12's field order;
  * `## Budget pressure` renders the last `BUDGET_WINDOW_DAYS` day stamps of
@@ -762,10 +818,12 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
     names: ReadonlyArray<MetricName>,
     record: Readonly<Partial<Record<MetricName, number>>>,
   ): void => {
-    lines.push("| counter | count |");
-    lines.push("|---|---:|");
+    lines.push("| counter | meaning | count |");
+    lines.push("|---|---|---:|");
     for (const name of names) {
-      lines.push(`| ${name} | ${asCount(record[name])} |`);
+      lines.push(
+        `| ${name} | ${METRIC_LABELS[name]} | ${asCount(record[name])} |`,
+      );
     }
   };
 
@@ -800,8 +858,8 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
 
   lines.push("");
   lines.push("## Budget pressure");
-  lines.push("| day | counter | count |");
-  lines.push("|---|---|---:|");
+  lines.push("| day | counter | meaning | count |");
+  lines.push("|---|---|---|---:|");
   for (const stamp of Object.keys(input.days)
     .filter((candidate) => DAY_STAMP.test(candidate))
     .sort()
@@ -813,7 +871,9 @@ export function renderMetricsDashboard(input: MetricsDashboardInput): string {
       // unspecified; present-in-bucket is the compact, deterministic
       // choice). Unknown keys in the record are skipped by construction.
       if (value === undefined) continue;
-      lines.push(`| ${stamp} | ${name} | ${asCount(value)} |`);
+      lines.push(
+        `| ${stamp} | ${name} | ${METRIC_LABELS[name]} | ${asCount(value)} |`,
+      );
     }
   }
   return lines.join("\n") + "\n";

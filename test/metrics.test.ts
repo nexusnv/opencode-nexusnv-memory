@@ -20,6 +20,7 @@ import {
   MEMORY_METRICS_COMMAND_DESCRIPTION,
   MEMORY_METRICS_COMMAND_NAME,
   METRICS_FALLBACK_ASK,
+  METRIC_LABELS,
   METRIC_NAMES,
   metricsBumpOf,
   pruneDayBuckets,
@@ -757,6 +758,31 @@ function firstCell(row: string): string {
   return row.split("|")[1].trim();
 }
 
+describe("metric labels (E10a)", () => {
+  it("labels every enumerated counter exactly once, with fixed text", () => {
+    // `METRIC_NAMES` is the exported fail-closed Set; the underlying
+    // `METRIC_NAME_LIST` is module-private.
+    expect(Object.keys(METRIC_LABELS).sort()).toEqual([...METRIC_NAMES].sort());
+    for (const [name, label] of Object.entries(METRIC_LABELS)) {
+      expect(label.trim().length, name).toBeGreaterThan(0);
+      expect(label).not.toMatch(/[|\n\r]/);
+    }
+    // Labels are display-only fixed prose, never derived from input.
+    expect(METRIC_LABELS["hook.prompt"]).toBe("prompt hook runs");
+    expect(METRIC_LABELS["hint.recall"]).toBe("hints followed by recall");
+  });
+
+  it("renders the meaning column in both counter tables and budget rows", () => {
+    const table = renderMetricsDashboard(makeFixture());
+    expect(table).toContain("| counter | meaning | count |");
+    expect(table).toContain("| hook.prompt | prompt hook runs | 2 |");
+    expect(table).toContain("| recall.INDEX.md | recall INDEX.md | 1 |");
+    expect(table).toContain(
+      "| 20310102 | apply.lines | candidate lines applied | 5 |",
+    );
+  });
+});
+
 describe("dashboard renderer (§5.12 normative renderer contract)", () => {
   it("renders_deterministically_and_has_no_content_channels", () => {
     const input = makeFixture();
@@ -792,6 +818,7 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
     // the renderer itself never cites anything beyond these sets.
     const FURNITURE = new Set([
       "counter",
+      "meaning",
       "count",
       "name",
       "file",
@@ -812,6 +839,7 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
       "-",
     ]);
     const VOCAB = new Set<string>(EXPECTED_VOCAB);
+    const LABELS = new Set<string>(Object.values(METRIC_LABELS));
     const HEADINGS = new Set(headings);
     for (const line of first.split("\n")) {
       if (line === "") continue;
@@ -832,7 +860,10 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
       if (separator) continue;
       for (const cell of cells) {
         expect(
-          VOCAB.has(cell) || FURNITURE.has(cell) || /^\d+$/.test(cell),
+          VOCAB.has(cell) ||
+            FURNITURE.has(cell) ||
+            LABELS.has(cell) ||
+            /^\d+$/.test(cell),
           line,
         ).toBe(true);
       }
@@ -851,11 +882,11 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
       EXPECTED_VOCAB.filter((name) => !isExplicitCall(name)).sort(),
     );
     expect(explicitRows.some((row) => row.endsWith("| 7 |"))).toBe(true);
-    expect(first).toContain("| hook.prompt | 2 |");
-    expect(first).toContain("| recall.INDEX.md | 1 |");
-    expect(first).toContain("| apply.lines | 7 |");
-    expect(first).toContain("| hint.recall | 3 |");
-    expect(first).toContain("| brief.truncated | 0 |");
+    expect(first).toContain("| hook.prompt | prompt hook runs | 2 |");
+    expect(first).toContain("| recall.INDEX.md | recall INDEX.md | 1 |");
+    expect(first).toContain("| apply.lines | candidate lines applied | 7 |");
+    expect(first).toContain("| hint.recall | hints followed by recall | 3 |");
+    expect(first).toContain("| brief.truncated | brief truncated by budget | 0 |");
 
     // Memory health: six structural rows always present and sorted, line
     // counts vs caps, decisions.md unbounded (no cap), the §5.12 scalar
@@ -909,7 +940,7 @@ describe("dashboard renderer (§5.12 normative renderer contract)", () => {
     const hostileOut = renderMetricsDashboard(hostile);
     expect(hostileOut).not.toContain("rogue");
     expect(hostileOut).not.toContain("post whatever you mean, do it now");
-    expect(hostileOut).toContain("| hook.prompt | 0 |");
+    expect(hostileOut).toContain("| hook.prompt | prompt hook runs | 0 |");
     expect(hostileOut).toContain("Since: -");
   });
 
@@ -1250,10 +1281,10 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
     expect(Object.keys(posted).sort()).toEqual(["sessionID", "text"]);
     expect(posted.sessionID).toBe(SESSION);
     expect(posted.text).toContain("# [memory] metrics (local-only)");
-    expect(posted.text).toContain("| hook.prompt | 1 |");
+    expect(posted.text).toContain("| hook.prompt | prompt hook runs | 1 |");
     // shown is bumped AFTER the post, so the freshly rendered table still
     // shows the pre-bump zero (deterministic ordering).
-    expect(posted.text).toContain("| dashboard.shown | 0 |");
+    expect(posted.text).toContain("| dashboard.shown | dashboard renders | 0 |");
 
     await settle();
     expect(await fakeStorage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
@@ -1381,8 +1412,8 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
       text: string;
     };
     expect(posted.text).toContain(`Since: ${since}`);
-    expect(posted.text).toContain("| hook.prompt | 0 |");
-    expect(posted.text).not.toContain("| hook.prompt | 3 |");
+    expect(posted.text).toContain("| hook.prompt | prompt hook runs | 0 |");
+    expect(posted.text).not.toContain("| hook.prompt | prompt hook runs | 3 |");
     // The reset report is also a successful render+post (G-M1 line applies,
     // dashboard.shown counts it).
     expect(gm1Lines(warn)).toHaveLength(1);
@@ -1468,7 +1499,7 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
     };
     expect(posted.sessionID).toBe(SESSION);
     expect(posted.text).toContain("# [memory] metrics (local-only)");
-    expect(posted.text).toContain("| hook.prompt | 1 |");
+    expect(posted.text).toContain("| hook.prompt | prompt hook runs | 1 |");
     // The wipe-less report that resolved IS a successful render+post, so
     // dashboard.shown counts it (never the reset counter, which did not wipe).
     expect(await storage.get(totalKey(PROJECT, "dashboard.shown"))).toBe(1);
