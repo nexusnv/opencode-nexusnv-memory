@@ -933,7 +933,7 @@ registrations.push(await ctx.tool.transform((editor) => {
   `/memory-metrics [reset | reset confirm]`):
   - bare `reset` (case-insensitive, whitespace-normalized): **never wipes**. It renders the intact
     table prefixed with the fixed confirmation notice
-    (`> Reset not applied. Re-run \`/memory-metrics reset confirm\` to wipe all local metrics.`) and
+    (``> Reset not applied. Re-run `/memory-metrics reset confirm` to wipe all local metrics.``) and
     bumps only `dashboard.shown`. If the synthetic post rejects, the fallback prompt carries the same
     notice before the echo ask, so the instruction is never lost.
   - `reset confirm`: removes all `<projectID>/metrics/…` keys under one lock, stamps a fresh `since`,
@@ -970,7 +970,7 @@ via `readCapped`) + injection caps (hook payloads via loaders).
 | `issues.md` | one line each: todo/doing/done + issue ref | 60 lines |
 | `handoffs/YYYY-MM-DD-HHmmss-<session6>.md` | branch, open changes, completed, pending, next; immutable; content-hash-guarded (`<projectID>/snapshot/<sessionID>`); newest wins | 60 lines/file |
 | `handoffs/archive/<name>.md` | retired durable lines + rotated scratchpad blocks; recallable, never auto-injected | 60 lines/file |
-| Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` (`{hash, at}`; legacy bare-hash strings are normalized out on the first prune) + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); `seen` pruned via paginated `scan` to ≤500; attempts expire at the 30s retry window, hints after 7 UTC days, snapshot/throttle stamps after 30 UTC days (scan outside the lock, re-read under the lock), piggybacked on the same once-per-UTC-day metrics bump | bounded |
+| Ledger (`ctx.storage`) | `<projectID>/seen/<id>` + `<projectID>/attempt/<id>` + `<projectID>/curation.pending` (scratchpad-only count) + `<projectID>/curation.rotated` + `<projectID>/snapshot/<sessionID>` (`{hash, at}`; legacy bare-hash strings are normalized out on the first prune) + `<projectID>/snapshotThrottle/<sessionID>` + `<projectID>/hint/<sessionID>/<promptHash>`; writes serialized (single-flight per content ID + append mutex); `seen` pruned via paginated `scan` to ≤500; attempts expire at the 30s retry window, hints after 7 UTC days, snapshot/throttle stamps after 30 UTC days (scan outside the lock; each victim re-read under its own lock), piggybacked on the same once-per-UTC-day metrics bump | bounded |
 | Metrics (`ctx.storage`, §5.12) | `<projectID>/metrics/total/<name>` (int) + `<projectID>/metrics/day/<YYYYMMDD>/<name>` (int, ≤90 UTC days) + `<projectID>/metrics/since` + `<projectID>/metrics/arm/hint/<sessionID>` (transient arm entry: a positive-int arming timestamp when armed, armed ≤ one UTC day, cleared on first use or the daily prune); values are **numbers only** (ADR-0008: no content); names come from the §5.12 enumeration (fail-closed); bumps serialize through the §5.7 mutex and never throw; `reset confirm` wipes the namespace (bare `reset` only explains) | ≤ enumerated totals + ≤90 day buckets × bumped names + ≤ hinted sessions in the last UTC day |
 
 Retention = **reachability** (ADR-0005): active (retain + injectable suffix) / causal (one hop behind,
@@ -1227,8 +1227,8 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
     immediately and tagged **without** incrementing `curation.pending`, while an ambiguous or tool-origin "remember" lands in the scratchpad and
     needs review;
   - **bounded ledger (Tier 2):** snapshot values are `{hash, at}` (legacy strings normalize on the first
-    prune); aged attempts/hints/snapshot/throttle keys are removed by paginated scan + remove with a
-    re-read under the write lock, scoped to the project, leaving malformed values alone; the daily
+    prune); aged attempts/hints/snapshot/throttle keys are removed by paginated scan + remove with
+    each victim re-read under its own lock, scoped to the project, leaving malformed values alone; the daily
     metrics piggyback runs both the day-bucket and ledger housekeeping once per UTC day;
   - **dashboard/reset/onboarding (Tier 2):** `METRIC_LABELS` is exhaustive and fixed (labels are the only
     display prose; renderer stays deterministic); bare `/memory-metrics reset` renders the notice without

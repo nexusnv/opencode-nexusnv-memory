@@ -540,10 +540,11 @@ function isAgedLedgerValue(
  * Bound the age-growing ledger namespaces. Attempts are abandoned after the
  * retry window; hint throttles expire after a week; snapshot hashes and
  * throttle stamps after 30 days. Scans happen outside the write lock, then
- * each victim is re-read under one lock so an in-process write that lands
- * between scan and remove is preserved. Only this project's exact prefixes
- * are touched; malformed hint/throttle/attempt values are left alone
- * (fail-closed). Resolves the number actually removed.
+ * each victim is re-read and removed under its own lock, so an in-process
+ * write that lands between scan and remove is preserved and a large backlog
+ * cannot hold the process-wide queue across the whole prune. Only this
+ * project's exact prefixes are touched; malformed hint/throttle/attempt
+ * values are left alone (fail-closed). Resolves the number actually removed.
  */
 export async function pruneLedgerState(
   storage: LedgerStorage,
@@ -592,8 +593,11 @@ export async function pruneLedgerState(
   if (victims.length === 0) return 0;
 
   let removed = 0;
-  await withWriteLock(async () => {
-    for (const victim of victims) {
+  for (const victim of victims) {
+    // One lock per victim: the re-read + remove pair still serializes
+    // against in-process writes, but a large backlog yields the queue
+    // between victims instead of blocking every foreground write.
+    const didRemove = await withWriteLock(async () => {
       const current = await storage.get(victim.key);
       if (
         !isAgedLedgerValue(
@@ -603,12 +607,13 @@ export async function pruneLedgerState(
           victim.retentionMs,
         )
       ) {
-        continue;
+        return false;
       }
       await storage.remove(victim.key);
-      removed += 1;
-    }
-  });
+      return true;
+    });
+    if (didRemove) removed += 1;
+  }
   return removed;
 }
 

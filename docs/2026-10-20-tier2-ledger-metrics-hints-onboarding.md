@@ -439,9 +439,10 @@ export interface SnapshotRecord {
     - throttle: numeric finite value and `now - value >= SNAPSHOT_RETENTION_MS`;
     - snapshot: either a legacy string (normalize out) or a record with a finite `at` and
       `now - at >= SNAPSHOT_RETENTION_MS`;
-  - under one `withWriteLock`, re-read each victim and remove it only if it still matches the same
-    classification (snapshot legacy strings always match; records must still be aged). Keep the
-    remove loop inside a single lock so it serializes against in-process writes.
+  - per victim, under its own `withWriteLock`, re-read it and remove it only if it still matches the
+    same classification (snapshot legacy strings always match; records must still be aged). One lock
+    per victim keeps the re-read + remove pair serialized against in-process writes without holding
+    the process-wide queue across the whole prune backlog (PR #18 review).
   - return the number actually removed.
 - Wire `pruneLedgerState` into `src/metrics.ts` `createBump`'s existing day-change block:
 
