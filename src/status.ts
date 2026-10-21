@@ -5,25 +5,25 @@
  * reading only counters/markers in `ctx.storage` (never the filesystem).
  * Four fixed-threshold facts share the line, joined with `; `: the
  * over-cap INDEX notice (re-set on prompt admission while the condition
- * persists; the `<projectID>/notice.indexOverCap` marker carries the actual
- * line count and is consumed atomically when reported), the rotation notice
- * (once — the `<projectID>/curation.rotated` marker is cleared after
- * reporting; concurrent `context` calls may double-emit once, which is
- * benign), the skipped-capture notice (count only — the
+ * persists; the `<projectID>/notice.indexOverCap` marker is consumed
+ * atomically when reported), the rotation notice
+ * (once — `<projectID>/curation.rotated` is atomically taken when reported),
+ * the skipped-capture notice (count only — the
  * `<projectID>/notice.captureFailed` marker is consumed atomically when
  * reported) and the review-due nudge (while scratchpad-only
- * `<projectID>/curation.pending` is ≥5). Under budget pressure the caller
- * drops this line before the hint line; the `context` hook renders it only
- * when the budget can carry it (`hasStatusLine` classifies a would-be drop
- * from a pure read), so a dropped status never loses its notices. Async,
- * never throws.
+ * `<projectID>/curation.pending` is ≥5). The line is generated from ledger
+ * counters and appended to the canonical prompt by the **prompt** hook as a
+ * prompt-tail data notice. Under budget pressure the caller drops this line
+ * before the hint line; the hook renders it only when the budget can carry
+ * it (`hasStatusLine` classifies a would-be drop from a pure read), so a
+ * dropped status never loses its notices. Async, never throws.
  */
 import {
-  clearRotated,
   getNotice,
   getPending,
   getRotated,
   takeNotice,
+  takeRotated,
   type LedgerStorage,
 } from "./capture.js";
 import { redact } from "./redact.js";
@@ -52,20 +52,15 @@ export async function statusLine(
     if (overCap !== undefined) {
       facts.push(
         options?.indexLines !== undefined
-          ? `INDEX.md is ${overCap} lines (cap ${options.indexLines}); not attached — trim it to restore auto-injection`
-          : `INDEX.md is ${overCap} lines (over cap); not attached — trim it to restore auto-injection`,
+          ? `INDEX.md exceeds the ${options.indexLines}-line injection cap or is too large to inspect; not attached — trim it to restore auto-injection`
+          : `INDEX.md exceeds its injection cap or is too large to inspect; not attached — trim it to restore auto-injection`,
       );
     }
-    const rotated = await getRotated(storage, projectID);
+    const rotated = await takeRotated(storage, projectID);
     if (rotated !== undefined) {
       facts.push(
         `rotated ${rotated} block(s) to handoffs/archive/ (still recallable via memory_recall)`,
       );
-      try {
-        await clearRotated(storage, projectID);
-      } catch {
-        // Best-effort: a failed clear re-emits once next turn (benign).
-      }
     }
     const skipped = await takeNotice(storage, projectID, "captureFailed");
     if (skipped !== undefined) {
@@ -91,7 +86,7 @@ export async function statusLine(
 
 /**
  * Pure read: does `statusLine` have anything to report right now? Used by
- * the `context` hook to classify a budget-dropped status line without
+ * the `prompt` hook to classify a budget-dropped status line without
  * consuming its notices — a dropped line must stay queued for a later turn.
  * Keep the fact sources in sync with `statusLine` above. Never throws.
  */

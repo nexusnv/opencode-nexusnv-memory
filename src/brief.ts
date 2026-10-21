@@ -1,27 +1,29 @@
 /**
  * Brief + priors loaders (spec §§5.2, 5.6 + c4-06-code).
  *
- * `loadBrief` feeds the per-model-call `context` hook: a capped
- * `activeContext` slice (goal/pending/next + summarised known-errors) plus a
- * one-line newest-handoff pointer, ≤48 lines including at most 5
- * message-derived error lines. It never carries the INDEX map (the `prompt`
- * hook is the sole INDEX injector) nor the `decisions.md` tail (recall-only
- * plus `loadPriors` for compaction only). Known Errors contribute
- * `sanitizeForBrief` summary lines only; captured bodies stay on disk for
- * `memory_recall`.
+ * `loadBrief` feeds the per-model-call `context` hook: only the stable
+ * `activeContext` slice (goal/pending/next + summarised known-errors), capped
+ * dynamically (47 lines at defaults) and including at most 5 message-derived
+ * error summary lines. The newest-handoff pointer is append-only prompt
+ * admission data, never part of the stable system prefix. It never carries
+ * the INDEX map (the `prompt` hook is the sole INDEX injector) nor the
+ * `decisions.md` tail (recall-only plus `loadPriors` for compaction only).
+ * Known Errors contribute `sanitizeForBrief` summary lines only; captured
+ * bodies stay on disk for `memory_recall`.
  *
  * `loadPriors` feeds the `compaction` hook only: `activeContext` slice +
  * `decisions.md` injectable tail (≤60 lines) + handoff pointer.
  *
  * All loaders are async and never throw (missing/unreadable → `""`/false);
- * output is always redacted and truncated with a notice.
+ * output is always redacted and truncated with a notice. Reads and handoff
+ * listings are contained to the memory root.
  */
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, relative } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import {
-  countLines,
   readCapped,
+  readContainedLines,
+  readHandoffDirectory,
   resolveMemoryRoot,
   splitTruncationNotice,
 } from "./files.js";
@@ -37,6 +39,8 @@ export const BRIEF_MAX_ERROR_LINES = 5;
 export interface BriefOptions {
   /** Per-file cap for the underlying reads. Defaults to `fileLines` (60). */
   readonly fileLines?: number;
+  /** Dynamic output cap (≤`BRIEF_MAX_LINES`); defaults to `BRIEF_MAX_LINES`. */
+  readonly maxLines?: number;
 }
 
 export interface PriorsOptions {
@@ -70,14 +74,29 @@ export function truncateLinesWithNotice(
 /**
  * Async INDEX line count for the `prompt` hook: missing/unreadable/invalid
  * resolves `undefined` (never throws), so the caller can distinguish
- * "missing" (silent) from "over cap" (report the count).
+ * "missing" (silent) from "over cap" (report the count). The optional root
+ * must be paired with an exact `INDEX.md` path; a byte-guard hit is treated
+ * as over-cap.
  */
 export async function indexLineCount(
   absPath: string,
+  memoryRoot?: string,
+  indexLines = DEFAULT_MEMORY_OPTIONS.indexLines,
 ): Promise<number | undefined> {
   try {
     if (typeof absPath !== "string" || absPath.length === 0) return undefined;
-    return countLines(await readFile(absPath, "utf8"));
+    const root = memoryRoot ?? dirname(absPath);
+    if (relative(root, absPath) !== "INDEX.md") return undefined;
+    const cap =
+      Number.isInteger(indexLines) && indexLines >= 0 ? indexLines : 30;
+    const loaded = await readContainedLines("INDEX.md", {
+      memoryRoot: root,
+      maxLines: cap + 1,
+      maxBytes: 1_048_576,
+      onMissing: "skip",
+    });
+    if (loaded === undefined) return undefined;
+    return loaded.truncated ? cap + 1 : loaded.lines.length;
   } catch {
     return undefined;
   }
@@ -88,25 +107,20 @@ export async function indexLineCount(
  * `indexLines` (delegates to `indexLineCount`). Missing, over-cap, or
  * unreadable resolves `false` (no attach, never throws). A file attachment
  * cannot be truncated, so an over-cap INDEX is skipped, not attached in part.
+ * When `memoryRoot` is supplied, the contained reader validates against that
+ * fixed root instead of a path derived from `absPath`.
  */
 export async function indexWithinCap(
   absPath: string,
   indexLines: number = DEFAULT_MEMORY_OPTIONS.indexLines,
+  memoryRoot?: string,
 ): Promise<boolean> {
   try {
     if (!Number.isInteger(indexLines) || indexLines <= 0) return false;
-    const count = await indexLineCount(absPath);
+    const count = await indexLineCount(absPath, memoryRoot, indexLines);
     return count !== undefined && count <= indexLines;
   } catch {
     return false;
-  }
-}
-
-async function readTextOrEmpty(absPath: string): Promise<string> {
-  try {
-    return await readFile(absPath, "utf8");
-  } catch {
-    return "";
   }
 }
 
@@ -245,6 +259,10 @@ function handoffOrder(name: string): {
   seq: number;
   name: string;
 } {
+  // Impossible dates (e.g. 2026-02-31) are unexpected names, never newest.
+  if (parseHandoffTimestamp(name) === undefined) {
+    return { stamp: "", seq: 0, name };
+  }
   const match = name.match(/^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)\.md$/);
   if (!match) return { stamp: "", seq: 0, name };
   const rest = match[2]!;
@@ -253,6 +271,46 @@ function handoffOrder(name: string): {
     return { stamp: match[1]!, seq: Number.parseInt(seqMatch[2]!, 10), name };
   }
   return { stamp: match[1]!, seq: 0, name };
+}
+
+/**
+ * Parse the generated `YYYY-MM-DD-HHmmss-` prefix. Returns `undefined` for
+ * unexpected names; GC never deletes a name it cannot timestamp.
+ */
+export function parseHandoffTimestamp(name: string): number | undefined {
+  const match = name.match(
+    /^(\d{4})-(\d{2})-(\d{2})-(\d{6})-[A-Za-z0-9._-]+\.md$/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, time] = match;
+  const yearNum = Number.parseInt(year!, 10);
+  const monthNum = Number.parseInt(month!, 10);
+  const dayNum = Number.parseInt(day!, 10);
+  const hours = Number.parseInt(time!.slice(0, 2), 10);
+  const minutes = Number.parseInt(time!.slice(2, 4), 10);
+  const seconds = Number.parseInt(time!.slice(4, 6), 10);
+  const stamp = Date.UTC(
+    yearNum,
+    monthNum - 1,
+    dayNum,
+    hours,
+    minutes,
+    seconds,
+  );
+  const date = new Date(stamp);
+  // Date.UTC normalizes 2026-02-31 and 2026-99-99 into other days/months.
+  // Round-trip every component so an impossible name is never "newest".
+  if (
+    date.getUTCFullYear() !== yearNum ||
+    date.getUTCMonth() !== monthNum - 1 ||
+    date.getUTCDate() !== dayNum ||
+    date.getUTCHours() !== hours ||
+    date.getUTCMinutes() !== minutes ||
+    date.getUTCSeconds() !== seconds
+  ) {
+    return undefined;
+  }
+  return Number.isFinite(stamp) ? stamp : undefined;
 }
 
 /** Newest-last order for top-level/archive handoff names (shared). */
@@ -271,15 +329,18 @@ function sortedHandoffNames(names: readonly string[]): string[] {
 
 /**
  * Newest top-level `handoffs/*.md` pointer line, or `undefined` when there
- * is none. Archive entries are recall-only and never pointed at. Never
+ * is none. Archive entries are recall-only and never pointed at. The listing
+ * is contained: handoff aliases (in-root or off-root) yield no names. Never
  * throws.
  */
 export async function newestHandoffLine(
   memoryRoot: string,
 ): Promise<string | undefined> {
   try {
-    const entries = await readdir(join(memoryRoot, "handoffs"));
-    const names = sortedHandoffNames(entries);
+    const entries = await readHandoffDirectory(memoryRoot, "root");
+    const names = sortedHandoffNames(entries).filter(
+      (name) => parseHandoffTimestamp(name) !== undefined,
+    );
     if (names.length === 0) return undefined;
     return `[memory] handoff: handoffs/${names[names.length - 1]!} (latest)`;
   } catch {
@@ -296,8 +357,8 @@ export interface HandoffListing {
 
 /**
  * Names-only listing for `memory_recall` (never content, never throws):
- * newest first, bounded to `limit`. A missing/unreadable directory resolves
- * to an empty listing.
+ * newest first, bounded to `limit`. A missing/unreadable directory or a
+ * symlinked/aliased handoff directory resolves to an empty listing.
  */
 export async function listHandoffs(
   memoryRoot: string,
@@ -305,8 +366,9 @@ export async function listHandoffs(
   limit = 20,
 ): Promise<HandoffListing> {
   try {
-    const dir = subdir === "archive" ? join("handoffs", "archive") : "handoffs";
-    const sorted = sortedHandoffNames(await readdir(join(memoryRoot, dir)));
+    const sorted = sortedHandoffNames(
+      await readHandoffDirectory(memoryRoot, subdir),
+    );
     const total = sorted.length;
     const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
     return { names: sorted.reverse().slice(0, cap), total };
@@ -316,10 +378,12 @@ export async function listHandoffs(
 }
 
 /**
- * Bounded per-model-call brief: `activeContext` slice + newest-handoff
- * pointer, ≤48 lines including at most 5 message-derived error summary
- * lines. Never the INDEX map, never the decisions tail. Redacted,
- * truncated with notice, never throws.
+ * Bounded per-model-call brief: only the `activeContext` slice, capped
+ * dynamically (default and maximum 48 lines) and including at most 5
+ * message-derived error summary lines. Never the INDEX map, never the
+ * decisions tail, never the newest-handoff pointer (the prompt hook appends
+ * that notice to the user input). Reads are contained, redacted, truncated
+ * with notice, never throws.
  */
 export async function loadBrief(
   memoryRoot?: string,
@@ -327,10 +391,21 @@ export async function loadBrief(
 ): Promise<string> {
   try {
     const root = resolveMemoryRoot(memoryRoot);
-    // fileLines intentionally unused: the brief is bounded by BRIEF_MAX_LINES
-    // (48), which is tighter than any per-file disk cap.
-    void options;
-    const raw = await readTextOrEmpty(join(root, "activeContext.md"));
+    const requested = options?.maxLines ?? BRIEF_MAX_LINES;
+    const cap =
+      Number.isInteger(requested) && requested >= 0
+        ? Math.min(requested, BRIEF_MAX_LINES)
+        : BRIEF_MAX_LINES;
+    if (cap === 0) return "";
+    // fileLines intentionally unused: the brief is bounded by `cap`
+    // (≤BRIEF_MAX_LINES), which is tighter than any per-file disk cap.
+    const loaded = await readContainedLines("activeContext.md", {
+      memoryRoot: root,
+      maxLines: cap + 1,
+      maxBytes: 1_048_576,
+      onMissing: "skip",
+    });
+    const raw = loaded?.lines.join("\n") ?? "";
     const redacted = redact(raw);
     const allLines = redacted.length === 0 ? [] : redacted.split("\n");
     const { contextLines, errorBlocks } = splitKnownErrors(allLines);
@@ -346,14 +421,25 @@ export async function loadBrief(
       body.push(UNTRUSTED_LABEL);
       body.push(...summaries);
     }
-    const pointer = await newestHandoffLine(root);
-    if (pointer !== undefined) body.push(pointer);
 
-    if (body.length === 0) return "";
-    const capped = truncateLinesWithNotice(
-      ["[memory] active context", ...body],
-      BRIEF_MAX_LINES,
-    );
+    const inputTruncated = loaded?.truncated === true;
+    const sourceLines = Math.max(loaded?.lines.length ?? 0, 1);
+    if (body.length === 0 && !inputTruncated) return "";
+    const candidates = ["[memory] active context", ...body];
+    // A bounded read only knows a lower bound on the source length. Do not
+    // print that bound as an exact total; say "at least" instead. Pruning can
+    // also remove the sentinel line, so force the notice whenever the reader
+    // stopped early.
+    const capped = inputTruncated
+      ? (() => {
+          const keep = cap <= 1 ? 0 : cap - 1;
+          const shown = Math.min(candidates.length, keep);
+          return [
+            ...candidates.slice(0, keep),
+            `[truncated: showing first ${shown} of at least ${sourceLines} lines]`,
+          ];
+        })()
+      : truncateLinesWithNotice(candidates, cap);
     return redact(capped.join("\n"));
   } catch {
     return "";

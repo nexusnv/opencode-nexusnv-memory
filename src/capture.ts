@@ -296,6 +296,25 @@ export async function clearRotated(
   });
 }
 
+/**
+ * Atomically read-and-clear the rotation marker (one write lock), so
+ * concurrent prompt admissions cannot both report the same rotation.
+ */
+export async function takeRotated(
+  storage: LedgerStorage,
+  projectID: string,
+): Promise<number | undefined> {
+  return withWriteLock(async () => {
+    const key = rotatedKey(projectID);
+    const value = await storage.get(key);
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      return undefined;
+    }
+    await storage.remove(key);
+    return value;
+  });
+}
+
 /** Transient status notices (numbers only, cleared after reporting). */
 export type NoticeKind = "indexOverCap" | "captureFailed";
 
@@ -446,6 +465,25 @@ export async function setHint(
 ): Promise<void> {
   await withWriteLock(async () => {
     await storage.set(hintKey(projectID, sessionID, promptHash), now);
+  });
+}
+
+/**
+ * Atomically claim the once-per-prompt hint slot. Returns true only to the
+ * caller that wrote the claim, so concurrent admissions cannot both emit.
+ */
+export async function claimHint(
+  storage: LedgerStorage,
+  projectID: string,
+  sessionID: string,
+  promptHash: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  return withWriteLock(async () => {
+    const key = hintKey(projectID, sessionID, promptHash);
+    if ((await storage.get(key)) != null) return false;
+    await storage.set(key, now);
+    return true;
   });
 }
 

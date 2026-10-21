@@ -4,11 +4,16 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  BRIEF_MAX_LINES,
   indexWithinCap,
   loadBrief,
   loadPriors,
+  newestHandoffLine,
 } from "../src/brief.js";
+import {
+  briefInjectionCap,
+  PROMPT_NOTICE_MAX_LINES,
+  promptNoticeBudget,
+} from "../src/prompt-notices.js";
 import {
   captureFailure,
   dispatchEvent,
@@ -174,18 +179,36 @@ describe("acceptance_budgets_every_write_path", () => {
     );
     const attached = await indexWithinCap(join(memoryRoot, "INDEX.md"));
     expect(attached).toBe(true);
-    const brief = await loadBrief(memoryRoot);
+    const briefCap = briefInjectionCap(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
+    );
+    const brief = await loadBrief(memoryRoot, { maxLines: briefCap });
     const status = await statusLine(storage, PROJECT);
     const hint = await matchIndex(
-      [{ role: "user", content: [{ type: "text", text: "tell me about topic-7" }] }],
-      { storage, projectID: PROJECT, sessionID: SESSION, indexContent: indexLines },
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "tell me about topic-7" }],
+        },
+      ],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: indexLines,
+      },
+    );
+    const pointer = await newestHandoffLine(memoryRoot);
+    const noticeLines = [pointer, status, hint].filter(Boolean).length;
+    const noticeBudget = promptNoticeBudget(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
     const payloadLines =
-      countLines(indexLines) +
-      countLines(brief) +
-      (hint ? 1 : 0) +
-      (status ? 1 : 0);
-    expect(countLines(brief)).toBeLessThanOrEqual(BRIEF_MAX_LINES);
+      countLines(indexLines) + countLines(brief) + noticeLines;
+    expect(countLines(brief)).toBeLessThanOrEqual(briefCap);
+    expect(noticeLines).toBeLessThanOrEqual(noticeBudget);
     expect(payloadLines).toBeLessThanOrEqual(
       DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
@@ -404,8 +427,10 @@ describe("acceptance_handoff_routing", () => {
     );
     const top = await readdir(join(memoryRoot, "handoffs"));
     expect(top.some((n) => n.endsWith(".md"))).toBe(true);
-    // Archive entries are never pointed at by the brief loader.
+    // Archive entries are never pointed at by the prompt pointer or brief.
     await writeMemory("handoffs/archive/retired-abc.md", "retired body");
+    const pointer = await newestHandoffLine(memoryRoot);
+    expect(pointer).not.toContain("retired-abc");
     const brief = await loadBrief(memoryRoot);
     expect(brief).not.toContain("retired-abc");
   });
@@ -520,8 +545,8 @@ describe("acceptance_status_line", () => {
   });
 
   it("status_dropped_before_hint_under_budget_pressure", () => {
-    // Ordering rule lives in the context hook: brief, then status, then
-    // hint — the status line is dropped before the hint on overflow.
+    // Ordering rule lives in the prompt hook: the status line is dropped
+    // before the hint on notice-budget overflow.
     expect(srcOf("index.ts")).toMatch(/status/);
     expect(srcOf("index.ts")).toMatch(/matchIndex|hint/);
   });
@@ -576,25 +601,35 @@ describe("acceptance_evals_three_numbers", () => {
       Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80) +
       Math.ceil(MEMORY_SEARCH_DESCRIPTION.length / 80);
     expect(staticLines).toBeLessThanOrEqual(16);
-    // Per-prompt with content: static + INDEX(≤30, once) + brief(≤48) +
-    // hint(≤1) + status(≤1). The injectable portion is budget-capped at 80.
+    // Per-prompt with content: static + INDEX(≤30, once) + brief(≤47) +
+    // notices(≤3). The injectable portion is budget-capped at 80.
+    const briefCap = briefInjectionCap(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
+    );
     const perPromptInjectable =
-      DEFAULT_MEMORY_OPTIONS.indexLines + BRIEF_MAX_LINES + 1 + 1;
-    expect(perPromptInjectable).toBeLessThanOrEqual(
+      DEFAULT_MEMORY_OPTIONS.indexLines +
+      briefCap +
+      PROMPT_NOTICE_MAX_LINES;
+    expect(perPromptInjectable).toBe(
       DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
     const perPromptWithContent = staticLines + perPromptInjectable;
-    // Session-total: per-prompt × model steps (context hook runs per model
-    // call, including tool-driven continuations; hint throttled to once).
+    // Session-total: the context hook runs per model call (brief × steps);
+    // INDEX and volatile notices are admitted once per prompt.
     const modelSteps = 4;
-    const sessionTotal = perPromptWithContent * modelSteps;
+    const sessionTotal =
+      staticLines +
+      DEFAULT_MEMORY_OPTIONS.indexLines +
+      PROMPT_NOTICE_MAX_LINES +
+      briefCap * modelSteps;
     // eslint-disable-next-line no-console
     console.log(
       `[memory-evals] static=${staticLines} per-prompt-with-content=${perPromptWithContent} ` +
         `session-total(steps=${modelSteps})=${sessionTotal}`,
     );
-    expect(perPromptWithContent).toBeLessThanOrEqual(staticLines + 80);
-    expect(sessionTotal).toBe(perPromptWithContent * modelSteps);
+    expect(perPromptWithContent).toBe(96);
+    expect(sessionTotal).toBe(237);
   });
 });
 
@@ -716,8 +751,9 @@ describe("acceptance_handoff_collision", () => {
       "pre-existing different body\n",
     );
     // The newest pointer resolves to the newer sibling, not the base.
-    const brief = await loadBrief(memoryRoot);
-    expect(brief).toContain("handoffs/2026-10-15-123456-123456-01.md");
+    expect(await newestHandoffLine(memoryRoot)).toContain(
+      "handoffs/2026-10-15-123456-123456-01.md",
+    );
   });
 
   it("same_content_dedupes_to_the_existing_file", async () => {

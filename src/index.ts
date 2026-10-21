@@ -16,14 +16,22 @@ import {
   indexLineCount,
   loadBrief,
   loadPriors,
-  truncateLinesWithNotice,
+  newestHandoffLine,
 } from "./brief.js";
 import { matchIndex, matchRememberNearMiss } from "./hints.js";
+import {
+  appendPromptNotices,
+  briefInjectionCap,
+  hasPromptNotices,
+  planPromptNotices,
+  promptNoticeBudget,
+  promptStatusFits,
+} from "./prompt-notices.js";
 import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
-import { writeNewCapped } from "./files.js";
+import { TRUNCATION_NOTICE_LINE, writeNewCapped } from "./files.js";
 import { registerMemoryTools } from "./tools.js";
 import {
   registerStatusCommand,
@@ -156,7 +164,8 @@ export default Plugin.define({
     const projectID = projectIDOf(ctx);
     const bump = createBump(ledger, projectID);
 
-    // Prompt hook: sole INDEX injector + source:user fast path (§§5.1, 5.11).
+    // Prompt hook: sole INDEX injector, volatile prompt-tail notices, and
+    // source:user fast path (§§5.1, 5.2, 5.11).
     registrations.push(
       await ctx.session.hook("prompt", async (event) => {
         try {
@@ -175,21 +184,26 @@ export default Plugin.define({
           );
           if (!already) {
             // Over-cap/missing/unreadable INDEX is not attached (no truncation).
-            const indexCount = await indexLineCount(abs);
+            const indexCount = await indexLineCount(
+              abs,
+              memoryRoot,
+              options.indexLines,
+            );
             if (indexCount !== undefined && indexCount <= options.indexLines) {
               event.prompt.files.push({ uri: expectedIndexUri });
               bump("index.attach");
-            } else {
+            } else if (
+              indexCount !== undefined &&
+              indexCount > options.indexLines
+            ) {
               bump("index.overCap");
-              if (indexCount !== undefined && indexCount > options.indexLines) {
-                // Over-cap (not missing): report the count once on the
-                // status line. Best-effort: a rejected notice write must not
-                // skip the rest of this hook (e.g. the remember fast path).
-                try {
-                  await setNotice(ledger, projectID, "indexOverCap", indexCount);
-                } catch (error) {
-                  logDiagnostic(error);
-                }
+              // Over-cap (not missing): report the count once on the
+              // status line. Best-effort: a rejected notice write must not
+              // skip the rest of this hook (e.g. the remember fast path).
+              try {
+                await setNotice(ledger, projectID, "indexOverCap", indexCount);
+              } catch (error) {
+                logDiagnostic(error);
               }
             }
           } else {
@@ -205,13 +219,79 @@ export default Plugin.define({
           ) {
             bump("remember.caught");
           }
+          // Volatile memory notices ride on the canonical user prompt, after
+          // the user's own text, as labelled data. The marker makes a retried
+          // admission idempotent; the stable system prefix stays untouched.
+          const promptText =
+            typeof event.prompt.text === "string" ? event.prompt.text : "";
+          if (!hasPromptNotices(promptText)) {
+            const noticeBudget = promptNoticeBudget(
+              options.indexLines,
+              options.injectBudgetLines,
+            );
+            const rememberHint = await matchRememberNearMiss(promptText, {
+              storage: ledger,
+              projectID,
+              sessionID: event.sessionID,
+              memoryRoot,
+            });
+            const hint =
+              rememberHint ??
+              (await matchIndex(promptText, {
+                storage: ledger,
+                projectID,
+                sessionID: event.sessionID,
+                memoryRoot,
+                indexLines: options.indexLines,
+              }));
+            const hintArms =
+              rememberHint === undefined && hint !== undefined;
+            const statusFits = promptStatusFits(
+              noticeBudget,
+              hint !== undefined,
+            );
+            // Pure precheck first: prompt admission must not queue behind
+            // ledger writes when there is nothing to consume.
+            const hasStatus = await hasStatusLine(ledger, projectID);
+            const status =
+              statusFits && hasStatus
+                ? await statusLine(ledger, projectID, {
+                    indexLines: options.indexLines,
+                  })
+                : undefined;
+            const statusDroppedByBudget = !statusFits && hasStatus;
+            const handoff = await newestHandoffLine(memoryRoot);
+            const plan = planPromptNotices({
+              handoff,
+              status,
+              hint,
+              budget: noticeBudget,
+            });
+            if (plan.text.length > 0) {
+              event.prompt.text = appendPromptNotices(promptText, plan.text);
+            }
+            if (status !== undefined) {
+              bump("status.shown");
+            } else if (statusDroppedByBudget) {
+              bump("status.dropped");
+            }
+            if (hint !== undefined) {
+              bump("hint.shown");
+              if (hintArms) {
+                await setArm(ledger, projectID, event.sessionID);
+              }
+            }
+          }
         } catch (error) {
           logDiagnostic(error);
         }
       }),
     );
 
-    // Context hook: brief + status + hint, budget-capped (§5.2).
+    // Context hook: stable brief only, dynamically budget-capped (§5.2).
+    // Status, hint, and the newest-handoff pointer are prompt-tail notices,
+    // so this per-model-call system prefix carries only the brief and never
+    // any volatile notice.
     registrations.push(
       await ctx.session.hook("context", async (event) => {
         try {
@@ -219,122 +299,30 @@ export default Plugin.define({
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
+          const briefCap = briefInjectionCap(
+            options.indexLines,
+            options.injectBudgetLines,
+          );
           const brief = await loadBrief(memoryRoot, {
             fileLines: options.fileLines,
+            maxLines: briefCap,
           });
-          // One hint slot: a remember near-miss outranks an INDEX hit for
-          // the same prompt (it is an explicit write attempt the user just
-          // missed). `matchRememberNearMiss` shares the prompt-hash throttle
-          // with `matchIndex`, so at most one of them can fire.
-          const rememberHint = await matchRememberNearMiss(event.messages, {
-            storage: ledger,
-            projectID,
-            sessionID: event.sessionID,
-            memoryRoot,
-          });
-          const hint =
-            rememberHint ??
-            (await matchIndex(event.messages, {
-              storage: ledger,
-              projectID,
-              sessionID: event.sessionID,
-              memoryRoot,
-            }));
-          // Only an INDEX hint is a recall call-to-action. A near-miss nudge
-          // must never arm the hint→recall correlation.
-          const hintArms = rememberHint === undefined && hint !== undefined;
-
-          // Budget: INDEX (≤indexLines) + brief (≤48) + status (≤1) +
-          // hint (≤1) ≤ injectBudgetLines. Overflow truncates the brief
-          // first; the status line is dropped before the hint, which is
-          // never dropped on a hit. Ordering: brief, status, hint.
-          const budget = Math.max(
-            0,
-            options.injectBudgetLines - options.indexLines,
-          );
-          const budgetHintCount = hint !== undefined ? 1 : 0;
-          // `statusLine` CONSUMES the notices it reports, so render it only
-          // when the budget can carry it: a computed-then-dropped line would
-          // silently lose its notices. When it cannot fit, classify a
-          // would-be line from a pure read — nothing is consumed and the
-          // notices stay queued for a later turn.
-          const statusFits = budget >= budgetHintCount + 1;
-          const status = statusFits
-            ? await statusLine(ledger, projectID, {
-                indexLines: options.indexLines,
-              })
-            : undefined;
-          const statusDroppedByBudget =
-            !statusFits && (await hasStatusLine(ledger, projectID));
-          const rawBrief = brief === "" ? [] : brief.split("\n");
-          let briefLines = rawBrief;
-          let keepStatus = status !== undefined;
-          // Classifier flags, set at their true sites (M-T3 hygiene): the
-          // truncation classifier is "a budget branch ran" and the status
-          // drop classifier is computed above (a would-be line the budget
-          // cannot carry) — never a reference comparison against `rawBrief`
-          // (`truncateLinesWithNotice` returning a fresh array is not a
-          // documented contract to lean on).
-          let briefTruncated = false;
-          const hintKept = hint !== undefined;
-          const hintCount = hintKept ? 1 : 0;
-          const total = () =>
-            briefLines.length + (keepStatus ? 1 : 0) + hintCount;
-          if (total() > budget) {
-            briefLines = truncateLinesWithNotice(
-              rawBrief,
-              Math.max(0, budget - (keepStatus ? 1 : 0) - hintCount),
-            );
-            briefTruncated = true;
-          }
-          if (total() > budget) {
-            // With `statusFits` false above, `status` (and so `keepStatus`)
-            // is already false when the budget cannot carry the line; this
-            // branch then only re-truncates the brief.
-            keepStatus = false;
-            briefLines = truncateLinesWithNotice(
-              rawBrief,
-              Math.max(0, budget - hintCount),
-            );
-            briefTruncated = true;
-          }
-
-          // M-T3 taps below: classification uses only these flags and
-          // in-scope variables. Truncation = a budget branch ran
-          // (briefTruncated) and actually cut brief content
-          // (`rawBrief.length > 0`): a vacuous `truncateLinesWithNotice`
-          // on an empty brief must not claim `brief.truncated`.
-          if (briefTruncated && rawBrief.length > 0) {
+          const briefLines = brief === "" ? [] : brief.split("\n");
+          const lastBriefLine = briefLines[briefLines.length - 1];
+          if (
+            lastBriefLine !== undefined &&
+            TRUNCATION_NOTICE_LINE.test(lastBriefLine)
+          ) {
             bump("brief.truncated");
           }
-
           if (briefLines.length > 0) {
             event.system.push({ type: "text", text: briefLines.join("\n") });
             bump("brief.injected");
             bump("brief.lines", briefLines.length);
-          } else if (brief === "") {
+          } else if (briefCap > 0) {
             bump("brief.empty");
           }
-          if (keepStatus && status !== undefined) {
-            event.system.push({ type: "text", text: status });
-            bump("status.shown");
-          } else if (statusDroppedByBudget) {
-            // A status line the budget could not carry, classified above by
-            // a pure read: the notices were NOT consumed and stay queued.
-            bump("status.dropped");
-          }
-          if (hint !== undefined) {
-            event.system.push({ type: "text", text: hint });
-            bump("hint.shown");
-            // Arm the hint→recall correlation only for an INDEX hint
-            // (decision 4: awaited; `setArm` is itself never-throw/never-
-            // reject, so the await cannot surface a failure to this hook).
-            if (hintArms) {
-              await setArm(ledger, projectID, event.sessionID);
-            }
-          }
-
-          // Throttled handoff writer: fire-and-forget, never awaited.
+          // Throttled handoff writer remains per-model-call and fire-and-forget.
           void snapshotIfDue(ledger, projectID, event.sessionID, {
             throttleMinutes: options.snapshotThrottleMinutes,
             vcs: ctx.vcs as unknown as VcsPort,

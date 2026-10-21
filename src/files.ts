@@ -284,7 +284,7 @@ function truncationNotice(
 
 /** The loader-generated truncation notice line (see `truncationNotice`). */
 export const TRUNCATION_NOTICE_LINE =
-  /^\[truncated: showing (?:first|last) \d+ of \d+ lines\]$/;
+  /^\[truncated: showing (?:first|last) \d+ of (?:at least )?\d+ lines\]$/;
 
 /**
  * Split `readCapped` output into its body and the trailing loader-generated
