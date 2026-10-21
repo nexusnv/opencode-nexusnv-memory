@@ -316,7 +316,7 @@ export async function takeRotated(
 }
 
 /** Transient status notices (numbers only, cleared after reporting). */
-export type NoticeKind = "indexOverCap" | "captureFailed";
+export type NoticeKind = "indexOverCap" | "captureFailed" | "forgotten";
 
 /** `<projectID>/notice.<kind>` → transient notice value (positive int). */
 export function noticeKey(projectID: string, kind: NoticeKind): string {

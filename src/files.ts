@@ -303,7 +303,9 @@ export function splitTruncationNotice(text: string): {
 }
 
 const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-const BULLET_START = /^\s*-\s+/;
+// Only a column-0 bullet starts a block: captured detail is two-space
+// indented, so an indented `  - ...` line must stay with its summary.
+const BULLET_START = /^-\s+/;
 
 /**
  * Split the lines under `## Known errors` into blocks. Each block starts at a
@@ -323,16 +325,16 @@ function knownErrorBlocks(
       current = { start: i, end: i + 1 };
     } else if (current) {
       // Continuation (indented detail, blank, or plain text): keep with block
-      // unless a new ## section starts, which ends the Known-errors region.
-      // Column-0 only (H-1): capture stores detail 2-space indented, so a
-      // trimmed test would let `## Next` inside tool output split the block.
-      if (/^##\s+/.test(line)) {
+      // unless a new column-0 heading starts, which ends the Known-errors
+      // region. Column-0 only (H-1): capture stores detail 2-space indented,
+      // so a trimmed test would let tool output split the block.
+      if (/^#{1,6}\s+/.test(line)) {
         blocks.push(current);
         return blocks;
       }
       current.end = i + 1;
     } else {
-      if (/^##\s+/.test(line)) return blocks;
+      if (/^#{1,6}\s+/.test(line)) return blocks;
       // Leading blanks before the first bullet belong to no block; skip.
     }
   }
@@ -405,11 +407,15 @@ export async function readCapped(
   const redactedText = redact(raw);
   const total = countLines(redactedText);
   // decisions.md is unbounded on write but recall-capped to the injectable
-  // tail; every other file uses its write cap for reads too.
+  // tail; every other file uses its write cap for reads too. User-invoked
+  // forgotten-* archives add a short provenance header around the removed
+  // text, so give them headroom above the file cap as well.
   const cap =
     file === "decisions.md"
       ? fileLines
-      : getCapForFile(file, indexLines, fileLines);
+      : file.startsWith("handoffs/archive/forgotten-")
+        ? Math.max(fileLines * 3 + 64, 512)
+        : getCapForFile(file, indexLines, fileLines);
   if (!Number.isFinite(cap) || total <= (cap as number)) return redactedText;
   const limit = cap as number;
   if (file === "decisions.md") {

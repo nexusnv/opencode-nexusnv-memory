@@ -28,13 +28,14 @@ import {
   REMEMBER_NEAR_MISS_HINT,
 } from "../src/hints.js";
 import { getScaffoldFiles } from "../src/templates.js";
-import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
+import { hasStatusLine, REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
 import {
   attemptKey,
   failureContentID,
   getNotice,
   getPending,
   getThrottle,
+  incNotice,
   incPending,
   setNotice,
   setRotated,
@@ -907,6 +908,17 @@ describe("statusLine", () => {
     const line = await statusLine(storage, PROJECT);
     expect(line).toContain("INDEX.md exceeds its injection cap");
     expect(line).toContain("not attached");
+  });
+
+  it("reports a forget operation once, with the archive/git warning", async () => {
+    await incNotice(storage, PROJECT, "forgotten");
+    expect(await hasStatusLine(storage, PROJECT)).toBe(true);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("1 forget operation(s) applied");
+    expect(line).toContain("handoffs/archive/");
+    expect(line).toContain("git history");
+    expect(await statusLine(storage, PROJECT)).toBeUndefined();
+    expect(await hasStatusLine(storage, PROJECT)).toBe(false);
   });
 
   it("reports skipped failure captures once, then clears the notice", async () => {

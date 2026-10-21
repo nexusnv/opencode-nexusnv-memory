@@ -125,8 +125,11 @@ export async function indexWithinCap(
 }
 
 const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-const BULLET_START = /^\s*-\s+/;
-const SECTION_HEADING = /^##\s+/;
+// Only a column-0 bullet starts a block. Captured tool details are stored
+// two-space indented, so an indented `  - ...` line is detail, not a new
+// block (otherwise forgetting the summary would leave secret detail behind).
+const BULLET_START = /^-\s+/;
+const SECTION_HEADING = /^#{1,6}\s+/;
 
 /**
  * Split `activeContext` lines into the context slice (everything outside
@@ -154,7 +157,7 @@ function splitKnownErrors(allLines: string[]): {
       if (current) errorBlocks.push(current);
       current = [line];
     } else if (current) {
-      // Column-0 `##` only: captured detail bodies are stored 2-space
+      // Column-0 headings only: captured detail bodies are stored 2-space
       // indented (`  ${line}`), so a trimmed test would let tool output
       // containing `## Next` terminate the block early and launder the
       // remainder into the trusted context slice unsanitized (H-1).
