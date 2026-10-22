@@ -221,7 +221,9 @@ export async function applyHandoffGc(input: {
   });
   return withCappedTransaction({ memoryRoot: input.memoryRoot }, async (tx) => {
     // Re-plan under the lock: never delete a set that no longer matches the
-    // approved policy (a same-name replacement or a new/removed handoff).
+    // approved policy (a new/removed handoff or a keep-set shift). Approval
+    // is by path; handoffs are immutable, so same-name content replacement is
+    // outside the supported contract.
     const listing = await listHandoffsStrict(
       input.memoryRoot,
       "root",

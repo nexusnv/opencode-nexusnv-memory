@@ -10,12 +10,12 @@
 import {
   countLines,
   getCapForFile,
-  knownErrorBlockRanges,
   readRawContained,
   withCappedTransaction,
   type CappedFileOptions,
 } from "./files.js";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
+import { KNOWN_ERRORS_HEADING, knownErrorBlockRanges } from "./known-errors.js";
 import { redact } from "./redact.js";
 
 export const FORGETTABLE_FILES = [
@@ -146,7 +146,7 @@ export function planForget(
     file === "activeContext.md" ? knownErrorBlockRanges(lines) : [];
   const knownErrorsHeading =
     file === "activeContext.md"
-      ? lines.findIndex((line) => /^##\s+known errors\s*$/i.test(line.trim()))
+      ? lines.findIndex((line) => KNOWN_ERRORS_HEADING.test(line.trim()))
       : -1;
   const selected = new Set<number>();
 
@@ -369,9 +369,10 @@ export async function previewForget(input: ForgetInput): Promise<string> {
 }
 
 function samePlan(left: ForgetPlan, right: ForgetPlan): boolean {
-  // Compare only the approved units. A concurrent edit outside the selected
-  // units is intentional and preserved by re-planned nextText; only a change
-  // to what the human approved aborts.
+  // Compare the approved units by text and line span. An edit outside the
+  // selection is preserved by the re-planned nextText, but an edit that
+  // shifts the selected line numbers aborts conservatively: the human must
+  // re-run the dry-run against the new layout.
   if (left.file !== right.file || left.units.length !== right.units.length) {
     return false;
   }

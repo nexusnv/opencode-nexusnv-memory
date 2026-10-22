@@ -28,6 +28,7 @@ import {
   splitTruncationNotice,
 } from "./files.js";
 import { sanitizeForBrief, UNTRUSTED_LABEL } from "./guard.js";
+import { splitKnownErrorSections } from "./known-errors.js";
 import { redact } from "./redact.js";
 
 /** Injection cap for `loadBrief` output (fixed slice of `injectBudgetLines`). */
@@ -124,102 +125,19 @@ export async function indexWithinCap(
   }
 }
 
-const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-// Only a column-0 bullet starts a block. Captured tool details are stored
-// two-space indented, so an indented `  - ...` line is detail, not a new
-// block (otherwise forgetting the summary would leave secret detail behind).
-const BULLET_START = /^-\s+/;
-const SECTION_HEADING = /^#{1,6}\s+/;
-// A generated summary line, used only when the heading is missing (for
-// example an older file or a hand-edit). Without this fallback, a removed
-// heading would turn captured detail into apparently trusted context.
-const TOOL_SUMMARY_LINE = /^-\s+.*\bsource:tool\s*$/i;
-
 /**
- * Split `activeContext` lines into the context slice (everything outside
- * the Known-errors region) and Known-errors bullet blocks (bullet plus its
- * continuation lines, detail bodies included — the caller summarises each
- * block to one line and drops the body).
+ * Split `activeContext` lines into the context slice and Known-errors
+ * blocks. The shared parser is the single source of truth for block
+ * boundaries, so forget cannot remove a summary while leaving its detail.
  */
 function splitKnownErrors(allLines: string[]): {
   contextLines: string[];
   errorBlocks: string[][];
 } {
-  const headingIdx = allLines.findIndex((l) =>
-    KNOWN_ERRORS_HEADING.test(l.trim()),
-  );
-  if (headingIdx === -1) {
-    // No heading: still recognise generated `source:tool` blocks so a
-    // hand-removed heading cannot promote their raw detail into the brief.
-    // Stop at a column-0 bullet, heading, or blank line (captured detail is
-    // stored two-space indented, so its blank lines are not truly empty).
-    const contextLines: string[] = [];
-    const errorBlocks: string[][] = [];
-    let current: string[] | undefined;
-    for (const line of allLines) {
-      if (BULLET_START.test(line)) {
-        if (current) {
-          errorBlocks.push(current);
-          current = undefined;
-        }
-        if (TOOL_SUMMARY_LINE.test(line)) {
-          current = [line];
-          continue;
-        }
-        contextLines.push(line);
-        continue;
-      }
-      if (current) {
-        if (line.trim().length === 0 || SECTION_HEADING.test(line)) {
-          errorBlocks.push(current);
-          current = undefined;
-          contextLines.push(line);
-        } else {
-          current.push(line);
-        }
-      } else {
-        contextLines.push(line);
-      }
-    }
-    if (current) errorBlocks.push(current);
-    if (errorBlocks.length === 0) {
-      return { contextLines: [...allLines], errorBlocks: [] };
-    }
-    return {
-      contextLines: contextLines.filter((line) => line.trim().length > 0),
-      errorBlocks,
-    };
-  }
-  const contextLines = allLines.slice(0, headingIdx);
-  const errorBlocks: string[][] = [];
-  let current: string[] | undefined;
-  let i = headingIdx + 1;
-  for (; i < allLines.length; i += 1) {
-    const line = allLines[i]!;
-    if (BULLET_START.test(line)) {
-      if (current) errorBlocks.push(current);
-      current = [line];
-    } else if (current) {
-      // Column-0 headings only: captured detail bodies are stored 2-space
-      // indented (`  ${line}`), so a trimmed test would let tool output
-      // containing `## Next` terminate the block early and launder the
-      // remainder into the trusted context slice unsanitized (H-1).
-      if (SECTION_HEADING.test(line)) {
-        errorBlocks.push(current);
-        current = undefined;
-        break;
-      }
-      current.push(line);
-    }
-  }
-  if (current) errorBlocks.push(current);
-  // A section after Known errors belongs to the context slice, not the errors.
-  if (i < allLines.length) contextLines.push(...allLines.slice(i));
-  // Drop the heading itself plus blank padding around it: the brief carries
-  // content lines, and the loader caps the total.
+  const { contextLines, blocks } = splitKnownErrorSections(allLines);
   return {
-    contextLines: contextLines.filter((l) => l.trim().length > 0),
-    errorBlocks,
+    contextLines,
+    errorBlocks: blocks.map((block) => [...block.lines]),
   };
 }
 

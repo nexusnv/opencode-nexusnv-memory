@@ -26,6 +26,10 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
+import {
+  KNOWN_ERRORS_HEADING,
+  splitKnownErrorSections,
+} from "./known-errors.js";
 import { acquireWriteLock, type FileLockOptions } from "./lock.js";
 import { redact, redactPreservingLines } from "./redact.js";
 
@@ -301,57 +305,6 @@ export function splitTruncationNotice(text: string): {
   const candidate = text.slice(gap + 2).trim();
   if (!TRUNCATION_NOTICE_LINE.test(candidate)) return { body: text };
   return { body: text.slice(0, gap), notice: candidate };
-}
-
-const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-// Only a column-0 bullet starts a block: captured detail is two-space
-// indented, so an indented `  - ...` line must stay with its summary.
-const BULLET_START = /^-\s+/;
-
-/**
- * Split the lines under `## Known errors` into blocks. Each block starts at a
- * `- ` bullet; indented/non-bullet continuation lines join the current block.
- * Returns block boundaries as [start, end) line indexes into `allLines`.
- */
-function knownErrorBlocks(
-  allLines: string[],
-  headingIdx: number,
-): Array<{ start: number; end: number }> {
-  const blocks: Array<{ start: number; end: number }> = [];
-  let current: { start: number; end: number } | undefined;
-  for (let i = headingIdx + 1; i < allLines.length; i += 1) {
-    const line = allLines[i]!;
-    if (BULLET_START.test(line)) {
-      if (current) blocks.push(current);
-      current = { start: i, end: i + 1 };
-    } else if (current) {
-      // Continuation (indented detail, blank, or plain text): keep with block
-      // unless a new column-0 heading starts, which ends the Known-errors
-      // region. Column-0 only (H-1): capture stores detail 2-space indented,
-      // so a trimmed test would let tool output split the block.
-      if (/^#{1,6}\s+/.test(line)) {
-        blocks.push(current);
-        return blocks;
-      }
-      current.end = i + 1;
-    } else {
-      if (/^#{1,6}\s+/.test(line)) return blocks;
-      // Leading blanks before the first bullet belong to no block; skip.
-    }
-  }
-  if (current) blocks.push(current);
-  return blocks;
-}
-
-/** Known-Errors block ranges for `allLines`, or `[]` when no heading exists. */
-export function knownErrorBlockRanges(
-  allLines: readonly string[],
-): Array<{ readonly start: number; readonly end: number }> {
-  const headingIdx = allLines.findIndex((line) =>
-    KNOWN_ERRORS_HEADING.test(line.trim()),
-  );
-  if (headingIdx === -1) return [];
-  return knownErrorBlocks([...allLines], headingIdx);
 }
 
 /** Archive filename safe for the handoff allowlist (no colons). */
@@ -929,7 +882,7 @@ async function writeRedactedCapped(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,
     );
   }
-  const blocks = knownErrorBlockRanges(working);
+  const blocks = splitKnownErrorSections(working).blocks;
   if (blocks.length === 0) {
     throw new Error(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,

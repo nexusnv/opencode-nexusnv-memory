@@ -491,7 +491,7 @@ describe("prompt hook", () => {
     await runHook(hooks, "prompt", event);
     expect(event.prompt.files).toHaveLength(0);
     expect(event.prompt.text).toContain(
-      "INDEX.md is over the 30-line injection cap (at least 31 lines",
+      "INDEX.md is over the 30-line injection cap or too large to inspect",
     );
     expect(await getNotice(storage, PROJECT, "indexOverCap")).toBeUndefined();
   });
@@ -557,7 +557,9 @@ describe("loadBrief", () => {
         "## Goal",
         "- ship the fix",
         "- npm build failed source:tool",
-        "  src/a.ts: SECRET-DETAIL-MARKER",
+        "  src/a.ts: detail before blank",
+        "  ",
+        "  SECRET-DETAIL-MARKER after a blank detail line",
       ].join("\n"),
     );
     const brief = await loadBrief(memoryRoot);
@@ -939,7 +941,7 @@ describe("statusLine", () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT, { indexLines: 30 });
     expect(line).toContain(
-      "INDEX.md is over the 30-line injection cap (at least 31 lines",
+      "INDEX.md is over the 30-line injection cap or too large to inspect",
     );
     expect(line).toContain("not attached");
     expect(line!.split("\n")).toHaveLength(1);
@@ -952,7 +954,7 @@ describe("statusLine", () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT);
     expect(line).toContain(
-      "INDEX.md is over its injection cap (at least 31 lines",
+      "INDEX.md is over its injection cap or too large to inspect",
     );
     expect(line).toContain("not attached");
   });
