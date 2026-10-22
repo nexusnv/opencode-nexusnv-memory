@@ -433,7 +433,10 @@ registrations.push(
   It also does not contain the `decisions.md` tail; that tail is recall-only plus `loadPriors()`
   (compaction) only (§5.6, §6).
 - **Known Errors are injected as one summary line each, never as bodies** (P16). The on-disk detail
-  block (up to 20 raw lines) is `memory_recall`-only. `loadBrief()` emits per error a
+  block (up to 20 raw lines) is `memory_recall`-only. A structural `## Known errors` heading must
+  start at column 0 (a first-line UTF-8 BOM is ignored); indented lookalikes inside captured detail
+  are data, and orphaned `source:tool` blocks outside the heading are still summarised, so a removed
+  or fake heading cannot promote raw detail into the trusted slice. `loadBrief()` emits per error a
   message-derived line `- <first line of event.error.message, ≤120 chars, newlines collapsed>`
   (tagged `source:tool` on disk; the `<cmd> exit <code>:` prefix is added only when a
   best-effort inspection of untyped `event.input` yields them, otherwise omitted — G4), bounded to

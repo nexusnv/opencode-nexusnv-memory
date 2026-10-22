@@ -80,8 +80,6 @@ describe("prompt notice budget", () => {
       `I typed ${PROMPT_NOTICES_MARKER}\n\n${block}`,
     );
     // Existing trailing whitespace is preserved, not normalized away.
-    expect(appendPromptNotices("hello  \n", block)).toBe(
-      `hello  \n\n${block}`,
-    );
+    expect(appendPromptNotices("hello  \n", block)).toBe(`hello  \n\n${block}`);
   });
 });

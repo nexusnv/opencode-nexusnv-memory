@@ -15,7 +15,10 @@ import {
   type CappedFileOptions,
 } from "./files.js";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
-import { KNOWN_ERRORS_HEADING, knownErrorBlockRanges } from "./known-errors.js";
+import {
+  findKnownErrorsHeading,
+  knownErrorBlockRanges,
+} from "./known-errors.js";
 import { redact } from "./redact.js";
 
 export const FORGETTABLE_FILES = [
@@ -145,9 +148,7 @@ export function planForget(
   const ranges =
     file === "activeContext.md" ? knownErrorBlockRanges(lines) : [];
   const knownErrorsHeading =
-    file === "activeContext.md"
-      ? lines.findIndex((line) => KNOWN_ERRORS_HEADING.test(line.trim()))
-      : -1;
+    file === "activeContext.md" ? findKnownErrorsHeading(lines) : -1;
   const selected = new Set<number>();
 
   const blockAt = (index: number) =>

@@ -27,7 +27,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import {
-  KNOWN_ERRORS_HEADING,
+  findKnownErrorsHeading,
   splitKnownErrorSections,
 } from "./known-errors.js";
 import { acquireWriteLock, type FileLockOptions } from "./lock.js";
@@ -874,9 +874,7 @@ async function writeRedactedCapped(
     allLines.length > 0 && allLines[allLines.length - 1] === ""
       ? allLines.slice(0, -1)
       : allLines;
-  const headingIdx = working.findIndex((l) =>
-    KNOWN_ERRORS_HEADING.test(l.trim()),
-  );
+  const headingIdx = findKnownErrorsHeading(working);
   if (headingIdx === -1) {
     throw new Error(
       `[memory] write rejected: activeContext.md has ${total} lines, cap is ${limit}; no Known-Errors block to rotate`,

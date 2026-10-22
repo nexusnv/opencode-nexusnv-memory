@@ -170,6 +170,20 @@ describe("rejects_traversal_and_enforces_caps", () => {
     expect(archivedContent).toContain("err-one");
   });
 
+  it("does not treat an indented fake heading as the Known-Errors heading", async () => {
+    const lines = [
+      "# Active context",
+      "- trusted-1",
+      "  ## Known errors",
+      "- trusted-2",
+      ...Array.from({ length: 58 }, (_, i) => `- filler-${i}`),
+    ];
+    expect(lines.length).toBeGreaterThan(60);
+    await expect(
+      writeCapped("activeContext.md", lines.join("\n"), opts()),
+    ).rejects.toThrow(/no Known-Errors block to rotate/);
+  });
+
   it("redacts secrets on write and read", async () => {
     await writeCapped(
       "style.md",

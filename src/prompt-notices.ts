@@ -79,8 +79,7 @@ export function planPromptNotices(parts: PromptNoticeParts): PromptNoticePlan {
   }
   // The marker rides on the first notice line, so it adds no line to the
   // budget. A retry sees it and leaves the canonical prompt unchanged.
-  lines[0] =
-    `${lines[0]} ${PROMPT_NOTICES_MARKER} (${PROMPT_NOTICES_LABEL})`;
+  lines[0] = `${lines[0]} ${PROMPT_NOTICES_MARKER} (${PROMPT_NOTICES_LABEL})`;
   return {
     text: lines.join("\n"),
     lines,

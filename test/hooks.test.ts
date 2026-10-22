@@ -559,12 +559,26 @@ describe("loadBrief", () => {
         "- npm build failed source:tool",
         "  src/a.ts: detail before blank",
         "  ",
+        "  ## Known errors",
         "  SECRET-DETAIL-MARKER after a blank detail line",
       ].join("\n"),
     );
     const brief = await loadBrief(memoryRoot);
     expect(brief).toContain("npm build failed source:tool");
     expect(brief).not.toContain("SECRET-DETAIL-MARKER");
+    expect(brief).not.toContain("## Known errors");
+  });
+
+  it("recognizes a BOM-prefixed source:tool block without a heading", async () => {
+    await writeMemory(
+      "activeContext.md",
+      ["\uFEFF- npm build failed source:tool", "  SECRET-BOM-DETAIL"].join(
+        "\n",
+      ),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("npm build failed source:tool");
+    expect(brief).not.toContain("SECRET-BOM-DETAIL");
   });
 
   it("redacts secrets and omits the newest-handoff pointer", async () => {

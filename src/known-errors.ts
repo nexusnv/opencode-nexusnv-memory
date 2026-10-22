@@ -6,16 +6,21 @@
  * `source:tool` summary while the loader no longer recognises the orphaned
  * detail, raw tool output is promoted into the trusted context slice.
  *
- * With a `## Known errors` heading, blocks are the column-0 bullets under it.
- * Without a heading (older/hand-edited files), generated `source:tool`
- * summary bullets are still recognised as blocks. Column-0 headings and
+ * Only a **column-0** heading is structural. Captured detail is stored
+ * two-space indented, so tool output containing `  ## Known errors` must not
+ * split the file or turn the lines before it into trusted context. A leading
+ * UTF-8 BOM on the first line is ignored for structural detection.
+ *
+ * Inside a `## Known errors` region every column-0 bullet starts a block.
+ * Outside it, only generated `source:tool` bullets do. Column-0 headings and
  * column-0 bullets end a block; whitespace-only lines (including the
- * two-space blank detail written by capture) stay inside it.
+ * two-space blank detail written by capture) stay inside a fallback block.
  */
-export const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-export const BULLET_START = /^-\s+/;
-export const SECTION_HEADING = /^#{1,6}\s+/;
+const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
+const BULLET_START = /^-\s+/;
+const SECTION_HEADING = /^#{1,6}\s+/;
 const TOOL_SUMMARY_LINE = /^-\s+.*\bsource:tool\s*$/i;
+const BOM = "\uFEFF";
 
 export interface KnownErrorBlock {
   /** First line index in the input array. */
@@ -26,9 +31,26 @@ export interface KnownErrorBlock {
 }
 
 export interface KnownErrorSections {
-  /** Content outside the Known-errors region, blank lines removed. */
+  /** Content outside every Known-errors block, blank lines removed. */
   readonly contextLines: string[];
   readonly blocks: readonly KnownErrorBlock[];
+}
+
+/** Structural view of one line: a first-line BOM is not indentation. */
+function structuralLine(allLines: readonly string[], index: number): string {
+  const line = allLines[index]!;
+  return index === 0 && line.startsWith(BOM) ? line.slice(BOM.length) : line;
+}
+
+/**
+ * The real `## Known errors` heading, or `-1`. Requires column 0 (a first
+ * line may carry a UTF-8 BOM); indented lookalikes inside captured detail
+ * are not headings.
+ */
+export function findKnownErrorsHeading(allLines: readonly string[]): number {
+  return allLines.findIndex((_, index) =>
+    KNOWN_ERRORS_HEADING.test(structuralLine(allLines, index)),
+  );
 }
 
 function blockFor(
@@ -44,96 +66,73 @@ function withoutBlankLines(lines: readonly string[]): string[] {
 }
 
 /**
- * Split `activeContext` lines into the trusted context slice and the
- * Known-errors blocks (summary plus every continuation/detail line).
- * Pure, never throws.
+ * Split `activeContext` lines into the trusted context slice and every
+ * Known-errors block (summary plus every continuation/detail line). Pure,
+ * never throws.
  */
 export function splitKnownErrorSections(
   allLines: readonly string[],
 ): KnownErrorSections {
-  const headingIdx = allLines.findIndex((line) =>
-    KNOWN_ERRORS_HEADING.test(line.trim()),
-  );
-  if (headingIdx === -1) {
-    return splitWithoutHeading(allLines);
-  }
-
-  const contextLines = allLines.slice(0, headingIdx) as string[];
-  const blocks: KnownErrorBlock[] = [];
-  let current: { start: number; end: number } | undefined;
-  let i = headingIdx + 1;
-  for (; i < allLines.length; i += 1) {
-    const line = allLines[i]!;
-    if (BULLET_START.test(line)) {
-      if (current) blocks.push(blockFor(allLines, current.start, current.end));
-      current = { start: i, end: i + 1 };
-      continue;
-    }
-    if (current) {
-      // Column-0 headings only: captured detail is stored two-space
-      // indented, so a trimmed test would let tool output containing
-      // `## Next` terminate the block and launder the remainder.
-      if (SECTION_HEADING.test(line)) {
-        blocks.push(blockFor(allLines, current.start, current.end));
-        current = undefined;
-        break;
-      }
-      current.end = i + 1;
-      continue;
-    }
-    // A new section before the first bullet ends the Known-errors region.
-    if (SECTION_HEADING.test(line)) break;
-  }
-  if (current) blocks.push(blockFor(allLines, current.start, current.end));
-  // A section after Known errors belongs to the context slice, not errors.
-  if (i < allLines.length) contextLines.push(...allLines.slice(i));
-  return {
-    contextLines: withoutBlankLines(contextLines),
-    blocks,
-  };
-}
-
-function splitWithoutHeading(allLines: readonly string[]): KnownErrorSections {
+  const hasKnownErrorsHeading = findKnownErrorsHeading(allLines) !== -1;
   const contextLines: string[] = [];
   const blocks: KnownErrorBlock[] = [];
-  let current: { start: number; end: number } | undefined;
+  let current: { start: number; end: number; inRegion: boolean } | undefined;
+  let inKnownErrorsRegion = false;
+
+  const closeBlock = (): void => {
+    if (!current) return;
+    blocks.push(blockFor(allLines, current.start, current.end));
+    current = undefined;
+  };
+
   for (let i = 0; i < allLines.length; i += 1) {
-    const line = allLines[i]!;
+    const line = structuralLine(allLines, i);
+    if (SECTION_HEADING.test(line)) {
+      closeBlock();
+      inKnownErrorsRegion = KNOWN_ERRORS_HEADING.test(line);
+      // The structural heading itself is never context; later sections are.
+      if (!inKnownErrorsRegion) contextLines.push(allLines[i]!);
+      continue;
+    }
+
     if (BULLET_START.test(line)) {
-      if (current) {
-        blocks.push(blockFor(allLines, current.start, current.end));
-        current = undefined;
-      }
-      if (TOOL_SUMMARY_LINE.test(line)) {
-        current = { start: i, end: i + 1 };
+      if (inKnownErrorsRegion || TOOL_SUMMARY_LINE.test(line)) {
+        closeBlock();
+        current = { start: i, end: i + 1, inRegion: inKnownErrorsRegion };
       } else {
-        contextLines.push(line);
+        closeBlock();
+        contextLines.push(allLines[i]!);
       }
       continue;
     }
+
     if (current) {
-      // Only a truly column-0 empty line ends the block. Capture writes a
-      // blank detail line as two spaces, which must remain block content.
-      if (line.length === 0 || line === "\r" || SECTION_HEADING.test(line)) {
-        blocks.push(blockFor(allLines, current.start, current.end));
-        current = undefined;
-        contextLines.push(line);
+      // A heading-region block keeps blank padding. A fallback source:tool
+      // block ends only at a truly empty column-0 line: capture writes a
+      // blank detail line as two spaces, which is still block content.
+      if (!current.inRegion && (line.length === 0 || line === "\r")) {
+        closeBlock();
+        contextLines.push(allLines[i]!);
       } else {
         current.end = i + 1;
       }
-    } else {
-      contextLines.push(line);
+      continue;
     }
+
+    // Text between the heading and its first bullet is not trusted context.
+    if (!inKnownErrorsRegion) contextLines.push(allLines[i]!);
   }
-  if (current) blocks.push(blockFor(allLines, current.start, current.end));
-  // No recognised block: preserve the input exactly (including blank lines).
-  if (blocks.length === 0) {
+  closeBlock();
+
+  // No recognised block: preserve the input exactly only when there was no
+  // structural heading. A heading with no bullet must still hide its region.
+  if (blocks.length === 0 && !hasKnownErrorsHeading) {
     return { contextLines: [...allLines], blocks: [] };
   }
   return { contextLines: withoutBlankLines(contextLines), blocks };
 }
 
-/** Block ranges for `allLines`, including the no-heading fallback. */
+/** Block ranges for `allLines`, including orphaned/no-heading blocks. */
 export function knownErrorBlockRanges(
   allLines: readonly string[],
 ): Array<{ readonly start: number; readonly end: number }> {
