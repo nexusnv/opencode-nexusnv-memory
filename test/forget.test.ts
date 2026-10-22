@@ -1,5 +1,12 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -322,6 +329,20 @@ describe("forget archive and application", () => {
     });
     expect(preview).toContain("would still have 13 lines (cap 10)");
     expect(preview).toContain("--confirm");
+  });
+
+  it("does not create the memory root for a dry-run", async () => {
+    const missing = join(tmpdir(), `memory-forget-missing-${Date.now()}`);
+    await expect(
+      previewForget({
+        ...opts(),
+        memoryRoot: missing,
+        file: "style.md",
+        selector: { kind: "all" },
+        reason: "probe",
+      }),
+    ).rejects.toThrow(/not found/);
+    await expect(access(missing)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not tell the user to remove stale pointers from a rewritten INDEX", () => {

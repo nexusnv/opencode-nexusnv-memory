@@ -647,14 +647,17 @@ export async function readContainedLines(
 }
 
 /**
- * Exact contained handoff directory listing. Aliases (including in-root
- * symlinks such as `handoffs -> .` or `handoffs/archive -> ..`) and off-root
- * targets yield an empty listing rather than filenames from the wrong dir.
- * A missing/non-directory path propagates ENOENT/ENOTDIR; every caller wraps.
+ * Exact contained handoff directory listing. By default aliases (including
+ * in-root symlinks such as `handoffs -> .` or `handoffs/archive -> ..`) and
+ * off-root targets yield an empty listing rather than filenames from the
+ * wrong dir. `strict` mode throws instead, so GC never mistakes an alias for
+ * an empty directory. A missing/non-directory path propagates ENOENT/ENOTDIR;
+ * every caller wraps.
  */
 export async function readHandoffDirectory(
   memoryRoot: string | undefined,
   subdir: "root" | "archive",
+  options?: { readonly strict?: boolean },
 ): Promise<string[]> {
   const root = resolveMemoryRoot(memoryRoot);
   const relativeDir =
@@ -662,10 +665,21 @@ export async function readHandoffDirectory(
   const directory = join(root, relativeDir);
   const realRoot = await realpath(root);
   const realDir = await realpath(directory);
-  if (realDir !== join(realRoot, relativeDir)) return [];
-  return (await readdir(realDir)).filter((name) =>
-    /^[A-Za-z0-9._-]+\.md$/.test(name),
-  );
+  if (realDir !== join(realRoot, relativeDir)) {
+    if (options?.strict) {
+      throw new Error(
+        `[memory] rejected handoff directory alias or escape: ${relativeDir}`,
+      );
+    }
+    return [];
+  }
+  // Regular files only: a directory or symlink named like a handoff must
+  // never enter a listing that feeds GC deletion.
+  return (await readdir(realDir, { withFileTypes: true }))
+    .filter(
+      (entry) => entry.isFile() && /^[A-Za-z0-9._-]+\.md$/.test(entry.name),
+    )
+    .map((entry) => entry.name);
 }
 
 /** Reject escaping ancestors and handoff/archive symlink aliases. */
@@ -827,6 +841,19 @@ async function readRawForMutation(
 }
 
 /**
+ * Contained raw read without the write lock or any directory creation.
+ * Read-only callers (forget dry-run) must not create `.opencode/memory` or
+ * block behind a writer; apply paths re-read under the lock.
+ */
+export async function readRawContained(
+  file: string,
+  opts?: Pick<CappedFileOptions, "memoryRoot">,
+): Promise<string> {
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  return readRawForMutation(file, root, "throw");
+}
+
+/**
  * Inner write body: assumes the caller already holds `withFileWriteLock` and
  * passes already-redacted text. Shared by `writeCapped` (overwrite) and
  * `updateCapped` (read-modify-write) so caps, rotation, and archive routing
@@ -980,6 +1007,8 @@ export interface CappedTransaction {
   write(file: string, text: string): Promise<void>;
   /** Exclusive archive create without a line cap (archive is recall-only). */
   writeArchive(file: string, text: string): Promise<"created" | "exists">;
+  /** Contained preflight for a root handoff (no deletion). */
+  assertHandoffRemovable(file: string): Promise<"present" | "missing">;
   /** Contained delete for a root handoff; archive/root files are rejected. */
   removeHandoff(file: string): Promise<"deleted" | "missing">;
 }
@@ -1032,6 +1061,42 @@ export async function withCappedTransaction<T>(
             resolveUnderRoot(root, file),
             redact(text),
           );
+        },
+        assertHandoffRemovable: async (file) => {
+          assertOpen();
+          if (
+            !HANDOFF_PATTERN.test(file) ||
+            file.startsWith("handoffs/archive/")
+          ) {
+            throw new Error(
+              `[memory] remove rejected: root handoffs only: ${file}`,
+            );
+          }
+          assertAllowedPath(file);
+          const abs = resolveUnderRoot(root, file);
+          try {
+            await assertContainedAncestors(root, dirname(abs));
+            await assertContainedDirectory(root, dirname(abs));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+              return "missing";
+            }
+            throw error;
+          }
+          try {
+            const info = await lstat(abs);
+            if (!info.isFile()) {
+              throw new Error(
+                `[memory] remove rejected: not a regular handoff file: ${file}`,
+              );
+            }
+            return "present";
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+              return "missing";
+            }
+            throw error;
+          }
         },
         removeHandoff: async (file) => {
           assertOpen();

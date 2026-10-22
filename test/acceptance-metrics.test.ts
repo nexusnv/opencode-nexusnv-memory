@@ -648,6 +648,8 @@ async function driveUsageRun(
     ]);
     expect([...harnessA.commands.keys()]).toEqual([
       "memory-review",
+      "memory-forget",
+      "memory-gc",
       "memory-metrics",
       "memory-status",
     ]);

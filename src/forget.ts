@@ -11,6 +11,7 @@ import {
   countLines,
   getCapForFile,
   knownErrorBlockRanges,
+  readRawContained,
   withCappedTransaction,
   type CappedFileOptions,
 } from "./files.js";
@@ -336,13 +337,11 @@ function transactionOptions(input: ForgetInput): CappedFileOptions {
 
 export async function previewForget(input: ForgetInput): Promise<string> {
   assertForgettable(input.file);
-  const plan = await withCappedTransaction(
-    transactionOptions(input),
-    async (tx) => {
-      const current = await tx.read(input.file);
-      return planForget(input.file, current, input.selector);
-    },
-  );
+  // Read-only: do not take the write lock or create the memory root.
+  const current = await readRawContained(input.file, {
+    memoryRoot: input.memoryRoot,
+  });
+  const plan = planForget(input.file, current, input.selector);
   let capWarning: string | undefined;
   try {
     assertPostForgetCap(input, plan.nextText);

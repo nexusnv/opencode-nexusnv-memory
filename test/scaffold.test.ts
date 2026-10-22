@@ -212,9 +212,11 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     });
 
     // Command editor received ALL plugin commands, in setup order
-    // (memory-review, memory-metrics, memory-status).
+    // (memory-review, memory-forget, memory-gc, memory-metrics, memory-status).
     expect([...commands.keys()]).toEqual([
       "memory-review",
+      "memory-forget",
+      "memory-gc",
       "memory-metrics",
       "memory-status",
     ]);

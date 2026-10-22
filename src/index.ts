@@ -9,9 +9,15 @@ import {
   setNotice,
   snapshotIfDue,
   startEventLoop,
-  type LedgerStorage,
   type VcsPort,
 } from "./capture.js";
+import {
+  asLedger,
+  logDiagnostic,
+  MEMORY_DIR,
+  projectIDOf,
+  projectRootOf,
+} from "./command-context.js";
 import {
   indexLineCount,
   loadBrief,
@@ -33,6 +39,8 @@ import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
 import { TRUNCATION_NOTICE_LINE, writeNewCapped } from "./files.js";
 import { registerMemoryTools } from "./tools.js";
+import { registerMemoryForget } from "./forget-command.js";
+import { registerMemoryGc } from "./gc-command.js";
 import {
   registerStatusCommand,
   registerStatusTool,
@@ -55,9 +63,6 @@ import {
 interface Registration {
   readonly dispose: () => Promise<void>;
 }
-
-/** Fixed memory root, relative to the project (spec ADR-0006; not configurable). */
-const MEMORY_DIR = ".opencode/memory";
 
 /** Once-per-process install nudge state (AGENTS.md protocol block missing). */
 let agentsProtocolNudgeLogged = false;
@@ -94,43 +99,6 @@ async function scaffoldMemoryDir(projectRoot: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** Best-effort diagnostic log; logging must never break a hook. */
-function logDiagnostic(error: unknown): void {
-  try {
-    console.warn("[memory] hook diagnostic:", error);
-  } catch {
-    // Logging must never break plugin load or a hook.
-  }
-}
-
-/**
- * Adapt the plugin-scoped `ctx.storage` (narrow JSON value type) to the
- * ledger's structural port. `ctx.storage` is the durable store; nothing is
- * cached in-memory alone.
- */
-function asLedger(storage: Plugin.Context["storage"]): LedgerStorage {
-  return {
-    get: (key) => storage.get(key),
-    set: (key, value) =>
-      storage.set(
-        key,
-        value as Parameters<Plugin.Context["storage"]["set"]>[1],
-      ),
-    remove: (key) => storage.remove(key),
-    scan: (options) => storage.scan(options),
-  };
-}
-
-function projectRootOf(ctx: Plugin.Context): string {
-  return (
-    ctx.location.project?.canonical ?? ctx.location.directory
-  ).replace(/\/+$/, "");
-}
-
-function projectIDOf(ctx: Plugin.Context): string {
-  return ctx.location.project?.id ?? ctx.location.directory;
 }
 
 /**
@@ -431,6 +399,12 @@ export default Plugin.define({
     // §5.12 exception is the count-only `review.invoked` metrics bump
     // (ADR-0008: diagnostics, never content, never a memory write).
     registrations.push(await registerMemoryReview(ctx));
+
+    // /memory-forget and /memory-gc: user-invoked lifecycle commands.
+    // Dry-run by default; --confirm applies per-unit (forget) or one batch
+    // (GC) approval. Neither is exposed as a model-facing tool.
+    registrations.push(await registerMemoryForget(ctx));
+    registrations.push(await registerMemoryGc(ctx));
 
     // /memory-metrics command: local-only count dashboard — never writes a
     // memory file (wipes counter keys only on `reset confirm`; bare `reset`

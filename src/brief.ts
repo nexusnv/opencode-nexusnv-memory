@@ -359,6 +359,33 @@ export interface HandoffListing {
 }
 
 /**
+ * Names-only listing that fails closed: a missing/unreadable directory is
+ * empty, but any other error propagates. GC uses this so it can never claim
+ * "nothing to delete" when it could not read `handoffs/`.
+ */
+export async function listHandoffsStrict(
+  memoryRoot: string,
+  subdir: "root" | "archive",
+  limit = 20,
+): Promise<HandoffListing> {
+  let sorted: string[];
+  try {
+    sorted = sortedHandoffNames(
+      await readHandoffDirectory(memoryRoot, subdir, { strict: true }),
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { names: [], total: 0 };
+    }
+    throw error;
+  }
+  const total = sorted.length;
+  const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
+  return { names: sorted.reverse().slice(0, cap), total };
+}
+
+/**
  * Names-only listing for `memory_recall` (never content, never throws):
  * newest first, bounded to `limit`. A missing/unreadable directory or a
  * symlinked/aliased handoff directory resolves to an empty listing.
@@ -369,12 +396,7 @@ export async function listHandoffs(
   limit = 20,
 ): Promise<HandoffListing> {
   try {
-    const sorted = sortedHandoffNames(
-      await readHandoffDirectory(memoryRoot, subdir),
-    );
-    const total = sorted.length;
-    const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
-    return { names: sorted.reverse().slice(0, cap), total };
+    return await listHandoffsStrict(memoryRoot, subdir, limit);
   } catch {
     return { names: [], total: 0 };
   }
@@ -461,8 +483,7 @@ export async function loadPriors(
 ): Promise<string> {
   try {
     const root = resolveMemoryRoot(memoryRoot);
-    const fileLines =
-      options?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
+    const fileLines = options?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
     const cap = Number.isInteger(fileLines) && fileLines > 0 ? fileLines : 60;
     let active = "";
     try {
@@ -507,9 +528,7 @@ export async function loadPriors(
     const pointer = await newestHandoffLine(root);
     if (pointer !== undefined) lines.push(pointer);
     if (lines.length <= 2) return "";
-    return redact(
-      truncateLinesWithNotice(lines, cap * 2 + 5).join("\n"),
-    );
+    return redact(truncateLinesWithNotice(lines, cap * 2 + 5).join("\n"));
   } catch {
     return "";
   }
