@@ -557,22 +557,26 @@ export async function loadPriors(
     // treat priors as trusted instructions.
     lines.push(UNTRUSTED_LABEL);
     if (activeLines.length > 0) {
-      // The loader-generated truncation notice is not content: a truncated
-      // fresh scaffold injects no section, and the notice rides after real
-      // content only.
       lines.push("## active context");
       lines.push(...activeLines);
-      if (activeTruncated) {
-        lines.push(
-          `[truncated: showing first ${activeLines.length} of at least ${activeSourceLines} lines]`,
-        );
-      }
     }
     if (activeSummaries.length > 0) {
       // Captured detail is recall-only: the compaction payload carries the
       // message-derived summary lines, never the raw tool output.
       lines.push("## known errors (summaries)");
       lines.push(...activeSummaries);
+    }
+    if (
+      activeTruncated &&
+      (activeLines.length > 0 || activeSummaries.length > 0)
+    ) {
+      // The loader-generated truncation notice is not content: a truncated
+      // fresh scaffold injects no section, and the notice rides after real
+      // content only. It is independent of the context slice: a window that
+      // holds only Known-Errors blocks still shows real content.
+      lines.push(
+        `[truncated: showing first ${cap} of at least ${activeSourceLines} lines]`,
+      );
     }
     if (tail.trim().length > 0) {
       lines.push("## decisions (tail)");
@@ -581,7 +585,9 @@ export async function loadPriors(
     const pointer = await newestHandoffLine(root);
     if (pointer !== undefined) lines.push(pointer);
     if (lines.length <= 2) return "";
-    return redact(truncateLinesWithNotice(lines, cap * 2 + 5).join("\n"));
+    // The payload carries the context slice, the Known-Errors summary
+    // section (≤6 lines), the decisions tail and the pointer.
+    return redact(truncateLinesWithNotice(lines, cap * 2 + 11).join("\n"));
   } catch {
     return "";
   }

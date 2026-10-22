@@ -291,22 +291,6 @@ function truncationNotice(
 export const TRUNCATION_NOTICE_LINE =
   /^\[truncated: showing (?:first|last) \d+ of (?:at least )?\d+ lines\]$/;
 
-/**
- * Split `readCapped` output into its body and the trailing loader-generated
- * truncation notice (if any). The notice never comes from user content.
- * Pure, never throws.
- */
-export function splitTruncationNotice(text: string): {
-  readonly body: string;
-  readonly notice?: string;
-} {
-  const gap = text.lastIndexOf("\n\n");
-  if (gap === -1) return { body: text };
-  const candidate = text.slice(gap + 2).trim();
-  if (!TRUNCATION_NOTICE_LINE.test(candidate)) return { body: text };
-  return { body: text.slice(0, gap), notice: candidate };
-}
-
 /** Archive filename safe for the handoff allowlist (no colons). */
 function rotatedArchiveName(): string {
   const stamp = new Date()

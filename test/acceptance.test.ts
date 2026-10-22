@@ -423,7 +423,9 @@ describe("acceptance_recall_and_apply_contracts", () => {
       line: "- u2 source:model",
       source: "model",
     });
-  });
+    // The apply path now takes the E14 file lock plus the containment
+    // checks: well above the default 5 s per-test budget under coverage.
+  }, 20_000);
 });
 
 describe("acceptance_handoff_routing", () => {

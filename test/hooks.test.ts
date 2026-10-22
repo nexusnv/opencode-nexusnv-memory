@@ -1044,7 +1044,7 @@ describe("loadPriors", () => {
     expect(priors).toContain("TAIL-MARKER-UNIQUE-12345");
     expect(priors).toContain("handoffs/2026-10-15-120000-cccccc.md");
     expect(priors).not.toContain("sk-test-secret-value-1234567890");
-    expect(priors.split("\n").length).toBeLessThanOrEqual(2 * 60 + 5);
+    expect(priors.split("\n").length).toBeLessThanOrEqual(2 * 60 + 11);
   });
 
   it("carries error summaries, never raw captured detail", async () => {
@@ -1063,6 +1063,17 @@ describe("loadPriors", () => {
     expect(priors).toContain("ship the memory plugin");
     expect(priors).toContain("npm build failed");
     expect(priors).not.toContain("RAW-DETAIL-ONLY-RECALLABLE");
+  });
+
+  it("keeps the truncation notice when the window holds only error blocks", async () => {
+    const lines: string[] = ["# Active context", "## Known errors"];
+    for (let i = 0; i < 40; i += 1) {
+      lines.push(`- error ${i} source:tool`, `  detail ${i}`);
+    }
+    await writeMemory("activeContext.md", lines.join("\n") + "\n");
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).toContain("## known errors (summaries)");
+    expect(priors).toContain("[truncated:");
   });
 
   it("never throws", async () => {

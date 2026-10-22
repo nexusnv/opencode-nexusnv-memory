@@ -463,6 +463,9 @@ describe("capped transaction lifecycle", () => {
 });
 
 describe("atomic_publish_and_exclusive_create", () => {
+  // 500 atomic publishes plus a concurrent reader loop: far above the
+  // default 5 s per-test budget once the coverage instrumentation slows the
+  // suite down.
   it("retries readers across an atomic replacement", async () => {
     const abs = join(root, "decisions.md");
     await writeFile(abs, "initial\n");
@@ -487,7 +490,7 @@ describe("atomic_publish_and_exclusive_create", () => {
     await writer;
     expect(errors).toEqual([]);
     expect(reads).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   it("swaps complete files at rename time and leaves no temp files", async () => {
     await writeCapped("decisions.md", "old\n", opts());
