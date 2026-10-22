@@ -436,7 +436,10 @@ registrations.push(
   block (up to 20 raw lines) is `memory_recall`-only. A structural `## Known errors` heading must
   start at column 0 (a first-line UTF-8 BOM is ignored); indented lookalikes inside captured detail
   are data, and orphaned `source:tool` blocks outside the heading are still summarised, so a removed
-  or fake heading cannot promote raw detail into the trusted slice. `loadBrief()` emits per error a
+  or fake heading cannot promote raw detail into the trusted slice. The brief and the compaction
+  priors parse that structure from the **raw** text and redact only the emitted content (redaction
+  preserves line positions), so a `<private>` span cannot collapse a captured block into trusted
+  context either. `loadBrief()` emits per error a
   message-derived line `- <first line of event.error.message, ≤120 chars, newlines collapsed>`
   (tagged `source:tool` on disk; the `<cmd> exit <code>:` prefix is added only when a
   best-effort inspection of untyped `event.input` yields them, otherwise omitted — G4), bounded to
@@ -671,7 +674,9 @@ registrations.push(
   async and wrapped so it **never throws** — a failing compaction hook must not block the summary.
 - `loadPriors()` = capped `activeContext` slice + `decisions.md` injectable tail (≤60 lines) + newest-handoff
   pointer, redacted, truncate-with-notice. It is the only auto-inject path for the decisions tail;
-  the per-model-call brief never carries it (§5.2, §6).
+  the per-model-call brief never carries it (§5.2, §6). The `activeContext` slice contributes the
+  context section plus **Known-Errors summary lines only** — captured detail stays recall-only
+  here too (ADR-0007).
 - Setting `event.result` skips the native summary — never do it in the default path (P3).
 - Never change model / threshold / trigger; never synthesise continuation.
 - Pre-compaction state is already on disk, so a bad summary loses nothing durable.

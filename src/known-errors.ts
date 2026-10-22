@@ -33,6 +33,12 @@ export interface KnownErrorBlock {
 export interface KnownErrorSections {
   /** Content outside every Known-errors block, blank lines removed. */
   readonly contextLines: string[];
+  /**
+   * Index of every context line in the input array. Callers that redact the
+   * content separately (keeping line positions) map their redacted lines
+   * through these indexes instead of re-parsing the redacted text.
+   */
+  readonly contextIndexes: number[];
   readonly blocks: readonly KnownErrorBlock[];
 }
 
@@ -61,10 +67,6 @@ function blockFor(
   return { start, end, lines: allLines.slice(start, end) };
 }
 
-function withoutBlankLines(lines: readonly string[]): string[] {
-  return lines.filter((line) => line.trim().length > 0);
-}
-
 /**
  * Split `activeContext` lines into the trusted context slice and every
  * Known-errors block (summary plus every continuation/detail line). Pure,
@@ -75,9 +77,15 @@ export function splitKnownErrorSections(
 ): KnownErrorSections {
   const hasKnownErrorsHeading = findKnownErrorsHeading(allLines) !== -1;
   const contextLines: string[] = [];
+  const contextIndexes: number[] = [];
   const blocks: KnownErrorBlock[] = [];
   let current: { start: number; end: number; inRegion: boolean } | undefined;
   let inKnownErrorsRegion = false;
+
+  const pushContext = (index: number): void => {
+    contextLines.push(allLines[index]!);
+    contextIndexes.push(index);
+  };
 
   const closeBlock = (): void => {
     if (!current) return;
@@ -91,7 +99,7 @@ export function splitKnownErrorSections(
       closeBlock();
       inKnownErrorsRegion = KNOWN_ERRORS_HEADING.test(line);
       // The structural heading itself is never context; later sections are.
-      if (!inKnownErrorsRegion) contextLines.push(allLines[i]!);
+      if (!inKnownErrorsRegion) pushContext(i);
       continue;
     }
 
@@ -101,7 +109,7 @@ export function splitKnownErrorSections(
         current = { start: i, end: i + 1, inRegion: inKnownErrorsRegion };
       } else {
         closeBlock();
-        contextLines.push(allLines[i]!);
+        pushContext(i);
       }
       continue;
     }
@@ -112,7 +120,7 @@ export function splitKnownErrorSections(
       // blank detail line as two spaces, which is still block content.
       if (!current.inRegion && (line.length === 0 || line === "\r")) {
         closeBlock();
-        contextLines.push(allLines[i]!);
+        pushContext(i);
       } else {
         current.end = i + 1;
       }
@@ -120,16 +128,27 @@ export function splitKnownErrorSections(
     }
 
     // Text between the heading and its first bullet is not trusted context.
-    if (!inKnownErrorsRegion) contextLines.push(allLines[i]!);
+    if (!inKnownErrorsRegion) pushContext(i);
   }
   closeBlock();
 
   // No recognised block: preserve the input exactly only when there was no
   // structural heading. A heading with no bullet must still hide its region.
   if (blocks.length === 0 && !hasKnownErrorsHeading) {
-    return { contextLines: [...allLines], blocks: [] };
+    return {
+      contextLines: [...allLines],
+      contextIndexes: allLines.map((_, index) => index),
+      blocks: [],
+    };
   }
-  return { contextLines: withoutBlankLines(contextLines), blocks };
+  const keptLines: string[] = [];
+  const keptIndexes: number[] = [];
+  for (let i = 0; i < contextLines.length; i += 1) {
+    if (contextLines[i]!.trim().length === 0) continue;
+    keptLines.push(contextLines[i]!);
+    keptIndexes.push(contextIndexes[i]!);
+  }
+  return { contextLines: keptLines, contextIndexes: keptIndexes, blocks };
 }
 
 /** Block ranges for `allLines`, including orphaned/no-heading blocks. */

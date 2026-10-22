@@ -581,6 +581,21 @@ describe("loadBrief", () => {
     expect(brief).not.toContain("SECRET-BOM-DETAIL");
   });
 
+  it("does not promote detail when a private span covers the summary", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "<private>",
+        "- npm build failed source:tool",
+        "</private>",
+        "  SECRET-DETAIL-AFTER-SPAN",
+      ].join("\n"),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).not.toContain("SECRET-DETAIL-AFTER-SPAN");
+  });
+
   it("redacts secrets and omits the newest-handoff pointer", async () => {
     await writeMemory("activeContext.md", activeContextWithErrors(1));
     await writeMemory("handoffs/2026-10-14-100000-aaaaaa.md", "old");
@@ -1030,6 +1045,24 @@ describe("loadPriors", () => {
     expect(priors).toContain("handoffs/2026-10-15-120000-cccccc.md");
     expect(priors).not.toContain("sk-test-secret-value-1234567890");
     expect(priors.split("\n").length).toBeLessThanOrEqual(2 * 60 + 5);
+  });
+
+  it("carries error summaries, never raw captured detail", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "## Goal",
+        "- ship the memory plugin",
+        "## Known errors",
+        "- npm build failed source:tool",
+        "  RAW-DETAIL-ONLY-RECALLABLE",
+      ].join("\n"),
+    );
+    const priors = await loadPriors(memoryRoot);
+    expect(priors).toContain("ship the memory plugin");
+    expect(priors).toContain("npm build failed");
+    expect(priors).not.toContain("RAW-DETAIL-ONLY-RECALLABLE");
   });
 
   it("never throws", async () => {

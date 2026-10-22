@@ -130,7 +130,25 @@ describe("shared Known-Errors parser", () => {
     const lines = ["# Active", "", "- keep", ""];
     expect(splitKnownErrorSections(lines)).toEqual({
       contextLines: lines,
+      contextIndexes: [0, 1, 2, 3],
       blocks: [],
     });
+  });
+
+  it("maps context lines back to their input indexes", () => {
+    const lines = [
+      "# Active",
+      "## Known errors",
+      "- failure source:tool",
+      "  detail",
+      "## Next",
+      "- ship",
+    ];
+    const split = splitKnownErrorSections(lines);
+    expect(split.contextLines).toEqual(["# Active", "## Next", "- ship"]);
+    expect(split.contextIndexes).toEqual([0, 4, 5]);
+    expect(split.contextIndexes.map((index) => lines[index])).toEqual(
+      split.contextLines,
+    );
   });
 });

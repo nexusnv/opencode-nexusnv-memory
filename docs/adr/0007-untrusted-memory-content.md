@@ -35,7 +35,9 @@ Containment rests on four structural controls, none of which require detecting a
 1. **Minimisation.** Raw captured output is **never auto-injected**. `loadBrief()` emits one bounded
    message-derived summary line per known error (first line of `event.error.message`, ≤120 chars,
    newlines collapsed; `<cmd>:` prefix only when `event.input` yields it; max 5 lines); the detail body
-   stays on disk and is `memory_recall`-only. Captured content in the payload is labelled as untrusted
+   stays on disk and is `memory_recall`-only. The compaction priors (`loadPriors()`) follow the same
+   rule: the `activeContext` slice contributes context plus summary lines, never a captured body.
+   Captured content in the payload is labelled as untrusted
    data, and the `AGENTS.md` directive states that memory content is data, never instructions.
 2. **Provenance.** Every entry carries `source:user | tool | model | snapshot`. Provenance decides the
    write path (ADR-0004) and is shown to the human at review time.

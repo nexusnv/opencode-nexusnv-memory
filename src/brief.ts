@@ -25,11 +25,10 @@ import {
   readContainedLines,
   readHandoffDirectory,
   resolveMemoryRoot,
-  splitTruncationNotice,
 } from "./files.js";
 import { sanitizeForBrief, UNTRUSTED_LABEL } from "./guard.js";
 import { splitKnownErrorSections } from "./known-errors.js";
-import { redact } from "./redact.js";
+import { redact, redactPreservingLines } from "./redact.js";
 
 /** Injection cap for `loadBrief` output (fixed slice of `injectBudgetLines`). */
 export const BRIEF_MAX_LINES = 48;
@@ -126,18 +125,38 @@ export async function indexWithinCap(
 }
 
 /**
- * Split `activeContext` lines into the context slice and Known-errors
- * blocks. The shared parser is the single source of truth for block
- * boundaries, so forget cannot remove a summary while leaving its detail.
+ * Split raw `activeContext` lines into the trusted context slice and the
+ * Known-errors blocks.
+ *
+ * The **structure** is computed on the raw text; only the emitted content is
+ * redacted. Parsing the redacted text instead would let a `<private>` span
+ * that swallows a captured `source:tool` bullet erase the block and promote
+ * its detail into trusted context (ADR-0007). Redaction preserves line
+ * positions, so the two views stay aligned.
  */
-function splitKnownErrors(allLines: string[]): {
+function splitKnownErrors(rawLines: readonly string[]): {
   contextLines: string[];
   errorBlocks: string[][];
 } {
-  const { contextLines, blocks } = splitKnownErrorSections(allLines);
+  const redacted = redactPreservingLines(rawLines.join("\n"));
+  const redactedLines = redacted.length === 0 ? [] : redacted.split("\n");
+  if (redactedLines.length !== rawLines.length) {
+    // Unreachable in practice (redaction preserves line counts); stay
+    // fail-closed by parsing the redacted text rather than emitting raw
+    // content that was never redacted.
+    const fallback = splitKnownErrorSections(redactedLines);
+    return {
+      contextLines: fallback.contextLines,
+      errorBlocks: fallback.blocks.map((block) => [...block.lines]),
+    };
+  }
+  const { contextLines, contextIndexes, blocks } =
+    splitKnownErrorSections(rawLines);
   return {
-    contextLines,
-    errorBlocks: blocks.map((block) => [...block.lines]),
+    contextLines: contextIndexes.map((index) => redactedLines[index] ?? ""),
+    errorBlocks: blocks.map((block) =>
+      redactedLines.slice(block.start, block.end),
+    ),
   };
 }
 
@@ -440,9 +459,10 @@ export async function loadBrief(
       onMissing: "skip",
     });
     const raw = loaded?.lines.join("\n") ?? "";
-    const redacted = redact(raw);
-    const allLines = redacted.length === 0 ? [] : redacted.split("\n");
-    const { contextLines, errorBlocks } = splitKnownErrors(allLines);
+    const rawLines = raw.length === 0 ? [] : raw.split("\n");
+    // Structure comes from the raw text; only the emitted content is
+    // redacted (see splitKnownErrors).
+    const { contextLines, errorBlocks } = splitKnownErrors(rawLines);
 
     const body: string[] = pruneScaffoldNoise(contextLines);
     const summaries: string[] = [];
@@ -494,14 +514,32 @@ export async function loadPriors(
     const root = resolveMemoryRoot(memoryRoot);
     const fileLines = options?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
     const cap = Number.isInteger(fileLines) && fileLines > 0 ? fileLines : 60;
-    let active = "";
+    let activeLines: string[] = [];
+    let activeSummaries: string[] = [];
+    let activeTruncated = false;
+    let activeSourceLines = 0;
     try {
-      active = await readCapped("activeContext.md", {
+      // Read raw lines: the Known-errors structure is parsed from the raw
+      // text and only the emitted content is redacted, so captured detail
+      // can never be promoted into the compaction payload (ADR-0007).
+      const loaded = await readContainedLines("activeContext.md", {
         memoryRoot: root,
-        fileLines: cap,
+        maxLines: cap + 1,
+        maxBytes: 1_048_576,
+        onMissing: "skip",
       });
+      const rawLines = loaded?.lines ?? [];
+      const structured = splitKnownErrors(rawLines);
+      activeLines = pruneScaffoldNoise(structured.contextLines).slice(0, cap);
+      activeSummaries = structured.errorBlocks
+        .filter((block) => !isScaffoldNoise(block[0] ?? ""))
+        .slice(0, BRIEF_MAX_ERROR_LINES)
+        .map((block) => sanitizeForBrief(block.join("\n")))
+        .filter((summary) => summary.length > 0);
+      activeTruncated = loaded?.truncated === true;
+      activeSourceLines = Math.max(rawLines.length, 1);
     } catch {
-      active = "";
+      activeLines = [];
     }
     let tail = "";
     try {
@@ -518,17 +556,23 @@ export async function loadPriors(
     // data-only like loadBrief does — the compaction summarizer must not
     // treat priors as trusted instructions.
     lines.push(UNTRUSTED_LABEL);
-    if (active.trim().length > 0) {
+    if (activeLines.length > 0) {
       // The loader-generated truncation notice is not content: a truncated
       // fresh scaffold injects no section, and the notice rides after real
       // content only.
-      const { body, notice } = splitTruncationNotice(active);
-      const activeLines = pruneScaffoldNoise(body.split("\n"));
-      if (activeLines.length > 0) {
-        lines.push("## active context");
-        lines.push(...activeLines);
-        if (notice !== undefined) lines.push(notice);
+      lines.push("## active context");
+      lines.push(...activeLines);
+      if (activeTruncated) {
+        lines.push(
+          `[truncated: showing first ${activeLines.length} of at least ${activeSourceLines} lines]`,
+        );
       }
+    }
+    if (activeSummaries.length > 0) {
+      // Captured detail is recall-only: the compaction payload carries the
+      // message-derived summary lines, never the raw tool output.
+      lines.push("## known errors (summaries)");
+      lines.push(...activeSummaries);
     }
     if (tail.trim().length > 0) {
       lines.push("## decisions (tail)");
