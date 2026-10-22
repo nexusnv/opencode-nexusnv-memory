@@ -16,3 +16,7 @@ Long-past "why" (e.g. enum naming from project inception) is invisible in curren
 
 - Positive: inception reasoning survives and is findable in two capped reads; overhead is bounded (static ~13 lines for the directive + tool description, plus a per-model-call payload only when content exists); no embeddings, no classifier, no bloat.
 - Negative: recall depends on INDEX accuracy and symbol naming; accepted — enforced by budgets and the review gate, both cheap and inspectable.
+
+## Revision 2026-10-20 — US-22 implementation
+
+ADR-0009 implements explicit, user-invoked logical forget plus opt-in root-handoff GC. Reachability remains the retention model; there is still no automatic TTL/decay. Forgotten lines are copied to `handoffs/archive/` before removal, archive stays recall-only, `decisions.md` stays append-only, and handoffs stay immutable. Handoff GC deletes only root snapshots and never archive. Git history remains the restore path.
