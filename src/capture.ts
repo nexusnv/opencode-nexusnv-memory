@@ -26,6 +26,7 @@ import {
   type CappedFileOptions,
 } from "./files.js";
 import { flagInjection } from "./guard.js";
+import { findKnownErrorsHeading } from "./known-errors.js";
 import type { MetricsBump } from "./metrics.js";
 import { redact } from "./redact.js";
 
@@ -933,7 +934,9 @@ export async function captureFailure(
             const withNewline = current.endsWith("\n")
               ? current
               : `${current}\n`;
-            return /^##\s+known errors\s*$/im.test(current)
+            // Column-0 heading only (BOM-aware), so a BOM-prefixed file
+            // does not get a second `## Known errors` section.
+            return findKnownErrorsHeading(current.split("\n")) !== -1
               ? `${withNewline}${entry}`
               : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
           },

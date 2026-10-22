@@ -244,6 +244,23 @@ describe("captureFailure", () => {
     expect(await getPending(storage, PROJECT)).toBe(1);
   });
 
+  it("does not add a second Known-Errors heading to a BOM-prefixed file", async () => {
+    await writeFile(
+      join(root, "activeContext.md"),
+      "\uFEFF## Known errors\n- earlier failure source:tool\n",
+    );
+    const outcome = await captureFailure(
+      { status: "error", error: { message: "bom prefixed failure" } },
+      storage,
+      PROJECT,
+      root,
+    );
+    expect(outcome.reason).toBe("captured");
+    const active = await readActive();
+    expect(active.match(/## Known errors/g)?.length).toBe(1);
+    expect(active).toContain("bom prefixed failure");
+  });
+
   it("adds a <cmd>: prefix only from event.input and caps the summary", async () => {
     const long = `first ${"x".repeat(200)}\nsecond line`;
     await captureFailure(

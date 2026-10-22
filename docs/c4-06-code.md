@@ -10,7 +10,7 @@ Production package (`src/`) and local drop-in (`.opencode/plugins/memory/`) shar
 src/ (or .opencode/plugins/memory/)
 └── index.ts        # Plugin.define({ id: "memory", setup }) — wiring only
     ├── brief.ts     # loadBrief, loadPriors (capped; Known-Errors summaries)
-    ├── known-errors.ts # shared heading/no-heading block parser (brief + forget)
+    ├── known-errors.ts # shared heading/no-heading block parser (brief + forget + rotation)
     ├── hints.ts     # matchIndex + matchRememberNearMiss (one hint slot, once-per-prompt throttle)
     ├── prompt-notices.ts # prompt-tail budget/order/marker (pointer → status → hint)
     ├── status.ts    # statusLine (over-cap/oversize INDEX + rotation + skipped-capture + forgotten + review-due)
