@@ -108,6 +108,19 @@ describe("planForget", () => {
     expect(plan.nextText).not.toContain("SECRET-DETAIL");
   });
 
+  it("rejects removing the Known-Errors heading without its blocks", () => {
+    const current = `# Active\n\n## Known errors\n${errors}\n`;
+    expect(() =>
+      planForget("activeContext.md", current, { kind: "line", line: 3 }),
+    ).toThrow(/Known-Errors heading/);
+    expect(() =>
+      planForget("activeContext.md", current, {
+        kind: "match",
+        text: "Known errors",
+      }),
+    ).toThrow(/Known-Errors heading/);
+  });
+
   it("supports whole-file purge as one approval unit", () => {
     const plan = planForget("issues.md", "- a\n- b\n", { kind: "all" });
     expect(plan.units).toHaveLength(1);

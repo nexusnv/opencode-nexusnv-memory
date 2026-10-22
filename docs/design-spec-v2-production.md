@@ -403,9 +403,11 @@ registrations.push(
   await ctx.session.hook("prompt", async (event) => {
     try {
       // ... INDEX attach + rememberAsserted fast path (§5.1) ...
-      const notices = await promptNotices(event); // ≤3 data-only lines; marker-guarded
-      if (notices)
-        event.prompt.text += `\n\n<!-- memory:prompt-notices -->\n${notices}`;
+      // Build pointer/status/hint, then let the budget planner order them.
+      const plan = planPromptNotices({ handoff, status, hint, budget });
+      if (plan.text) {
+        event.prompt.text = appendPromptNotices(event.prompt.text, plan.text);
+      }
     } catch (error) {
       logDiagnostic(error);
     } // never throw: blocks admission
@@ -695,18 +697,20 @@ registrations.push(
   - **Rotation notice (once, on the turn after a rotation):** the capture path records a
     `<projectID>/curation.rotated` marker with the count; `statusLine()` emits
     `[memory] rotated <n> block(s) to handoffs/archive/ (still recallable via memory_recall)` and
-    clears the marker. Read-then-clear has no CAS, so concurrent `prompt` calls may double-emit once;
-    benign (idempotent notice).
+    clears the marker atomically (`takeRotated` read-and-remove under one write lock), so concurrent
+    `prompt` calls cannot both report the same rotation.
   - **Review-due nudge (while pending):** when `<projectID>/curation.pending` reaches **≥5** uncurated scratchpad captures,
     emit `[memory] <n> uncurated captures since last review; run /memory-review`.
   - If several apply, one line carries all facts separated by `;` (still ≤1 line).
   - Dropped (never truncated mid-sentence) before the hint line when the payload is over budget.
   - **Tier-0 amendment (2026-10-19):** two additional best-effort facts share the line. **Over-cap
     INDEX notice:** when the `prompt` hook sees an over-cap `INDEX.md` it records
-    `<projectID>/notice.indexOverCap` with the line count (missing/unreadable stays silent);
-    `statusLine()` emits `[memory] INDEX.md is <n> lines (cap <m>); not attached — trim it to restore auto-injection`, and consumes the notice atomically when reporting
-    (read-then-remove under one write lock, so a concurrent re-set survives for the next line),
-    and the next `prompt` admission re-sets it while the file stays over cap. **Skipped-capture
+    `<projectID>/notice.indexOverCap` with a line-count lower bound (missing/unreadable stays
+    silent); `statusLine()` emits
+    `[memory] INDEX.md is over the <m>-line injection cap (at least <n> lines; a bounded read may undercount); not attached — trim it to restore auto-injection`,
+    and consumes the notice atomically when reporting (read-then-remove under one write lock, so a
+    concurrent re-set survives for the next line). The next `prompt` admission re-sets it while the
+    file stays over cap. **Skipped-capture
     notice (count-only; §5.3):** `[memory] <n> failure capture(s) skipped: memory write rejected (over cap, no rotatable Known-errors block, or file I/O); fix the file or run /memory-review`, consumed
     atomically when reported.
   - **Tier-0 amendment (2026-10-19, delivery rule):** the `prompt` hook renders `statusLine()` only
@@ -715,7 +719,7 @@ registrations.push(
     turn instead of being lost with a dropped line.
   - **Tier-3 amendment (2026-10-20, forget notice):** a successful `/memory-forget` sets
     `<projectID>/notice.forgotten`; `statusLine()` emits
-    `[memory] forget applied; removed text is in handoffs/archive/ and git history/backups may still retain it`
+    `[memory] <n> forget operation(s) applied; removed lines are archived under handoffs/archive/ (recallable; git history may retain them) — review INDEX.md pointers`
     and consumes it atomically. This is a transient storage notice, not a metric.
 
 #### 5.7.1 Cross-process write safety and atomic publish (E14)
@@ -728,7 +732,9 @@ registrations.push(
   retry. A malformed/empty lock is recoverable after a 2 s mtime grace. Release removes only our PID.
 - Overwrites publish via a same-directory `.tmp-*` file + `rename`; new files/handoffs via `.tmp-*` +
   `link` (exclusive, no overwrite). A reader sees the old or new complete file, never a partial one.
-  Temp/lock files are never allowlisted or auto-injected.
+  Temp/lock files are never allowlisted or auto-injected. Temp files are removed on normal
+  success/failure; a hard crash may leave a `.tmp-*`, which is ignored rather than swept by another
+  process (an age-based sweep could delete a live writer's temp).
 - Before `mkdir`/publish/delete, existing ancestors are `lstat`ed and must resolve under
   `realpath(root)`; handoff/archive parents must be exactly `root/handoffs` or `root/handoffs/archive`
   (in-root aliases such as `handoffs -> .` are rejected). Handoff listings used by GC are strict:
@@ -1346,9 +1352,9 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   - events from a foreign location/session are dropped before any write (location-isolation test);
   - the single event `AbortController` is reused (no second controller) and cleanup awaits
     `Registration.dispose()`;
-  - **status line:** the over-cap INDEX notice reports the line count (cleared after reporting;
-    re-set on the next prompt admission while over cap); rotation emits the notice once and clears
-    the marker (single double-emit under concurrency tolerated); the skipped-capture notice counts
+  - **status line:** the over-cap INDEX notice reports a lower bound (`at least N`; cleared after
+    reporting, re-set on the next prompt admission while over cap) and is not hint-eligible; rotation
+    is taken atomically and reported once; the skipped-capture notice counts
     write-rejected failure captures (cleared after reporting); the review-due nudge appears at ≥5
     uncurated scratchpad captures and disappears after `memory_apply` resets the counter; the status
     line is dropped before the hint under budget pressure;
@@ -1365,7 +1371,8 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   - **Tier-3 concurrency (E14):** two child processes serialize an append (no lost lines); a live lock
     times out with the fixed message; a stale/malformed PID lock is reclaimed exactly once; a failed
     publish leaves no partial target and removes its temp file; symlinked parents/handoff aliases are
-    rejected before publish/delete; readers see only a complete old or new file;
+    rejected before publish/delete; readers see only a complete old or new file; existing target mode
+    is preserved and archive files are created 0600;
   - **injection containment (P16, §5.11):** raw captured output never appears in the injected payload —
     a fixture whose error text contains an agent-directed instruction is captured to disk but the brief
     carries only the message-derived summary line (max 5 error lines); `source:user` classification is rejected for content inside code

@@ -108,7 +108,7 @@ export function registerMemoryGc(
             typeof prompt?.text === "string" ? prompt.text : "",
           );
           if ("help" in parsed) {
-            await postCommandOutput(ctx, invocation, MEMORY_GC_USAGE);
+            await postCommandOutput(ctx, invocation, MEMORY_GC_USAGE, true);
             return;
           }
           if ("error" in parsed) {
@@ -116,6 +116,7 @@ export function registerMemoryGc(
               ctx,
               invocation,
               `[memory] gc: ${parsed.error}`,
+              true,
             );
             return;
           }
@@ -161,6 +162,7 @@ export function registerMemoryGc(
             `[memory] gc failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
+            true,
           );
         }
       },

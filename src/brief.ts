@@ -130,6 +130,10 @@ const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
 // block (otherwise forgetting the summary would leave secret detail behind).
 const BULLET_START = /^-\s+/;
 const SECTION_HEADING = /^#{1,6}\s+/;
+// A generated summary line, used only when the heading is missing (for
+// example an older file or a hand-edit). Without this fallback, a removed
+// heading would turn captured detail into apparently trusted context.
+const TOOL_SUMMARY_LINE = /^-\s+.*\bsource:tool\s*$/i;
 
 /**
  * Split `activeContext` lines into the context slice (everything outside
@@ -145,7 +149,46 @@ function splitKnownErrors(allLines: string[]): {
     KNOWN_ERRORS_HEADING.test(l.trim()),
   );
   if (headingIdx === -1) {
-    return { contextLines: [...allLines], errorBlocks: [] };
+    // No heading: still recognise generated `source:tool` blocks so a
+    // hand-removed heading cannot promote their raw detail into the brief.
+    // Stop at a column-0 bullet, heading, or blank line (captured detail is
+    // stored two-space indented, so its blank lines are not truly empty).
+    const contextLines: string[] = [];
+    const errorBlocks: string[][] = [];
+    let current: string[] | undefined;
+    for (const line of allLines) {
+      if (BULLET_START.test(line)) {
+        if (current) {
+          errorBlocks.push(current);
+          current = undefined;
+        }
+        if (TOOL_SUMMARY_LINE.test(line)) {
+          current = [line];
+          continue;
+        }
+        contextLines.push(line);
+        continue;
+      }
+      if (current) {
+        if (line.trim().length === 0 || SECTION_HEADING.test(line)) {
+          errorBlocks.push(current);
+          current = undefined;
+          contextLines.push(line);
+        } else {
+          current.push(line);
+        }
+      } else {
+        contextLines.push(line);
+      }
+    }
+    if (current) errorBlocks.push(current);
+    if (errorBlocks.length === 0) {
+      return { contextLines: [...allLines], errorBlocks: [] };
+    }
+    return {
+      contextLines: contextLines.filter((line) => line.trim().length > 0),
+      errorBlocks,
+    };
   }
   const contextLines = allLines.slice(0, headingIdx);
   const errorBlocks: string[][] = [];
@@ -258,22 +301,70 @@ export function pruneScaffoldNoise(lines: readonly string[]): string[] {
  * (legacy/unexpected, never newest).
  */
 function handoffOrder(name: string): {
-  stamp: string;
+  stamp: number;
   seq: number;
   name: string;
 } {
+  // Archive names (`forgotten-*`, `rotated-*`) carry a different embedded
+  // stamp shape. Without this, archive listings hid them at the old end
+  // instead of sorting them among the retired entries.
+  const archiveStamp = archiveHandoffStamp(name);
+  if (archiveStamp !== undefined) {
+    return { stamp: archiveStamp, seq: 0, name };
+  }
   // Impossible dates (e.g. 2026-02-31) are unexpected names, never newest.
-  if (parseHandoffTimestamp(name) === undefined) {
-    return { stamp: "", seq: 0, name };
+  const stamp = parseHandoffTimestamp(name);
+  if (stamp === undefined) {
+    return { stamp: 0, seq: 0, name };
   }
   const match = name.match(/^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)\.md$/);
-  if (!match) return { stamp: "", seq: 0, name };
+  if (!match) return { stamp: 0, seq: 0, name };
   const rest = match[2]!;
   const seqMatch = rest.match(/^(.*)-(\d{2})$/);
   if (seqMatch && seqMatch[1]!.length === 6) {
-    return { stamp: match[1]!, seq: Number.parseInt(seqMatch[2]!, 10), name };
+    return { stamp, seq: Number.parseInt(seqMatch[2]!, 10), name };
   }
-  return { stamp: match[1]!, seq: 0, name };
+  return { stamp, seq: 0, name };
+}
+
+/**
+ * Embedded timestamp for a generated archive name. Supports
+ * `forgotten-YYYYMMDDTHHMMSSZ-*`, `rotated-YYYY-MM-DD-HH-MM-SS-mmmZ-*`, and
+ * the legacy `rotated-YYYY-MM-DD-HHMMSS-*` shape. Invalid dates/names are
+ * unexpected and sort first.
+ */
+function archiveHandoffStamp(name: string): number | undefined {
+  const match = name.match(
+    /^(?:forgotten|rotated)-(\d{4})-?(\d{2})-?(\d{2})[T-](\d{2})-?(\d{2})-?(\d{2})/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, hours, minutes, seconds] = match;
+  const yearNum = Number.parseInt(year!, 10);
+  const monthNum = Number.parseInt(month!, 10);
+  const dayNum = Number.parseInt(day!, 10);
+  const hourNum = Number.parseInt(hours!, 10);
+  const minuteNum = Number.parseInt(minutes!, 10);
+  const secondNum = Number.parseInt(seconds!, 10);
+  const stamp = Date.UTC(
+    yearNum,
+    monthNum - 1,
+    dayNum,
+    hourNum,
+    minuteNum,
+    secondNum,
+  );
+  const date = new Date(stamp);
+  if (
+    date.getUTCFullYear() !== yearNum ||
+    date.getUTCMonth() !== monthNum - 1 ||
+    date.getUTCDate() !== dayNum ||
+    date.getUTCHours() !== hourNum ||
+    date.getUTCMinutes() !== minuteNum ||
+    date.getUTCSeconds() !== secondNum
+  ) {
+    return undefined;
+  }
+  return Number.isFinite(stamp) ? stamp : undefined;
 }
 
 /**
@@ -323,7 +414,7 @@ function sortedHandoffNames(names: readonly string[]): string[] {
     .map(handoffOrder)
     .sort(
       (a, b) =>
-        (a.stamp < b.stamp ? -1 : a.stamp > b.stamp ? 1 : 0) ||
+        a.stamp - b.stamp ||
         a.seq - b.seq ||
         (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
     )

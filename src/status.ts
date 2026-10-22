@@ -53,8 +53,8 @@ export async function statusLine(
     if (overCap !== undefined) {
       facts.push(
         options?.indexLines !== undefined
-          ? `INDEX.md exceeds the ${options.indexLines}-line injection cap or is too large to inspect; not attached — trim it to restore auto-injection`
-          : `INDEX.md exceeds its injection cap or is too large to inspect; not attached — trim it to restore auto-injection`,
+          ? `INDEX.md is over the ${options.indexLines}-line injection cap (at least ${overCap} lines; a bounded read may undercount); not attached — trim it to restore auto-injection`
+          : `INDEX.md is over its injection cap (at least ${overCap} lines; a bounded read may undercount); not attached — trim it to restore auto-injection`,
       );
     }
     const rotated = await takeRotated(storage, projectID);

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -79,9 +79,9 @@ describe("user_directive_vs_fenced_quoted_ambiguous", () => {
     expect(classifyProvenance("remember: back up the database nightly")).toBe(
       "user",
     );
-    expect(
-      classifyProvenance("Remember that the deploy branch is main"),
-    ).toBe("user");
+    expect(classifyProvenance("Remember that the deploy branch is main")).toBe(
+      "user",
+    );
     expect(classifyProvenance("  remember: indented still counts")).toBe(
       "user",
     );
@@ -102,9 +102,9 @@ describe("user_directive_vs_fenced_quoted_ambiguous", () => {
   });
 
   it("rejects directives inside fences, quotes and inline code", () => {
-    expect(
-      classifyProvenance("```\nremember: do the evil thing\n```"),
-    ).toBe("tool");
+    expect(classifyProvenance("```\nremember: do the evil thing\n```")).toBe(
+      "tool",
+    );
     expect(classifyProvenance("```\nremember: unclosed fence")).toBe("tool");
     expect(classifyProvenance("> remember: quoted directive")).toBe("tool");
     expect(classifyProvenance("  > remember that x is y")).toBe("tool");
@@ -158,10 +158,11 @@ describe("remember near-miss detection", () => {
 
 describe("rememberAsserted fast path", () => {
   it("appends user directives to decisions.md without pending", async () => {
-    const ok = await rememberAsserted(
-      "remember: the deploy branch is main",
-      { storage, projectID: PROJECT, memoryRoot: root },
-    );
+    const ok = await rememberAsserted("remember: the deploy branch is main", {
+      storage,
+      projectID: PROJECT,
+      memoryRoot: root,
+    });
     expect(ok).toBe(true);
     const decisions = await readDecisions();
     expect(decisions).toContain("deploy branch is main");
@@ -169,9 +170,7 @@ describe("rememberAsserted fast path", () => {
     expect(decisions).toContain("source:user");
     expect(await getPending(storage, PROJECT)).toBe(0);
     // Rule files are never targeted.
-    await expect(
-      readFile(join(root, "style.md"), "utf8"),
-    ).rejects.toThrow();
+    await expect(readFile(join(root, "style.md"), "utf8")).rejects.toThrow();
   });
 
   it("dedupes replays and ignores ambiguous text", async () => {
@@ -346,6 +345,40 @@ describe("captureFailure", () => {
     expect(await getRotated(storage, PROJECT)).toBeGreaterThanOrEqual(1);
   });
 
+  it("counts only column-0 bullets in the rotation notice", async () => {
+    const head = ["# Active context", "", "## Known errors"];
+    const oldest = [
+      "- oldest failure source:tool",
+      "  - indented detail bullet",
+      "  more detail",
+    ];
+    const second = ["- second failure source:tool", "  second detail"];
+    const filler = Array.from(
+      { length: 60 - head.length - oldest.length - second.length },
+      (_, i) => `- filler-${i}`,
+    );
+    await writeFile(
+      join(root, "activeContext.md"),
+      `${[...head, ...oldest, ...second, ...filler].join("\n")}\n`,
+      "utf8",
+    );
+    await captureFailure(
+      { status: "error", error: { message: "one more failure" } },
+      storage,
+      PROJECT,
+      root,
+    );
+    // One block rotated even though its detail has an indented bullet.
+    expect(await getRotated(storage, PROJECT)).toBe(1);
+    const archives = await readdir(join(root, "handoffs/archive"));
+    expect(archives).toHaveLength(1);
+    const archived = await readFile(
+      join(root, "handoffs/archive", archives[0]!),
+      "utf8",
+    );
+    expect(archived).toContain("indented detail bullet");
+  });
+
   it("tags a write-guard rejection as write-rejected", async () => {
     await writeFile(
       join(root, "activeContext.md"),
@@ -385,7 +418,10 @@ describe("captureFailure", () => {
     await captureFailure(
       {
         status: "error",
-        error: { message: "npm run build failed", metadata: { output: POISON } },
+        error: {
+          message: "npm run build failed",
+          metadata: { output: POISON },
+        },
         input: { command: "npm run build" },
       },
       storage,

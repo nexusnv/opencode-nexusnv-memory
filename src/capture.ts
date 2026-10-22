@@ -532,7 +532,11 @@ export async function pruneSeenTo500(
   if (overflow <= 0) return 0;
   all.sort((a, b) =>
     a.seenAt === b.seenAt
-      ? (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+      ? a.key < b.key
+        ? -1
+        : a.key > b.key
+          ? 1
+          : 0
       : a.seenAt - b.seenAt,
   );
   const victims = all.slice(0, overflow);
@@ -576,9 +580,7 @@ function isAgedLedgerValue(
   if (kind === "snapshot") {
     // Legacy bare hashes carry no age; normalize them out on the first pass.
     if (typeof value === "string") return true;
-    return (
-      isSnapshotRecord(value) && now - value.at >= SNAPSHOT_RETENTION_MS
-    );
+    return isSnapshotRecord(value) && now - value.at >= SNAPSHOT_RETENTION_MS;
   }
   return isAgedTimestamp(value, now, retentionMs);
 }
@@ -622,13 +624,14 @@ export async function pruneLedgerState(
     },
   ];
 
-  const victims: Array<{ key: string; kind: LedgerPruneKind; retentionMs: number }> =
-    [];
+  const victims: Array<{
+    key: string;
+    kind: LedgerPruneKind;
+    retentionMs: number;
+  }> = [];
   for (const spec of specs) {
     for (const entry of await scanEntries(storage, spec.prefix)) {
-      if (
-        isAgedLedgerValue(spec.kind, entry.value, now, spec.retentionMs)
-      ) {
+      if (isAgedLedgerValue(spec.kind, entry.value, now, spec.retentionMs)) {
         victims.push({
           key: entry.key,
           kind: spec.kind,
@@ -646,14 +649,7 @@ export async function pruneLedgerState(
     // between victims instead of blocking every foreground write.
     const didRemove = await withWriteLock(async () => {
       const current = await storage.get(victim.key);
-      if (
-        !isAgedLedgerValue(
-          victim.kind,
-          current,
-          now,
-          victim.retentionMs,
-        )
-      ) {
+      if (!isAgedLedgerValue(victim.kind, current, now, victim.retentionMs)) {
         return false;
       }
       await storage.remove(victim.key);
@@ -704,11 +700,7 @@ const METADATA_OUTPUT_KEYS = [
 ] as const;
 
 export type CaptureReason =
-  | "captured"
-  | "duplicate"
-  | "skipped"
-  | "retry-later"
-  | "failed";
+  "captured" | "duplicate" | "skipped" | "retry-later" | "failed";
 
 /** Write-guard rejection sub-kind for `CaptureOutcome.reason === "failed"`. */
 export type CaptureFailureKind = "write-rejected";
@@ -913,82 +905,91 @@ export async function captureFailure(
       }
       await markAttempt(storage, projectID, contentID, options?.now);
 
-    const flags = flagInjection(`${redactedSummary}\n${redactedDetail}`);
-    const block: string[] = [`- ${redactedSummary} source:tool`];
-    if (redactedDetail.length > 0) {
-      for (const line of redactedDetail.split("\n")) block.push(`  ${line}`);
-    }
-    if (flags.length > 0) {
-      block.push(`  <!-- flags: ${flags.join(", ")} (advisory) -->`);
-    }
-    const entry = `${block.join("\n")}\n`;
+      const flags = flagInjection(`${redactedSummary}\n${redactedDetail}`);
+      const block: string[] = [`- ${redactedSummary} source:tool`];
+      if (redactedDetail.length > 0) {
+        for (const line of redactedDetail.split("\n")) block.push(`  ${line}`);
+      }
+      if (flags.length > 0) {
+        block.push(`  <!-- flags: ${flags.join(", ")} (advisory) -->`);
+      }
+      const entry = `${block.join("\n")}\n`;
 
-    const root = resolveMemoryRoot(memoryRoot);
-    const before = await listArchive(root);
-    // Atomic read-modify-write inside the choke-point lock: concurrent
-    // failure captures must not read the same base and drop each other.
-    try {
-      await updateCapped(
-        "activeContext.md",
-        {
-          memoryRoot,
-          fileLines: options?.fileLines,
-          indexLines: options?.indexLines,
-        },
-        (current) => {
-          if (current.length === 0) return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
-          const withNewline = current.endsWith("\n") ? current : `${current}\n`;
-          return /^##\s+known errors\s*$/im.test(current)
-            ? `${withNewline}${entry}`
-            : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
-        },
-      );
-    } catch (error) {
-      // Cap/rotation/IO rejection on the append itself: the one failure kind
-      // the status line reports (Task 6). Ledger failures below stay log-only.
-      return fail(error, "write-rejected");
-    }
-    await markSeen(storage, projectID, contentID, options?.now);
-    await incPending(storage, projectID);
-
-    // Bound the seen set: fire-and-forget off the write mutex (prune takes
-    // its own lock); never throws, logging is best-effort.
-    void pruneSeenTo500(storage, projectID).catch((error) => {
+      const root = resolveMemoryRoot(memoryRoot);
+      const before = await listArchive(root);
+      // Atomic read-modify-write inside the choke-point lock: concurrent
+      // failure captures must not read the same base and drop each other.
       try {
-        log(error);
-      } catch {
-        // Logging must never break the tool hook.
+        await updateCapped(
+          "activeContext.md",
+          {
+            memoryRoot,
+            fileLines: options?.fileLines,
+            indexLines: options?.indexLines,
+          },
+          (current) => {
+            if (current.length === 0)
+              return `${ACTIVE_CONTEXT_SCAFFOLD}${entry}`;
+            const withNewline = current.endsWith("\n")
+              ? current
+              : `${current}\n`;
+            return /^##\s+known errors\s*$/im.test(current)
+              ? `${withNewline}${entry}`
+              : `${withNewline}\n${KNOWN_ERRORS_HEADING_LINE}\n${entry}`;
+          },
+        );
+      } catch (error) {
+        // Cap/rotation/IO rejection on the append itself: the one failure kind
+        // the status line reports (Task 6). Ledger failures below stay log-only.
+        return fail(error, "write-rejected");
       }
-    });
+      await markSeen(storage, projectID, contentID, options?.now);
+      await incPending(storage, projectID);
 
-    // Rotation marker for the status line: a fresh archive file means this
-    // append rotated the oldest Known-Errors block(s) out.
-    try {
-      const after = await listArchive(root);
-      const fresh = [...after].filter((name) => !before.has(name));
-      if (fresh.length > 0) {
-        let blocks = 0;
-        for (const name of fresh) {
-          try {
-            const archived = await readContainedText(
-              `handoffs/archive/${name}`,
-              { memoryRoot: root, onMissing: "skip" },
-            );
-            if (archived !== undefined) {
-              blocks += archived.text
-                .split("\n")
-                .filter((line) => /^\s*-\s+/.test(line)).length;
-            }
-          } catch {
-            // Fall through to the file-count fallback below.
-          }
+      // Bound the seen set: fire-and-forget off the write mutex (prune takes
+      // its own lock); never throws, logging is best-effort.
+      void pruneSeenTo500(storage, projectID).catch((error) => {
+        try {
+          log(error);
+        } catch {
+          // Logging must never break the tool hook.
         }
-        await setRotated(storage, projectID, blocks > 0 ? blocks : fresh.length);
+      });
+
+      // Rotation marker for the status line: a fresh archive file means this
+      // append rotated the oldest Known-Errors block(s) out.
+      try {
+        const after = await listArchive(root);
+        const fresh = [...after].filter((name) => !before.has(name));
+        if (fresh.length > 0) {
+          let blocks = 0;
+          for (const name of fresh) {
+            try {
+              const archived = await readContainedText(
+                `handoffs/archive/${name}`,
+                { memoryRoot: root, onMissing: "skip" },
+              );
+              if (archived !== undefined) {
+                blocks += archived.text
+                  .split("\n")
+                  // Only column-0 bullets are blocks; indented `  - ...`
+                  // lines are captured detail and must not inflate the count.
+                  .filter((line) => /^-\s+/.test(line)).length;
+              }
+            } catch {
+              // Fall through to the file-count fallback below.
+            }
+          }
+          await setRotated(
+            storage,
+            projectID,
+            blocks > 0 ? blocks : fresh.length,
+          );
+        }
+      } catch {
+        // Rotation reporting is best-effort; the capture already landed.
       }
-    } catch {
-      // Rotation reporting is best-effort; the capture already landed.
-    }
-    return { reason: "captured", contentID };
+      return { reason: "captured", contentID };
     } finally {
       captureInflight.delete(captureFlightKey(projectID, contentID));
     }
@@ -1059,7 +1060,9 @@ export function isThisLocation(
     if (record === undefined) return false;
     const dir = asRecord(record["location"])?.["directory"];
     if (typeof dir === "string" && dir.length > 0) {
-      if (stripTrailingSlashes(dir) !== stripTrailingSlashes(plugin.directory)) {
+      if (
+        stripTrailingSlashes(dir) !== stripTrailingSlashes(plugin.directory)
+      ) {
         return false;
       }
     }
@@ -1101,9 +1104,7 @@ export function isKnownDiagnostic(event: unknown): boolean {
     const type = asRecord(event)?.["type"];
     if (typeof type !== "string" || type.length === 0) return false;
     if (type.startsWith("tui.")) return false;
-    return KNOWN_DIAGNOSTIC_PREFIXES.some((prefix) =>
-      type.startsWith(prefix),
-    );
+    return KNOWN_DIAGNOSTIC_PREFIXES.some((prefix) => type.startsWith(prefix));
   } catch {
     return false;
   }
@@ -1230,7 +1231,9 @@ export async function readVcsSnapshot(
         statusOk = true;
       } else {
         warn(
-          new Error("[memory] vcs status shape unexpected; trying diff fallback"),
+          new Error(
+            "[memory] vcs status shape unexpected; trying diff fallback",
+          ),
         );
       }
     }
@@ -1253,9 +1256,7 @@ function eventDirectoryOf(event: Record<string, unknown>): string | undefined {
   return typeof dir === "string" && dir.length > 0 ? dir : undefined;
 }
 
-function eventSessionIDOf(
-  event: Record<string, unknown>,
-): string | undefined {
+function eventSessionIDOf(event: Record<string, unknown>): string | undefined {
   const id = asRecord(event["data"])?.["sessionID"];
   return typeof id === "string" && id.length > 0 ? id : undefined;
 }
@@ -1335,10 +1336,7 @@ export function snapshotContentHash(
   pending: number,
 ): string {
   return createHash("sha256")
-    .update(
-      JSON.stringify({ branch, changes: [...changes], pending }),
-      "utf8",
-    )
+    .update(JSON.stringify({ branch, changes: [...changes], pending }), "utf8")
     .digest("hex");
 }
 
@@ -1348,7 +1346,8 @@ function resolveSnapshotRoot(
   fallbackMemoryRoot?: string,
 ): string {
   const dir = eventDirectoryOf(event);
-  if (dir !== undefined) return resolveMemoryRoot(join(dir, ".opencode", "memory"));
+  if (dir !== undefined)
+    return resolveMemoryRoot(join(dir, ".opencode", "memory"));
   return resolveMemoryRoot(fallbackMemoryRoot);
 }
 
@@ -1470,11 +1469,7 @@ export interface SnapshotDeps {
 }
 
 export type SnapshotReason =
-  | "written"
-  | "unchanged"
-  | "skipped"
-  | "dropped"
-  | "failed";
+  "written" | "unchanged" | "skipped" | "dropped" | "failed";
 
 export interface SnapshotOutcome {
   readonly reason: SnapshotReason;
@@ -1546,7 +1541,10 @@ export async function snapshotHandoffIfChanged(
     }
     const hash = snapshotContentHash(branch, changes, pending);
     try {
-      if ((await getSnapshotHash(deps.storage, deps.projectID, sessionID)) === hash) {
+      if (
+        (await getSnapshotHash(deps.storage, deps.projectID, sessionID)) ===
+        hash
+      ) {
         return { reason: "unchanged" };
       }
     } catch (error) {
@@ -1588,11 +1586,7 @@ export interface CompactionDeps {
 }
 
 export type CompactionReason =
-  | "captured"
-  | "duplicate"
-  | "skipped"
-  | "dropped"
-  | "failed";
+  "captured" | "duplicate" | "skipped" | "dropped" | "failed";
 
 export interface CompactionOutcome {
   readonly reason: CompactionReason;
@@ -1672,59 +1666,59 @@ export async function captureCompactionOutcome(
     if (compactionInflight.has(flightKey)) return { reason: "duplicate" };
     compactionInflight.add(flightKey);
     try {
-    const now = eventTimeOf(record, deps.now ?? Date.now());
-    const { branch } = await readVcsSnapshot(deps.vcs, log);
-    const reason =
-      typeof data?.["reason"] === "string" && data["reason"].length > 0
-        ? (data["reason"] as string)
-        : "unknown";
-    const text =
-      typeof data?.["text"] === "string" ? (data["text"] as string) : "";
-    const recent =
-      typeof data?.["recent"] === "string" ? (data["recent"] as string) : "";
-    const root = resolveSnapshotRoot(record, deps.memoryRoot);
-    const body =
-      text.trim().length > 0
-        ? buildCompactionHandoff({
-            sessionID,
-            reason,
-            branch,
-            text,
-            recent,
-            now,
-            fileLines: deps.fileLines,
-          })
-        : buildPointerHandoff({
-            sessionID,
-            reason,
-            branch,
-            now,
-            fileLines: deps.fileLines,
-          });
-    // Exclusive, never-overwriting write: a same-name idle snapshot cannot
-    // replace the produced summary (and replay stays able to restore it,
-    // since `seen` is marked only after the write lands below).
-    const file = await writeHandoffUnique(handoffName(sessionID, now), body, {
-      memoryRoot: root,
-      fileLines: deps.fileLines,
-    });
-    try {
-      // Mark seen only after the handoff lands: a failed write must stay
-      // replayable, otherwise the produced summary is lost for good.
-      await markSeen(deps.storage, deps.projectID, id, deps.now);
-    } catch (error) {
-      return fail(error);
-    }
-    // Bound the seen set: fire-and-forget off the write mutex (prune takes
-    // its own lock); never throws, logging is best-effort.
-    void pruneSeenTo500(deps.storage, deps.projectID).catch((error) => {
+      const now = eventTimeOf(record, deps.now ?? Date.now());
+      const { branch } = await readVcsSnapshot(deps.vcs, log);
+      const reason =
+        typeof data?.["reason"] === "string" && data["reason"].length > 0
+          ? (data["reason"] as string)
+          : "unknown";
+      const text =
+        typeof data?.["text"] === "string" ? (data["text"] as string) : "";
+      const recent =
+        typeof data?.["recent"] === "string" ? (data["recent"] as string) : "";
+      const root = resolveSnapshotRoot(record, deps.memoryRoot);
+      const body =
+        text.trim().length > 0
+          ? buildCompactionHandoff({
+              sessionID,
+              reason,
+              branch,
+              text,
+              recent,
+              now,
+              fileLines: deps.fileLines,
+            })
+          : buildPointerHandoff({
+              sessionID,
+              reason,
+              branch,
+              now,
+              fileLines: deps.fileLines,
+            });
+      // Exclusive, never-overwriting write: a same-name idle snapshot cannot
+      // replace the produced summary (and replay stays able to restore it,
+      // since `seen` is marked only after the write lands below).
+      const file = await writeHandoffUnique(handoffName(sessionID, now), body, {
+        memoryRoot: root,
+        fileLines: deps.fileLines,
+      });
       try {
-        log(error);
-      } catch {
-        // Logging must never break capture.
+        // Mark seen only after the handoff lands: a failed write must stay
+        // replayable, otherwise the produced summary is lost for good.
+        await markSeen(deps.storage, deps.projectID, id, deps.now);
+      } catch (error) {
+        return fail(error);
       }
-    });
-    return { reason: "captured", file };
+      // Bound the seen set: fire-and-forget off the write mutex (prune takes
+      // its own lock); never throws, logging is best-effort.
+      void pruneSeenTo500(deps.storage, deps.projectID).catch((error) => {
+        try {
+          log(error);
+        } catch {
+          // Logging must never break capture.
+        }
+      });
+      return { reason: "captured", file };
     } finally {
       compactionInflight.delete(flightKey);
     }

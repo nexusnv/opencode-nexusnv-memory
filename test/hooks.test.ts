@@ -28,7 +28,11 @@ import {
   REMEMBER_NEAR_MISS_HINT,
 } from "../src/hints.js";
 import { getScaffoldFiles } from "../src/templates.js";
-import { hasStatusLine, REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
+import {
+  hasStatusLine,
+  REVIEW_DUE_PENDING,
+  statusLine,
+} from "../src/status.js";
 import {
   attemptKey,
   failureContentID,
@@ -314,9 +318,7 @@ describe("indexWithinCap", () => {
       (_, i) => `- line ${i} ${"x".repeat(40_000)}`,
     ).join("\n");
     await writeMemory("INDEX.md", lines);
-    expect(
-      await indexWithinCap(join(memoryRoot, "INDEX.md"), 30),
-    ).toBe(false);
+    expect(await indexWithinCap(join(memoryRoot, "INDEX.md"), 30)).toBe(false);
   });
 });
 
@@ -355,8 +357,7 @@ describe("prompt hook", () => {
     expect(text.indexOf("how does auth-service")).toBeLessThan(
       text.indexOf("[memory] handoff:"),
     );
-    const markerCount =
-      text.split("<!-- memory:prompt-notices -->").length - 1;
+    const markerCount = text.split("<!-- memory:prompt-notices -->").length - 1;
     expect(markerCount).toBe(1);
     await runHook(hooks, "prompt", event);
     expect(event.prompt.text).toBe(text);
@@ -450,11 +451,7 @@ describe("prompt hook", () => {
     );
     expect(await storage.get(armKey)).toBeUndefined();
 
-    await runHook(
-      hooks,
-      "prompt",
-      promptEvent("how does auth-service work?"),
-    );
+    await runHook(hooks, "prompt", promptEvent("how does auth-service work?"));
     expect(await storage.get(armKey)).toBeDefined();
   });
 
@@ -465,9 +462,7 @@ describe("prompt hook", () => {
     await runHook(hooks, "prompt", event);
 
     expect(event.prompt.text).not.toContain("Nothing was recorded");
-    expect(event.prompt.text).toContain(
-      "[memory-hint] Past decisions mention",
-    );
+    expect(event.prompt.text).toContain("[memory-hint] Past decisions mention");
   });
 
   it("does not attach an over-cap or missing INDEX", async () => {
@@ -496,7 +491,7 @@ describe("prompt hook", () => {
     await runHook(hooks, "prompt", event);
     expect(event.prompt.files).toHaveLength(0);
     expect(event.prompt.text).toContain(
-      "INDEX.md exceeds the 30-line injection cap",
+      "INDEX.md is over the 30-line injection cap (at least 31 lines",
     );
     expect(await getNotice(storage, PROJECT, "indexOverCap")).toBeUndefined();
   });
@@ -554,6 +549,22 @@ describe("loadBrief", () => {
     expect(brief).not.toContain("TAIL-MARKER-UNIQUE-12345");
   });
 
+  it("sanitizes source:tool blocks when the Known-Errors heading is missing", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "## Goal",
+        "- ship the fix",
+        "- npm build failed source:tool",
+        "  src/a.ts: SECRET-DETAIL-MARKER",
+      ].join("\n"),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("npm build failed source:tool");
+    expect(brief).not.toContain("SECRET-DETAIL-MARKER");
+  });
+
   it("redacts secrets and omits the newest-handoff pointer", async () => {
     await writeMemory("activeContext.md", activeContextWithErrors(1));
     await writeMemory("handoffs/2026-10-14-100000-aaaaaa.md", "old");
@@ -608,9 +619,7 @@ describe("contained memory reads", () => {
   });
 
   it("does not list handoffs through a symlinked directory", async () => {
-    const outside = await mkdtemp(
-      join(tmpdir(), "memory-handoffs-outside-"),
-    );
+    const outside = await mkdtemp(join(tmpdir(), "memory-handoffs-outside-"));
     try {
       const handoffs = join(outside, "handoffs");
       await mkdir(handoffs, { recursive: true });
@@ -631,10 +640,7 @@ describe("contained memory reads", () => {
   });
 
   it("does not treat in-root handoff aliases as handoffs", async () => {
-    await writeFile(
-      join(memoryRoot, "2026-10-20-110000-abcdef.md"),
-      "root\n",
-    );
+    await writeFile(join(memoryRoot, "2026-10-20-110000-abcdef.md"), "root\n");
     await rm(join(memoryRoot, "handoffs"), { recursive: true, force: true });
     await symlink(memoryRoot, join(memoryRoot, "handoffs"), "dir");
     expect(await newestHandoffLine(memoryRoot)).toBeUndefined();
@@ -644,6 +650,27 @@ describe("contained memory reads", () => {
   it("does not list an aliased archive", async () => {
     await symlink("..", join(memoryRoot, "handoffs", "archive"), "dir");
     expect((await listHandoffs(memoryRoot, "archive")).names).toEqual([]);
+  });
+
+  it("sorts forgotten and rotated archives by their embedded time", async () => {
+    await writeMemory(
+      "handoffs/archive/forgotten-20261020T100000Z-aaa.md",
+      "forgotten older\n",
+    );
+    await writeMemory(
+      "handoffs/archive/rotated-2026-10-21-12-00-00-000Z-123-abc.md",
+      "rotated newest\n",
+    );
+    await writeMemory(
+      "handoffs/archive/forgotten-20261019T090000Z-bbb.md",
+      "forgotten oldest\n",
+    );
+    const archive = await listHandoffs(memoryRoot, "archive", 10);
+    expect(archive.names).toEqual([
+      "rotated-2026-10-21-12-00-00-000Z-123-abc.md",
+      "forgotten-20261020T100000Z-aaa.md",
+      "forgotten-20261019T090000Z-bbb.md",
+    ]);
   });
 
   it("does not list an off-root archive", async () => {
@@ -665,12 +692,18 @@ describe("contained memory reads", () => {
 
 describe("parseHandoffTimestamp", () => {
   it("accepts generated names and rejects impossible dates", () => {
+    expect(parseHandoffTimestamp("2026-10-15-120000-abcdef.md")).toBe(
+      Date.UTC(2026, 9, 15, 12, 0, 0),
+    );
     expect(
-      parseHandoffTimestamp("2026-10-15-120000-abcdef.md"),
-    ).toBe(Date.UTC(2026, 9, 15, 12, 0, 0));
-    expect(parseHandoffTimestamp("2026-02-31-120000-abcdef.md")).toBeUndefined();
-    expect(parseHandoffTimestamp("2026-99-99-120000-abcdef.md")).toBeUndefined();
-    expect(parseHandoffTimestamp("2026-10-15-120000-abcdef.txt")).toBeUndefined();
+      parseHandoffTimestamp("2026-02-31-120000-abcdef.md"),
+    ).toBeUndefined();
+    expect(
+      parseHandoffTimestamp("2026-99-99-120000-abcdef.md"),
+    ).toBeUndefined();
+    expect(
+      parseHandoffTimestamp("2026-10-15-120000-abcdef.txt"),
+    ).toBeUndefined();
     expect(parseHandoffTimestamp("unexpected.md")).toBeUndefined();
   });
 
@@ -690,16 +723,22 @@ describe("parseHandoffTimestamp", () => {
 });
 
 describe("matchIndex", () => {
-  const INDEX = "- auth-service: login flow in src/auth.ts\n- billing: invoices\n";
+  const INDEX =
+    "- auth-service: login flow in src/auth.ts\n- billing: invoices\n";
 
   it("emits one hint line on exact match", async () => {
-    const hint = await matchIndex([userMessage("how does auth-service login work?")], {
-      storage,
-      projectID: PROJECT,
-      sessionID: SESSION,
-      indexContent: INDEX,
-    });
-    expect(hint).toMatch(/^\[memory-hint\] Past decisions mention `auth-service`/);
+    const hint = await matchIndex(
+      [userMessage("how does auth-service login work?")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: INDEX,
+      },
+    );
+    expect(hint).toMatch(
+      /^\[memory-hint\] Past decisions mention `auth-service`/,
+    );
     expect(hint).toContain('Call memory_recall("decisions.md")');
     expect(hint!.split("\n")).toHaveLength(1);
   });
@@ -811,10 +850,12 @@ describe("matchIndex", () => {
       }),
     ).toBe("billing invoices overdue?");
     await writeMemory("INDEX.md", INDEX);
-    const hint = await matchIndex(
-      [userMessage("billing dispute process?")],
-      { storage, projectID: PROJECT, sessionID: SESSION, memoryRoot },
-    );
+    const hint = await matchIndex([userMessage("billing dispute process?")], {
+      storage,
+      projectID: PROJECT,
+      sessionID: SESSION,
+      memoryRoot,
+    });
     expect(hint).toContain("billing");
   });
 
@@ -897,16 +938,22 @@ describe("statusLine", () => {
   it("reports an over-cap INDEX notice once, then clears it", async () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT, { indexLines: 30 });
-    expect(line).toContain("INDEX.md exceeds the 30-line injection cap");
+    expect(line).toContain(
+      "INDEX.md is over the 30-line injection cap (at least 31 lines",
+    );
     expect(line).toContain("not attached");
     expect(line!.split("\n")).toHaveLength(1);
-    expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
+    expect(
+      await statusLine(storage, PROJECT, { indexLines: 30 }),
+    ).toBeUndefined();
   });
 
   it("uses the cap-free wording without an options argument", async () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT);
-    expect(line).toContain("INDEX.md exceeds its injection cap");
+    expect(line).toContain(
+      "INDEX.md is over its injection cap (at least 31 lines",
+    );
     expect(line).toContain("not attached");
   });
 
@@ -974,7 +1021,10 @@ describe("loadPriors", () => {
   });
 
   it("a truncated fresh activeContext contributes no priors section", async () => {
-    await writeMemory("activeContext.md", getScaffoldFiles()["activeContext.md"]!);
+    await writeMemory(
+      "activeContext.md",
+      getScaffoldFiles()["activeContext.md"]!,
+    );
     const priors = await loadPriors(memoryRoot, { fileLines: 10 });
     expect(priors).not.toContain("## active context");
     expect(priors).not.toContain("[truncated");
@@ -1148,7 +1198,16 @@ describe("compaction hook", () => {
 
 describe("execute.after failure hook", () => {
   function toolEvent(status: string, error?: unknown, input?: unknown) {
-    return { tool: "bash", sessionID: SESSION, agent: "primary", messageID: "m1", id: "call-1", status, error, input };
+    return {
+      tool: "bash",
+      sessionID: SESSION,
+      agent: "primary",
+      messageID: "m1",
+      id: "call-1",
+      status,
+      error,
+      input,
+    };
   }
 
   it("registers execute.after and captures failures only", async () => {
@@ -1160,7 +1219,10 @@ describe("execute.after failure hook", () => {
     // activeContext.md from setup is untouched).
     await handler!(toolEvent("completed") as never);
     expect(await getPending(storage, PROJECT)).toBe(0);
-    const scaffolded = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    const scaffolded = await readFile(
+      join(memoryRoot, "activeContext.md"),
+      "utf8",
+    );
     expect(scaffolded).not.toContain("wiring-boom-UNIQUE-789");
 
     // Failures append a source:tool summary line.
@@ -1199,9 +1261,7 @@ describe("execute.after failure hook", () => {
     const { toolHooks } = await setupHooks({ captureFailures: false });
     const handler = toolHooks.get("execute.after");
     expect(handler, "hook execute.after registered").toBeDefined();
-    await handler!(
-      toolEvent("error", { message: "must-not-land" }) as never,
-    );
+    await handler!(toolEvent("error", { message: "must-not-land" }) as never);
     // Scaffold activeContext.md from setup is untouched: no failure entry.
     const active = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
     expect(active).not.toContain("must-not-land");
@@ -1217,9 +1277,7 @@ describe("execute.after failure hook", () => {
     await expect(
       handler!(toolEvent("completed") as never),
     ).resolves.toBeUndefined();
-    await expect(
-      handler!(null as never),
-    ).resolves.toBeUndefined();
+    await expect(handler!(null as never)).resolves.toBeUndefined();
   });
 });
 

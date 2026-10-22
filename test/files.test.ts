@@ -1,10 +1,12 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  chmod,
   mkdtemp,
   mkdir,
   readdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -435,9 +437,7 @@ describe("contained read helpers", () => {
 
 describe("capped transaction lifecycle", () => {
   it("revokes the transaction after its callback settles", async () => {
-    let leaked:
-      | { read: (file: string) => Promise<string> }
-      | undefined;
+    let leaked: { read: (file: string) => Promise<string> } | undefined;
     await withCappedTransaction(opts(), async (tx) => {
       await tx.write("decisions.md", "inside\n");
       leaked = tx;
@@ -494,6 +494,24 @@ describe("atomic_publish_and_exclusive_create", () => {
     expect(await writeNewCapped(name, "first", opts())).toBe("created");
     expect(await writeNewCapped(name, "second", opts())).toBe("exists");
     expect(await readCapped(name, opts())).toBe("first");
+  });
+
+  it("preserves an existing target's mode across atomic overwrite", async () => {
+    const target = join(root, "decisions.md");
+    await writeCapped("decisions.md", "old\n", opts());
+    await chmod(target, 0o600);
+    await writeCapped("decisions.md", "new\n", opts());
+    expect((await stat(target)).mode & 0o777).toBe(0o600);
+  });
+
+  it("creates archives with a restrictive mode", async () => {
+    await withCappedTransaction(opts(), async (tx) => {
+      await tx.writeArchive("handoffs/archive/forgotten-test.md", "secret\n");
+    });
+    expect(
+      (await stat(join(root, "handoffs/archive/forgotten-test.md"))).mode &
+        0o777,
+    ).toBe(0o600);
   });
 
   it("creates a fresh memory root on first write", async () => {

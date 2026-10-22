@@ -159,7 +159,7 @@ export function registerMemoryForget(
             typeof prompt?.text === "string" ? prompt.text : "",
           );
           if ("help" in parsed) {
-            await postCommandOutput(ctx, invocation, MEMORY_FORGET_USAGE);
+            await postCommandOutput(ctx, invocation, MEMORY_FORGET_USAGE, true);
             return;
           }
           if ("error" in parsed) {
@@ -167,6 +167,7 @@ export function registerMemoryForget(
               ctx,
               invocation,
               `[memory] forget: ${parsed.error}`,
+              true,
             );
             return;
           }
@@ -224,6 +225,7 @@ export function registerMemoryForget(
             `[memory] forget failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
+            true,
           );
         }
       },

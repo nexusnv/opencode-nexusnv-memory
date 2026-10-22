@@ -10,6 +10,7 @@
  */
 import { constants } from "node:fs";
 import {
+  chmod,
   link,
   lstat,
   mkdir,
@@ -764,6 +765,21 @@ function tempPathFor(abs: string): string {
   return join(dirname(abs), `.tmp-${process.pid}-${Date.now()}-${rand}`);
 }
 
+/**
+ * Existing regular-file mode, or `undefined` when the target does not exist.
+ * A symlink is not a regular file: publishing replaces it, so it must not
+ * donate its (or its target's) mode to the new file.
+ */
+async function existingFileMode(abs: string): Promise<number | undefined> {
+  try {
+    const info = await lstat(abs);
+    return info.isFile() ? info.mode & 0o777 : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 /** Publish `text` with same-directory temp + rename (old or new complete). */
 async function publishAtomic(
   root: string,
@@ -772,9 +788,19 @@ async function publishAtomic(
   beforeRename?: () => Promise<void>,
 ): Promise<void> {
   await prepareParent(root, abs);
+  // A rename swaps the inode, so an overwrite must carry the target's
+  // permissions explicitly or a user-hardened 0600 file becomes 0644 under a
+  // default umask. Capture the mode before the temp write; chmod after the
+  // write so creat(2)'s umask masking cannot broaden or narrow it.
+  const mode = await existingFileMode(abs);
   const tmp = tempPathFor(abs);
   try {
-    await writeFile(tmp, text, { encoding: "utf8", flag: "wx" });
+    await writeFile(tmp, text, {
+      encoding: "utf8",
+      flag: "wx",
+      ...(mode === undefined ? {} : { mode }),
+    });
+    if (mode !== undefined) await chmod(tmp, mode);
     await beforeRename?.();
     await rename(tmp, abs);
   } catch (error) {
@@ -793,16 +819,25 @@ export async function publishAtomicForTests(
   return publishAtomic(root, abs, text, beforeRename);
 }
 
-/** Publish a new file with temp + hard link (no overwrite, no partial read). */
+/**
+ * Publish a new file with temp + hard link (no overwrite, no partial read).
+ * `mode` is applied exactly after creation (archives pass 0600).
+ */
 async function publishExclusive(
   root: string,
   abs: string,
   text: string,
+  mode?: number,
 ): Promise<"created" | "exists"> {
   await prepareParent(root, abs);
   const tmp = tempPathFor(abs);
   try {
-    await writeFile(tmp, text, { encoding: "utf8", flag: "wx" });
+    await writeFile(tmp, text, {
+      encoding: "utf8",
+      flag: "wx",
+      ...(mode === undefined ? {} : { mode }),
+    });
+    if (mode !== undefined) await chmod(tmp, mode);
   } catch (error) {
     await unlink(tmp).catch(() => undefined);
     throw error;
@@ -931,6 +966,7 @@ async function writeRedactedCapped(
       root,
       archiveAbs,
       `# Rotated Known-Errors block(s) from activeContext.md\n\n${rotated.join("\n")}\n`,
+      0o600,
     );
     if (outcome === "created") break;
     if (attempt === 4) {
@@ -1060,6 +1096,7 @@ export async function withCappedTransaction<T>(
             root,
             resolveUnderRoot(root, file),
             redact(text),
+            0o600,
           );
         },
         assertHandoffRemovable: async (file) => {

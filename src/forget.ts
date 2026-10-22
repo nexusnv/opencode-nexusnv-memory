@@ -144,6 +144,10 @@ export function planForget(
   }
   const ranges =
     file === "activeContext.md" ? knownErrorBlockRanges(lines) : [];
+  const knownErrorsHeading =
+    file === "activeContext.md"
+      ? lines.findIndex((line) => /^##\s+known errors\s*$/i.test(line.trim()))
+      : -1;
   const selected = new Set<number>();
 
   const blockAt = (index: number) =>
@@ -186,6 +190,19 @@ export function planForget(
         `[memory] forget rejected: no line matched "${redact(selector.text)}"`,
       );
     }
+  }
+
+  // Removing the heading alone would leave the captured detail lines in the
+  // file without the structural marker `loadBrief` uses to summarise them.
+  // `--all` is different: it removes the detail too, so it stays allowed.
+  if (
+    selector.kind !== "all" &&
+    knownErrorsHeading !== -1 &&
+    selected.has(knownErrorsHeading)
+  ) {
+    throw new Error(
+      "[memory] forget rejected: refusing to remove the Known-Errors heading; select a block or use --match for its content",
+    );
   }
 
   const units: ForgetUnit[] = [];
