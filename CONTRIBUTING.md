@@ -94,7 +94,7 @@ The published package is the primary user path: `npm install opencode-nexusnv-me
 - Keep every module inside `memory/`. Only `index.ts` is the entrypoint; `.opencode/plugins/` itself only discovers direct files and immediate package directories, so sibling modules must not be scattered there.
 - Global variant: `~/.config/opencode/plugins/`.
 - Plugin arrays merge global → project → `.opencode`; they do not replace.
-- Reload by touching the entry file or restarting the runtime. Verify with `opencode plugin list` (it should show `memory`).
+- Reload by touching the entry file or restarting the runtime. Verify with `/memory-status` in the project. `opencode plugin list` only covers global package plugins, so it cannot confirm a project-local install.
 
 Test the installed package, not only a workspace link.
 
@@ -222,10 +222,9 @@ The published package form (`"plugins": ["opencode-nexusnv-memory"]`) loads the 
 
 ```bash
 npm install opencode-nexusnv-memory@<version>
-opencode plugin list
 ```
 
-`opencode plugin list` should show `memory`. Installing the package alone does not register it; it also has to be declared in the project config.
+Declare it in that project's config, start OpenCode there, and run `/memory-status`. A healthy report proves the project-local plugin loaded. `opencode plugin list` only covers global package plugins, so it cannot confirm this form. Installing the package alone does not register it; it also has to be declared in the project config.
 
 ## Pull request checklist
 
@@ -247,8 +246,8 @@ Published to npm as [`opencode-nexusnv-memory`](https://www.npmjs.com/package/op
 
 1. Bump the version with `npm version <x> --no-git-tag-version`. This updates `package.json` and `package-lock.json` together; editing `package.json` by hand leaves the lockfile out of sync and the release's `npm ci` rejects it. Add a `CHANGELOG.md` entry.
 2. Merge to `main` with CI green: typecheck, tests + coverage, gitleaks, audit, and pack.
-3. Publish a GitHub Release off `main` with a tag matching `v<version>`. The release workflow refuses tags off other branches or a tag/manifest mismatch. It re-runs the gates and _stages_ the asserted tarball with provenance. Nothing goes live from CI: approve the staged version on npmjs.com with 2FA. If several versions are staged, approve oldest-first; approving an older stage after a newer one went live moves the `latest` tag backward.
-4. Verify in a fresh directory: `npm install opencode-nexusnv-memory@<version>`, declare it in that project's config, then confirm `opencode plugin list` shows `memory`.
+3. Publish a GitHub Release off `main` with a tag matching `v<version>`. The release workflow refuses tags off other branches or a tag/manifest mismatch. It re-runs typecheck, coverage, and the pack assertion, then _stages_ the tarball with provenance. Gitleaks and the production-dependency audit run in CI before merge. Nothing goes live from CI: approve the staged version on npmjs.com with 2FA. If several versions are staged, approve oldest-first; approving an older stage after a newer one went live moves the `latest` tag backward.
+4. Verify in a fresh directory: `npm install opencode-nexusnv-memory@<version>`, declare it in that project's config, start OpenCode there, then confirm `/memory-status` reports healthy.
 
 Version discipline: each published version may go out exactly once. The manual bootstrap consumed `0.1.0`, so the existing `v0.1.0` GitHub Release must never be re-run through the workflow (it would attempt the same version and fail). The first workflow-published release must bump to a higher version first.
 
@@ -262,7 +261,7 @@ The release workflow uses short-lived OIDC credentials, not a long-lived npm tok
 
 ### Break-glass
 
-If OIDC is down or misconfigured, run the `release` workflow manually from `main` with `token_fallback` enabled. It runs the same gates but stages the asserted tarball with `NPM_TOKEN` instead of OIDC. Keep that secret read-write-stage-only, with no 2FA bypass and a short expiry: a stage-only token cannot direct-publish, so bypass must stay off. Keep it out of the normal OIDC runs.
+If OIDC is down or misconfigured, run the `release` workflow manually from `main` with `token_fallback` enabled. It runs the same release checks (typecheck, coverage, and the pack assertion) but stages the tarball with `NPM_TOKEN` instead of OIDC. Keep that secret read-write-stage-only, with no 2FA bypass and a short expiry: a stage-only token cannot direct-publish, so bypass must stay off. Keep it out of the normal OIDC runs.
 
 ### Manual bootstrap (completed for 0.1.0)
 

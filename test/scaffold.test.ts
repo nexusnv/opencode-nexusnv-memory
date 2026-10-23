@@ -359,7 +359,7 @@ describe("install_surface_P0_parity", () => {
     expect(md).toMatch(/npm install opencode-nexusnv-memory/);
     expect(md).toContain(".opencode/opencode.jsonc");
     expect(lower).toContain("repository root");
-    expect(md).toMatch(/opencode plugin list/);
+    expect(md).toMatch(/\/memory-status/);
     // The required permission rule and the hand-owned protocol block.
     expect(md).toMatch(/memory_write/);
     expect(md).toMatch(

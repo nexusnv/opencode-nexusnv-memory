@@ -133,19 +133,15 @@ Without this block, the agent has the tools but not the habit of using them. The
 
 ### 5. Verify
 
-```bash
-opencode plugin list
-```
-
-You should see `memory` in the list. Then run:
-
 ```text
 /memory-status
 ```
 
 The status report checks the memory directory, whether `INDEX.md` can be attached, the `AGENTS.md` protocol block, the `memory_write → ask` rule, the optional `memory-manager` agent, capture activity, budgets, and next actions. The permission scan is advisory: it looks for a declaration in known config locations, not the effective runtime policy.
 
-If `memory` is missing from `opencode plugin list`, check that the package is installed in the project, that the config file is in a supported location, and restart OpenCode.
+If `/memory-status` is not available, the plugin did not load for this project. Check that the package is installed, that the config file is in a supported location, and restart OpenCode.
+
+`opencode plugin list` is not a substitute here: it lists global package plugins, not plugins configured for the current project.
 
 ### Optional: the read-only memory manager
 
@@ -357,18 +353,18 @@ A few notes:
 
 ## Troubleshooting
 
-| What you see                                                   | What to try                                                                                                                                                                                                                                      |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The agent does not seem to know the project.                   | Run `/memory-status` and fix its next actions. Make sure the protocol block is in the root `AGENTS.md`, `.opencode/memory/` exists, and the plugin is listed by `opencode plugin list`. Memory also has to be written before it can be recalled. |
-| The permission prompt never appears when applying memory.      | Add the `memory_write → ask` rule at the end of your `permissions` list and restart OpenCode. Check that no later wildcard rule overrides it.                                                                                                    |
-| The agent mentions a `[memory]` status line.                   | It is reporting something real: the INDEX is over its cap, blocks were rotated, a capture was skipped, a forget completed, or a review is due. Trim the file, run `/memory-review`, or check the file permissions.                               |
-| `/memory-review` shows a table but nothing is saved.           | That is the design. Proposals are not writes. Approve the lines you want; each approved line prompts for permission before it is appended.                                                                                                       |
-| The agent forgot the start of a long session after compaction. | Compaction replaces detail with a summary. The plugin saves a handoff and injects prior context, but it is not a transcript. Read the newest handoff or the decision log for the details.                                                        |
-| Memory is not updating.                                        | Run `/memory-status` and check the file sizes against the caps. `INDEX.md` over its cap is not attached, and over-cap files reject writes. Run `/memory-review` to see what is blocked.                                                          |
-| Search finds nothing.                                          | Search is exact literal text, not semantic. Try a shorter phrase, check spelling, or search a specific file. Case-insensitive is the default.                                                                                                    |
-| A write says another OpenCode process is writing memory.       | Wait for the other process to finish, then retry. The lock is held briefly; retrying is safe.                                                                                                                                                    |
-| I forgot a line but it still appears in git history.           | Expected. Forgetting is logical, not secure erasure. Rewrite history or rotate any exposed secret if the old content matters.                                                                                                                    |
-| I want to edit memory by hand.                                 | Go ahead. The files are Markdown. Keep `INDEX.md` short, keep the other files within their caps, and use `/memory-review` to validate changes when you want a second pair of eyes.                                                               |
+| What you see                                                   | What to try                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The agent does not seem to know the project.                   | Run `/memory-status` and fix its next actions. Make sure the protocol block is in the root `AGENTS.md` and `.opencode/memory/` exists. If `/memory-status` is unavailable, the plugin did not load: check the package install and config path, then restart OpenCode. Memory also has to be written before it can be recalled. |
+| The permission prompt never appears when applying memory.      | Add the `memory_write → ask` rule at the end of your `permissions` list and restart OpenCode. Check that no later wildcard rule overrides it.                                                                                                                                                                                  |
+| The agent mentions a `[memory]` status line.                   | It is reporting something real: the INDEX is over its cap, blocks were rotated, a capture was skipped, a forget completed, or a review is due. Trim the file, run `/memory-review`, or check the file permissions.                                                                                                             |
+| `/memory-review` shows a table but nothing is saved.           | That is the design. Proposals are not writes. Approve the lines you want; each approved line prompts for permission before it is appended.                                                                                                                                                                                     |
+| The agent forgot the start of a long session after compaction. | Compaction replaces detail with a summary. The plugin saves a handoff and injects prior context, but it is not a transcript. Read the newest handoff or the decision log for the details.                                                                                                                                      |
+| Memory is not updating.                                        | Run `/memory-status` and check the file sizes against the caps. `INDEX.md` over its cap is not attached, and over-cap files reject writes. Run `/memory-review` to see what is blocked.                                                                                                                                        |
+| Search finds nothing.                                          | Search is exact literal text, not semantic. Try a shorter phrase, check spelling, or search a specific file. Case-insensitive is the default.                                                                                                                                                                                  |
+| A write says another OpenCode process is writing memory.       | Wait for the other process to finish, then retry. The lock is held briefly; retrying is safe.                                                                                                                                                                                                                                  |
+| I forgot a line but it still appears in git history.           | Expected. Forgetting is logical, not secure erasure. Rewrite history or rotate any exposed secret if the old content matters.                                                                                                                                                                                                  |
+| I want to edit memory by hand.                                 | Go ahead. The files are Markdown. Keep `INDEX.md` short, keep the other files within their caps, and use `/memory-review` to validate changes when you want a second pair of eyes.                                                                                                                                             |
 
 ## Uninstall
 
@@ -376,7 +372,7 @@ A few notes:
 2. Remove the `memory_write → ask` permission rule (and the `memory-manager` subagent rule, if you added it).
 3. Remove the memory protocol block from the root `AGENTS.md`.
 4. Remove `.opencode/agents/memory-manager.md` if you installed it.
-5. Restart OpenCode and confirm `opencode plugin list` no longer shows `memory`.
+5. Restart OpenCode and confirm `/memory-status` is no longer available.
 6. If you installed the npm package and no longer need it:
 
    ```bash

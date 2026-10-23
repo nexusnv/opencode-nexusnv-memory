@@ -248,8 +248,8 @@ Exactly five options, all optional, read once in `setup` via `ctx.options`:
 - **Package form:** `"plugins": ["opencode-nexusnv-memory"]` or
   `{ "package": "opencode-nexusnv-memory", "options": { … } }`.
 - Arrays merge global → project → `.opencode` (they do not replace).
-- Verify with `opencode plugin list`; reload by touching the entry file or restarting the runtime per
-  its reload guidance.
+- Verify with `/memory-status` in the project; `opencode plugin list` lists global package plugins
+  only. Reload by touching the entry file or restarting the runtime per its reload guidance.
 
 ### 4.2 Agents (US-13, AS-06, HS-08)
 
@@ -315,7 +315,7 @@ Create the six files by hand, paste the protocol block into root `AGENTS.md`, an
 Remove the `plugins` entry and/or delete `.opencode/plugins/memory/`; remove the `AGENTS.md` protocol
 block by hand. `.opencode/memory/` stays in git until an explicit `git rm` (never auto-deleted). The
 `ctx.storage` ledger is harmlessly orphaned. No daemon, server, keys, or index to purge. Acceptance:
-`opencode plugin list` hides `memory`; hooks stop; history restores any prior state.
+`/memory-status` is no longer available; hooks stop; history restores any prior state.
 
 ---
 
@@ -1440,7 +1440,8 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   claims.** Provider cache measurement is manual and documented in
   `docs/2026-10-20-e8-cache-placement-spike.md`; no production cache metric exists.
 - **Compatibility:** test the installed package against the targeted OpenCode release; record the
-  supported range in README/CHANGELOG; verify the published form loads with `opencode plugin list`.
+  supported range in README/CHANGELOG; verify the published form loads by running `/memory-status` in
+  a configured project.
 - **Docs to ship:** README (install matrices, P0 manual, budgets, uninstall), `AGENTS.md` block,
   `memory-manager.md`, commented options snippet, CHANGELOG, this spec + ADRs.
 
