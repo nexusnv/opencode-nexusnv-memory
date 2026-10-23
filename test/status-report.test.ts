@@ -269,7 +269,7 @@ describe("collectStatus + renderStatusReport", () => {
         "restart/reload the plugin to scaffold .opencode/memory",
         "install the AGENTS.md protocol block (README install)",
         "declare the memory_write -> ask permission rule (README install; effective rules are unverifiable here)",
-        "no idle/compaction captures observed yet — run the README deploy check",
+        "no idle/compaction captures observed yet — use the session normally, then re-check",
       ]),
     );
     // The missing memory directory already has the scaffold action; do not

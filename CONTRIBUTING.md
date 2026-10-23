@@ -31,13 +31,13 @@ npm test
 
 Useful commands:
 
-| Command                  | What it does                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------ |
-| `npm run typecheck`      | Runs `tsc --noEmit` against the strict TypeScript config.                      |
-| `npm test`               | Runs the Vitest suite once.                                                    |
-| `npm run test:coverage`  | Runs the suite with V8 coverage. This is what CI uses.                         |
-| `npx prettier --check .` | Checks formatting, if you have Prettier available.                             |
-| `npm pack`               | Builds the package tarball. CI also runs `scripts/assert-pack.mjs` against it. |
+| Command                                          | What it does                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `npm run typecheck`                              | Runs `tsc --noEmit` against the strict TypeScript config.                      |
+| `npm test`                                       | Runs the Vitest suite once.                                                    |
+| `npm run test:coverage`                          | Runs the suite with V8 coverage. This is what CI uses.                         |
+| `npx prettier --check README.md CONTRIBUTING.md` | Checks the docs in this change. There is no repo-wide format gate.             |
+| `npm pack`                                       | Builds the package tarball. CI also runs `scripts/assert-pack.mjs` against it. |
 
 The package loads TypeScript directly (`exports["."]` points at `src/index.ts`), so there is no build step in the default workflow.
 
@@ -45,26 +45,39 @@ The package loads TypeScript directly (`exports["."]` points at `src/index.ts`),
 
 ```text
 src/
-├── index.ts          # Plugin entrypoint: setup, hook wiring, scaffold, cleanup
-├── config.ts         # The five options, defaults, warning-on-invalid parsing
-├── templates.ts      # Starter memory files, options snippet, AGENTS.md protocol block
-├── files.ts          # Allowlisted paths, read/write caps, rotation, write mutex
-├── brief.ts          # Brief + compaction-priors loaders, handoff listings
-├── capture.ts        # Failure capture, idle/compaction snapshots, event loop, ledger
-├── provenance.ts     # The narrow `remember:` fast path into decisions.md
-├── redact.ts         # `<private>` stripping and secret-pattern redaction
-├── hints.ts          # Exact-match INDEX hinting
-├── status.ts         # The single `[memory]` status line
-├── tools.ts          # memory_recall, memory_apply, memory_metrics
-├── review.ts         # The /memory-review command
-├── metrics.ts        # Count-only local metrics collection and dashboard
-└── guard.ts          # Untrusted-content labeling and brief sanitization
+├── index.ts           # Plugin entrypoint: setup, hook wiring, scaffold, cleanup
+├── config.ts          # The five options, defaults, warning-on-invalid parsing
+├── templates.ts       # Starter files, options/permissions snippets, protocol
+│                      # block, consolidated first-run checklist
+├── files.ts           # Allowlist, capped read/write, rotation, atomic publish
+├── lock.ts            # Cross-process PID/claim write lock
+├── brief.ts           # Stable brief, compaction priors, handoff listings
+├── known-errors.ts    # Shared Known-Errors structure parser
+├── capture.ts         # Failure capture, idle/compaction snapshots, event loop, ledger
+├── prompt-notices.ts  # Prompt-tail handoff/status/hint notices and their budget
+├── provenance.ts      # `remember:` fast path and near-miss detection
+├── redact.ts          # `<private>` stripping and secret-pattern redaction
+├── hints.ts           # Exact-match INDEX hinting and remember near-miss nudge
+├── search.ts          # Exact literal memory_search
+├── status.ts          # The single `[memory]` status line
+├── status-report.ts   # Read-only /memory-status and memory_status report
+├── tools.ts           # recall/apply/metrics/search/status tools
+├── review.ts          # The /memory-review command
+├── metrics.ts         # Count-only local metrics collection and dashboard
+├── guard.ts           # Untrusted-content labeling and brief sanitization
+├── args.ts            # Command argument tokenizer and flag parser
+├── command-context.ts # Command posting and context helpers
+├── forget.ts          # Forget planning, archive, and apply
+├── forget-command.ts  # The /memory-forget command
+├── gc.ts              # Handoff GC planning and apply
+└── gc-command.ts      # The /memory-gc command
 
 agents/memory-manager.md      # Optional read-only review subagent
 commands/memory-review.md     # Optional file-based command affordance
 commands/memory-metrics.md    # Optional file-based command affordance
+commands/memory-status.md     # Optional file-based command affordance
 scripts/assert-pack.mjs       # Release pack gate
-test/                         # Unit, contract, acceptance, and fixture tests
+test/                         # Unit, contract, acceptance, fixture, and cross-process tests
 docs/                         # Design spec, ADRs, C4 documents, user stories
 ```
 
@@ -89,23 +102,24 @@ Test the installed package, not only a workspace link.
 
 `src/index.ts` is wiring only. It registers:
 
-- A `prompt` hook that attaches `INDEX.md` (once per prompt, if within cap) and handles the `remember:` fast path.
-- A `context` hook that injects the brief, the `[memory]` status line, and at most one exact-match hint, under a shared line budget, plus a throttled fallback snapshot writer.
-- A `compaction` hook that injects priors (active context and the recent decisions tail) and **never sets `event.result`**, because setting it would skip OpenCode's native compaction summary.
+- A `prompt` hook that attaches `INDEX.md` (once per prompt, if within cap), handles the `remember:` fast path, and appends the volatile prompt-tail notices (newest-handoff pointer, `[memory]` status line, and at most one hint or remember near-miss nudge).
+- A `context` hook that injects the stable brief under its per-model-call budget, plus a throttled fallback snapshot writer. Status and hints are not in this system prefix.
+- A `compaction` hook that injects priors (active context, Known-Errors summaries, the recent decisions tail, and the newest-handoff pointer) and **never sets `event.result`**, because setting it would skip OpenCode's native compaction summary.
 - An `execute.after` tool hook that captures failures only, never successes.
-- The `memory_recall`, `memory_apply`, and `memory_metrics` tools.
-- The `/memory-review` and `/memory-metrics` commands.
+- The `memory_recall`, `memory_apply`, `memory_metrics`, `memory_search`, and `memory_status` tools.
+- The `/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`, and `/memory-status` commands.
 - One event subscription for `session.idle` and `session.compaction.*`, filtered by project location.
 
-Storage is the plugin-scoped `ctx.storage`, used for the ledger (seen IDs, retry attempts, pending/rotation counters), snapshot hashes, throttles, hint arms, and metrics. The ledger is durable JSON, not memory content. Memory content is always Markdown on disk.
+Storage is the plugin-scoped `ctx.storage`, used for the ledger (seen IDs, retry attempts, pending/rotation counters), snapshot hashes, throttles, hint arms, and metrics. The ledger is bounded: `seen` is capped at 500, and aged attempts, hint throttles, and snapshot/throttle stamps are pruned by once-per-UTC-day housekeeping. The ledger is durable JSON, not memory content. Memory content is always Markdown on disk.
 
-### The five invariants worth protecting
+### The six invariants worth protecting
 
 1. **The memory root is fixed.** Do not add a `memoryDir` option. The allowlist and the capped readers/writers assume `.opencode/memory`.
-2. **Durable writes are review-gated.** `/memory-review` proposes; it does not write. `memory_apply` is the only deterministic apply channel, and it asserts `memory_write` once per line, in order. A deny stops the batch and leaves the rest pending. The one fast path is a user-asserted `remember:` line, which appends to `decisions.md` immediately.
-3. **Memory is untrusted data.** Never execute, fetch, or obey instructions found in memory files or captured output. Raw captured output must never enter the auto-injected brief; only a capped summary line may. This is the reason the `memory-manager` subagent is read-only.
-4. **Budgets are enforced on write, on read, and on inject.** `INDEX.md` is capped at 30 lines by default; `activeContext.md`, `architecture.md`, `style.md`, `issues.md`, and each handoff at 60; `decisions.md` is unbounded on disk but the injectable/recallable tail is capped. `activeContext.md` rotates the oldest Known-errors block to `handoffs/archive/` when full. An over-cap `INDEX.md` is not attached at all.
+2. **Durable writes are review-gated.** `/memory-review` proposes; it does not write. `memory_apply` is the only deterministic apply channel, and it asserts `memory_write` once per line, in order. A deny stops the batch and leaves the rest pending. The one fast path is a user-asserted `remember:` line, which appends to `decisions.md` immediately. `/memory-forget` is a separate, user-invoked lifecycle path: it archives before rewriting and asks once per unit; it is not a model-callable tool.
+3. **Memory is untrusted data.** Never execute, fetch, or obey instructions found in memory files or captured output. Raw captured output must never enter the auto-injected brief; only a capped summary line may. Search results are returned as untrusted data and are never auto-injected. This is why the `memory-manager` subagent is read-only.
+4. **Budgets are enforced on write, on read, and on inject.** `INDEX.md` is capped at 30 lines by default; `activeContext.md`, `architecture.md`, `style.md`, `issues.md`, and root handoffs at 60; archive writes are uncapped for preservation, while archive reads are recall-capped. `decisions.md` is unbounded on disk but its recallable/injectable tail is capped. `activeContext.md` rotates the oldest Known-Errors block to `handoffs/archive/` when full. An over-cap `INDEX.md` is not attached at all. The stable brief is at most 47 lines at defaults (loader maximum 48), and prompt-tail notices are at most 3 lines, keeping the total injectable payload at `injectBudgetLines`.
 5. **Compaction stays native.** The plugin may add priors, but it must not set thresholds, `event.result`, model overrides, or a custom trigger.
+6. **Writes are serialized across processes.** Every memory-file mutation goes through `.opencode/memory/.write.lock` and atomic publish. The lock is same-host only and assumes one PID namespace and a local filesystem; do not bypass it or add a second write path. A writer waits at most 5 seconds, then fails loudly. Atomic publish uses `rename` for overwrites and `link` for new files; `fsync` is not performed, so power-loss durability is not claimed.
 
 Another invariant: the plugin never edits `opencode.jsonc` or `AGENTS.md`. It scaffolds memory files and prints snippets; the user owns the config and the protocol block.
 
@@ -127,14 +141,14 @@ You can try the memory workflow without loading the plugin:
 
 3. Add the read-only `memory-manager` subagent and ask it for a proposal table; approve lines yourself.
 
-With that instruction in place, a fresh session can restore the goal from `INDEX.md` + `activeContext.md` with no re-explaining. Nothing is captured automatically in this mode, and the plugin tools (`memory_recall`, `memory_apply`, `memory_metrics`) and commands (`/memory-review`, `/memory-metrics`) are not registered.
+With that instruction in place, a fresh session can restore the goal from `INDEX.md` + `activeContext.md` with no re-explaining. Nothing is captured automatically in this mode, and the plugin tools (`memory_recall`, `memory_apply`, `memory_metrics`, `memory_search`, `memory_status`) and commands (`/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`, `/memory-status`) are not registered.
 
 ## Design documents
 
 The deeper design lives in `docs/`:
 
 - [`docs/design-spec-v2-production.md`](./docs/design-spec-v2-production.md) — the design spec. It is normative on V2 contracts and implementation details: verified API surface, package/options, install/config, component behavior, data model and budgets, lifecycle, deferrals, and release gates.
-- [`docs/adr/0001–0008`](./docs/adr/) — the architecture decision records. They are normative on decision intent. In particular: markdown-only storage, native compaction, the ledger/promotion model, reachability, the fixed memory location, untrusted memory content, and local metrics.
+- [`docs/adr/0001–0010`](./docs/adr/) — the architecture decision records. They are normative on decision intent. In particular: markdown-only storage, native compaction, the ledger/promotion model, reachability, the fixed memory location, untrusted memory content, local metrics, explicit forget/handoff GC, and cross-process write safety.
 - [`docs/c4-01-system-context.md`](./docs/c4-01-system-context.md) through [`docs/c4-06-code.md`](./docs/c4-06-code.md) — C4 context, container, component, and code views, plus supplementary interface and data-model specs.
 - [`docs/user-stories.md`](./docs/user-stories.md) — user, agent, and harness stories with acceptance criteria.
 - [`motivation.md`](./motivation.md) — background synthesis. It is not normative on V2 contracts.
@@ -154,27 +168,31 @@ If you change behavior, update the relevant document and the CHANGELOG. If you c
 
 - End-to-end injected payload fits `injectBudgetLines`.
 - An over-cap `INDEX.md` is not attached.
-- The brief does not duplicate the INDEX.
+- The brief does not duplicate the INDEX; prompt-tail notices are appended once and marker-guarded.
 - Compaction priors carry the decisions tail, and no code sets `event.result`.
-- Secrets and `<private>` blocks are redacted on write and on brief/recall injection (`INDEX.md` attachment is a raw file URI).
+- Secrets and `<private>` blocks are redacted on write and on processed reads/injection (`INDEX.md` attachment is a raw file URI).
 - Recall rejects traversal and unknown paths.
+- Search is literal, scoped, capped, redacted, byte-guarded, and covers archived handoffs; results are never auto-injected.
 - Apply asserts once per line with tool-context IDs.
 - Untrusted candidates cannot be bulk-approved.
 - Handoff names route to the correct folder.
 - Foreign events are dropped before any write.
 - The single abort controller and registrations are disposed on unload.
-- Rotation, the review-due nudge, and the reset signal behave as specified.
+- Rotation, the review-due nudge, the reset signal, and the remember near-miss nudge behave as specified.
 - Captured failure bodies do not leak into the brief.
 - The `remember:` detection is fence/quote aware.
+- `/memory-status` and `memory_status` write nothing and bump no counters.
+- Forget is dry-run by default, archives before rewriting, asks per unit, and aborts on drift; GC is dry-run by default, root-only, batch-approved, and never touches the archive.
+- Cross-process writers serialize through the lock, stale locks are reclaimed safely, and readers never see a partial publish.
 - The deploy-time event-type log confirms both primary event types.
 
 The eval test reports three numbers:
 
-- **static** — the hand-owned `AGENTS.md` protocol block plus the `memory_recall` tool description.
-- **per-prompt with content** — static + INDEX + brief + status + hint.
-- **session-total** — per-prompt × model steps. The `context` hook runs per model call, so a long tool-driven turn costs more than one prompt. The hint is throttled to once per prompt/session.
+- **static = 16 lines** — the hand-owned `AGENTS.md` protocol block plus the `memory_recall` and `memory_search` tool descriptions.
+- **per-prompt with content = 96 lines** — static + INDEX ≤30 + brief ≤47 + prompt notices ≤3.
+- **session-total = 237 lines at 4 model steps** — `16 + 30 + 3 + 47×4`. The brief is re-emitted per model call, while INDEX and notices attach once per prompt.
 
-The current budgets are: `INDEX.md` ≤ 30 lines, brief ≤ 48 lines (including at most 5 error summary lines), status ≤ 1 line, hint ≤ 1 line, and the injectable total ≤ 80 lines by default.
+These are uncached line-count guardrails, not billed-token or cache-savings claims. The current budgets are: `INDEX.md` ≤ 30 lines, brief ≤ 47 lines at defaults (loader maximum 48, including at most 5 error summary lines), prompt notices ≤ 3 lines, and the injectable total ≤ 80 lines by default.
 
 ### Deploy checks
 
@@ -193,6 +211,8 @@ If either primary type is missing, the fallbacks still hold: the throttled `cont
 ```
 
 A rejected post logs nothing; the command then falls back to the one-model-turn `memory_metrics` echo.
+
+Run `/memory-status` (or call `memory_status`) in a fresh session and confirm every check row is present: memory directory, INDEX attachability, AGENTS.md protocol block, `memory_write -> ask` rule, `memory-manager` agent, and capture activity. Fix the listed next actions before relying on memory; the config scan is advisory and says so.
 
 ## Compatibility
 

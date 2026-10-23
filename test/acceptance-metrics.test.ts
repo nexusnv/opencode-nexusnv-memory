@@ -31,7 +31,7 @@
  * (h) fire-and-forget volume — a 1,000-bump burst against a saturated
  *     storage queue with the hook completing unaffected (`bump` is a
  *     synchronous `void`),
- * (i) README deploy-check parity — the read-me deploy check mentions both
+ * (i) CONTRIBUTING deploy-check parity — the contributor docs mention both
  *     gate lines (`event.type` delivery + G-M1).
  *
  * Modifies nothing under src/: a green acceptance means Tasks 1–6 keep

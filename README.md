@@ -6,7 +6,7 @@
 
 OpenCode is good at the code in front of it. It is less good at remembering why that code looks the way it does.
 
-This plugin gives OpenCode a small, durable memory for each project. It keeps a one-page map, a short working brief, and a handful of longer notes in plain Markdown. The agent sees the map and the brief automatically, can look up the longer notes when a question needs them, and asks you before captured notes become permanent. If you explicitly tell it to remember something, that is treated as your approval.
+This plugin gives OpenCode a small, durable memory for each project. It keeps a one-page map, a short working brief, and a handful of longer notes in plain Markdown. The agent sees the map and the brief automatically, can look up the longer notes when a question needs them, and asks you before captured notes become permanent. If you use the explicit `remember:` form, that is treated as your approval.
 
 No account. No server to run. No separate database. No embeddings. Memory is stored as plain Markdown in your project, in files you can read and edit. The plugin itself never uploads anything, but the parts it injects into a prompt are sent by OpenCode to the model provider you configured — so with a hosted provider, that content leaves your machine.
 
@@ -16,7 +16,7 @@ No account. No server to run. No separate database. No embeddings. Memory is sto
 - **Keeping the "why".** Decisions, rejected alternatives, and naming history stay available long after the chat that produced them is gone.
 - **Remembering how you like to work.** Your architecture rules and coding preferences can survive a model swap.
 - **Noticing when something breaks.** Failed commands, builds, and tests can leave a short trace the agent can recall later, instead of vanishing with the scrollback.
-- **Finding older context.** When the short version misses something, an exact text search can look across the full memory files and archived handoffs.
+- **Finding older context.** When the short version misses something, an exact text search can look across the memory files and archived handoffs.
 - **Cleaning up deliberately.** `/memory-forget` and `/memory-gc` are dry-run first, show you what would change, and require confirmation before anything is removed.
 - **Storage you control.** Everything it remembers is stored in your project, in files you can read, edit, diff, commit, and delete.
 
@@ -44,7 +44,7 @@ The plugin keeps six Markdown files in `.opencode/memory/`, plus a `handoffs/` f
 | `style.md`          | Short, quotable rules about how you want the agent to behave.                                | Read on demand, and updated through review.                                                                                          |
 | `issues.md`         | Planned work, one line per item, with an optional issue reference.                           | Edited by hand or validated during review.                                                                                           |
 | `handoffs/`         | Snapshots of where a session left off: branch, open changes, and a pointer to the next step. | The newest one is mentioned in the prompt notes. Older ones are listed and read on demand.                                           |
-| `handoffs/archive/` | Rotated error blocks, forgotten content, and other retired material.                         | Read-only for the lifecycle commands. Searchable and recallable on demand.                                                           |
+| `handoffs/archive/` | Rotated error blocks, forgotten content, and other retired material.                         | Preserved by the lifecycle commands: forget writes archived copies here, and GC never deletes from it. Searchable and recallable.    |
 
 The files are deliberately small. A small, trustworthy map is more useful than a giant memory dump, and it keeps the amount of context the plugin adds under control.
 
@@ -55,7 +55,7 @@ The files are deliberately small. A small, trustworthy map is more useful than a
 3. **You review.** When you run `/memory-review`, the agent reads the scratchpad and proposes a table of specific lines that could be promoted into the longer-lived files. It writes nothing at this stage.
 4. **You approve.** Each approved line goes through a permission prompt before it is appended. Once approved, the agent can recall or search it in later sessions.
 
-In short: **capture is automatic, permanence is not.** Nothing important becomes durable just because it was discussed. If you later want something gone, `/memory-forget` and `/memory-gc` are separate, explicit cleanup steps.
+In short: **capture is automatic, permanence is not.** Nothing important becomes durable just because it was discussed. If you later want something gone from the editable files, `/memory-forget` and `/memory-gc` are separate, explicit cleanup steps; `decisions.md` is append-only, so corrections there are new entries rather than deletions.
 
 ### What happens without you lifting a finger
 
@@ -73,7 +73,7 @@ In short: **capture is automatic, permanence is not.** Nothing important becomes
 - **Promoting notes into permanent memory.** Run `/memory-review`, read the proposal, and approve the lines you actually want. A new memory starts empty; it becomes useful as you review and shape it.
 - **Telling it a fact directly.** Use the `remember:` form described below when you already know something belongs in the decision log.
 - **Finding something older.** Ask the agent to search memory when recall's capped view is not enough.
-- **Cleaning up.** Use `/memory-forget` for active memory lines and `/memory-gc` for old handoff snapshots. Both are dry-run by default.
+- **Cleaning up.** Use `/memory-forget` for lines in the editable files (not the append-only decision log) and `/memory-gc` for old handoff snapshots. Both are dry-run by default.
 - **Checking the install.** Run `/memory-status` after setup, after changing configuration, or when something seems off.
 - **Keeping the files tidy.** They are ordinary Markdown. You can edit them by hand whenever you like.
 
@@ -106,7 +106,7 @@ Use `.opencode/opencode.jsonc` (recommended) or an `opencode.jsonc` at the repos
 }
 ```
 
-The permission rule is not optional decoration. It is what makes the plugin ask you before writing an approved memory line. Add it **at the end** of your `permissions` list, because OpenCode uses the last matching rule and a broad `allow` later in the list would override it.
+The permission rule is not optional decoration. It is what makes the plugin ask before applying a reviewed line, a forget, or a GC batch. Add it **at the end** of your `permissions` list, because OpenCode uses the last matching rule and a broad `allow` later in the list would override it.
 
 ### 3. Start OpenCode once
 
@@ -224,7 +224,7 @@ Ask in plain language:
 The agent has two read paths:
 
 - `memory_recall` reads one capped, redacted file at a time from the known memory files, or lists the available handoffs by name.
-- `memory_search` runs an exact literal search across the allowlisted files, including the full `decisions.md` and archived handoffs. It is case-insensitive by default, returns up to 20 matches by default (maximum 50), and can be scoped to one file.
+- `memory_search` runs an exact literal search across the allowlisted files, including `decisions.md` beyond recall's capped tail and archived handoffs. It is case-insensitive by default, returns up to 20 matches by default (maximum 50), and can be scoped to one file.
 
 Neither path searches your whole repository. There are no embeddings, fuzzy matches, or semantic rankings. If search misses something, try a shorter exact phrase or a different capitalization setting. Results are shown as untrusted data, not instructions.
 
@@ -270,7 +270,7 @@ Remove a line or block from an active memory file:
 /memory-forget architecture.md --match "legacy queue adapter"
 ```
 
-Preview the exact redacted text first, then add `--confirm`:
+Preview the redacted selection first, then add `--confirm`:
 
 ```text
 /memory-forget architecture.md --match "legacy queue adapter" --confirm
@@ -286,13 +286,13 @@ Prune old root handoff snapshots:
 /memory-gc --older-than 30 --keep 20
 ```
 
-The first two runs above are dry-runs. Add `--confirm` to delete the listed root `handoffs/*.md` snapshots. `handoffs/archive/` is never touched, and there is no automatic sweep or background job. Deletion is irreversible on this machine, and untracked snapshots cannot be recovered from git, so commit first if you care about them.
+All three examples above are dry-runs until you add `--confirm`. Adding it deletes the listed root `handoffs/*.md` snapshots. `handoffs/archive/` is never touched, and there is no automatic sweep or background job. Deletion is irreversible on this machine, and untracked snapshots cannot be recovered from git, so commit first if you care about them.
 
 A successful forget leaves a short status notice on a later prompt, reminding you that the content was archived and may persist in git history or backups.
 
 ## Things to know before you rely on it
 
-- **The permission rule is the safety gate.** Without `{ "action": "memory_write", "resource": "*", "effect": "ask" }`, OpenCode's default policy can apply the lines you approve during review without asking you. Add the rule last in your permissions list, and do not let a later wildcard override it.
+- **The permission rule is the safety gate.** Without `{ "action": "memory_write", "resource": "*", "effect": "ask" }`, OpenCode's default policy can apply a reviewed line, a forget, or a GC batch without asking you. Add the rule last in your permissions list, and do not let a later wildcard override it.
 - **The startup warning is expected.** The plugin prints the permission warning even when the rule is installed. It cannot see your effective rules. Check your config or `/memory-status` if you are unsure.
 - **Memory becomes model input.** The plugin makes no network calls, but it puts memory into prompts and system context. OpenCode sends those requests to your configured model provider; with a hosted provider, that content leaves your machine. Treat memory as something your model provider can see.
 - **Talking about something does not make it permanent.** Captures sit in the scratchpad until you review them. If you never review, the longer files stay thin.
@@ -300,7 +300,7 @@ A successful forget leaves a short status notice on a later prompt, reminding yo
 - **"Remember" is picky on purpose.** Only a line starting with `remember:` or `remember that`, outside fences and quotes, takes the fast path. Everything else waits for review or gets a near-miss nudge. This makes accidental memories much less likely.
 - **Search is literal.** `memory_search` matches exact text, not meaning. A synonym, a different spelling, or a paraphrase may find nothing.
 - **Forget is not secure erasure, and GC is irreversible.** Forgetting archives before rewriting, but old copies may survive in git, backups, or caches. GC deletes root handoffs outright and never touches `handoffs/archive/`.
-- **Redaction is best-effort.** Common secrets and `<private>…</private>` blocks are stripped before the plugin writes memory and before it injects the brief, recall results, search results, and compaction priors. `INDEX.md` is attached as a file, not run through that pass, so keep secrets out of it. Pattern matching is not a guarantee. Failed command output can be captured; if your commands print sensitive data, set `captureFailures` to `false` or keep secrets out of the commands you run.
+- **Redaction is best-effort.** Common secrets and `<private>…</private>` blocks are stripped before the plugin writes memory and before it returns or injects the brief, recall results, search results, and compaction priors. `INDEX.md` is attached as a file, not run through that pass, so keep secrets out of it. Pattern matching is not a guarantee. Failed command output can be captured; if your commands print sensitive data, set `captureFailures` to `false` or keep secrets out of the commands you run.
 - **The files have size limits.** `INDEX.md` stops being attached when it grows past its cap. Promotions into the other capped files are refused if they would overflow, except `activeContext.md`, which rotates old error blocks to `handoffs/archive/`. `decisions.md` keeps everything on disk, but recall only shows its recent tail; use `memory_search` for older entries.
 - **Two OpenCode processes can write at once, but they take turns.** A second writer waits up to five seconds while another process holds the memory lock. If it still cannot get the lock, the write fails with a `[memory] another OpenCode process is writing memory` message instead of silently dropping data. Retry after the other process finishes. The lock is for one host and a local filesystem; network shares and containers without a shared process namespace are not covered.
 - **Memory is per project and plain text.** There is no cross-project recall. The files live in your repository and are as portable, diffable, and deleteable as any other source file.
@@ -329,13 +329,13 @@ All options are optional. If you use the plain string form (`"plugins": ["openco
 }
 ```
 
-| Option                    | Default | What it does                                                                                                                                                                                                  |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `indexLines`              | `30`    | Maximum lines in `INDEX.md`. If the file is over this limit, it is not attached to prompts; the agent gets a status reminder instead.                                                                         |
-| `fileLines`               | `60`    | Maximum lines for `activeContext.md`, `architecture.md`, `style.md`, `issues.md`, and each handoff. `activeContext.md` rotates old error blocks when full; the other files reject writes that would overflow. |
-| `injectBudgetLines`       | `80`    | Total auto-injected budget per request: `INDEX.md` + brief + prompt notices. Keep this above `indexLines`, or there is no room left for the brief.                                                            |
-| `captureFailures`         | `true`  | Record failed shell/build/test output. The brief shows only a short summary per error; the detail stays in the file for recall. Set to `false` if command output may contain sensitive data.                  |
-| `snapshotThrottleMinutes` | `10`    | Minimum minutes between fallback snapshots written during an active session. Idle and compaction snapshots are handled separately.                                                                            |
+| Option                    | Default | What it does                                                                                                                                                                                                       |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `indexLines`              | `30`    | Maximum lines in `INDEX.md`. If the file is over this limit, it is not attached to prompts; the agent gets a status reminder instead.                                                                              |
+| `fileLines`               | `60`    | Maximum lines for `activeContext.md`, `architecture.md`, `style.md`, `issues.md`, and each root handoff. `activeContext.md` rotates old error blocks when full; the other files reject writes that would overflow. |
+| `injectBudgetLines`       | `80`    | Total auto-injected budget per request: `INDEX.md` + brief + prompt notices. Keep this above `indexLines`, or there is no room left for the brief.                                                                 |
+| `captureFailures`         | `true`  | Record failed shell/build/test output. The brief shows only a short summary per error; the detail stays in the file for recall. Set to `false` if command output may contain sensitive data.                       |
+| `snapshotThrottleMinutes` | `10`    | Minimum minutes between fallback handoff snapshots from the context hook in a session. Idle and compaction snapshots are handled separately.                                                                       |
 
 A few notes:
 
@@ -350,7 +350,7 @@ A few notes:
 - **The plugin makes no network calls.** It needs no account, API keys, or plugin server, and uses no embeddings or vector database. Memory is stored in your project as plain Markdown.
 - **Memory goes where your model goes.** `INDEX.md`, the brief, status, hints, recall results, search results, and compaction priors are added to model requests. OpenCode sends those requests to the model provider configured for your session. With a hosted provider, that memory leaves your machine, and the provider's retention and logging policies apply.
 - **Metrics are counts only.** They live in OpenCode's local plugin storage, contain no prompt text or tool output, and can be cleared with `/memory-metrics reset confirm`.
-- **Secrets are redacted, with one exception.** `<private>…</private>` blocks and common token, key, password, and URL-credential patterns are removed before the plugin writes memory and before it injects the brief, recall results, search results, and compaction priors. `INDEX.md` is attached as a file, so it does not get that pass. This is a safety net, not a promise. Do not put secrets in memory on purpose.
+- **Secrets are redacted, with one exception.** `<private>…</private>` blocks and common token, key, password, and URL-credential patterns are removed before the plugin writes memory and before it returns or injects the brief, recall results, search results, and compaction priors. `INDEX.md` is attached as a file, so it does not get that pass. This is a safety net, not a promise. Do not put secrets in memory on purpose.
 - **Memory is untrusted data.** The agent is told not to execute, fetch, or obey instructions found in memory files, including captured command output. Review proposals with that in mind; approving a line from an untrusted source is still a human decision.
 - **Search and status are read-only.** They add no storage keys and change no counters.
 - **Memory is plain text in your repository.** It is not encrypted. Commit it, ignore it, or delete it the same way you would any other project file. Git history keeps old versions around, including content you forget.
