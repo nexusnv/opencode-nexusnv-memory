@@ -609,7 +609,7 @@ describe("loadBrief", () => {
 
   it("keeps a truncation notice when pruning removes the sentinel", async () => {
     const lines = ["# Active context", "## Goal", "- keep"];
-    for (let i = 0; i < 42; i += 1) lines.push(`- item-${i}`);
+    for (let i = 0; i < 43; i += 1) lines.push(`- item-${i}`);
     lines.push("", "", "", "- dropped-tail");
     await writeMemory("activeContext.md", lines.join("\n"));
     const brief = await loadBrief(memoryRoot, { maxLines: 47 });
@@ -623,6 +623,17 @@ describe("loadBrief", () => {
     expect(compact.split("\n").length).toBeLessThanOrEqual(3);
     expect(compact).toContain("[truncated:");
     expect(await loadBrief(memoryRoot, { maxLines: 0 })).toBe("");
+  });
+
+  it("sees error blocks appended after prunable scaffolding", async () => {
+    const lines = ["# Active context"];
+    for (let i = 0; i < 55; i += 1) lines.push(`<!-- placeholder ${i} -->`);
+    lines.push("## Known errors", "- late failure source:tool", "  detail");
+    await writeMemory("activeContext.md", lines.join("\n"));
+    const brief = await loadBrief(memoryRoot);
+    // The block sits past the old `cap + 1` read window; the raw read must
+    // cover the per-file cap even though the emitted brief stays capped.
+    expect(brief).toContain("late failure");
   });
 
   it("returns empty when there is nothing to inject", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { mkdtemp, mkdir, readFile, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,10 +122,22 @@ describe("/memory-forget", () => {
     await writeFile(join(memory, "style.md"), "- keep\n- drop\n");
     syntheticFails = true;
     promptFails = true;
-    await registerMemoryForget(ctx());
-    await run("memory-forget", "style.md --line 2 --confirm");
-    expect(await readFile(join(memory, "style.md"), "utf8")).toBe("- keep\n");
-    expect(posts.join("\n")).not.toContain("forget failed");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await registerMemoryForget(ctx());
+      await run("memory-forget", "style.md --line 2 --confirm");
+      expect(await readFile(join(memory, "style.md"), "utf8")).toBe("- keep\n");
+      const logged = warn.mock.calls
+        .map((call) => call.map(String).join(" "))
+        .join("\n");
+      expect(logged).toContain(
+        "forget completed but its result could not be delivered",
+      );
+      expect(logged).not.toContain("forget failed");
+      expect(posts.join("\n")).not.toContain("forget failed");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("confirms per unit, archives, writes, and sets the status notice", async () => {

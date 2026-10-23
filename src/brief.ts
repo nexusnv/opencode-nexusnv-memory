@@ -450,11 +450,19 @@ export async function loadBrief(
         ? Math.min(requested, BRIEF_MAX_LINES)
         : BRIEF_MAX_LINES;
     if (cap === 0) return "";
-    // fileLines intentionally unused: the brief is bounded by `cap`
-    // (≤BRIEF_MAX_LINES), which is tighter than any per-file disk cap.
+    // Read through the per-file cap: captureFailure appends new Known-Errors
+    // blocks at the end, so a `cap`-line window can hide them behind prunable
+    // scaffolding. The emitted brief stays bounded by `cap` below.
+    const requestedFileLines = options?.fileLines;
+    const fileLines =
+      requestedFileLines !== undefined &&
+      Number.isInteger(requestedFileLines) &&
+      requestedFileLines > 0
+        ? requestedFileLines
+        : DEFAULT_MEMORY_OPTIONS.fileLines;
     const loaded = await readContainedLines("activeContext.md", {
       memoryRoot: root,
-      maxLines: cap + 1,
+      maxLines: Math.max(cap, fileLines) + 1,
       maxBytes: 1_048_576,
       onMissing: "skip",
     });

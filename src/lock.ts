@@ -47,8 +47,10 @@ export function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // EPERM means the process exists but is not signalable by us.
-    return codeOf(error) === "EPERM";
+    // Only ESRCH proves the process is gone. EPERM means it exists but is not
+    // signalable by us; any other errno is uncertain, and an uncertain holder
+    // must never trigger a stale-lock takeover (ADR-0010).
+    return codeOf(error) !== "ESRCH";
   }
 }
 

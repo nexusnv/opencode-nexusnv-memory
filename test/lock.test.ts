@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   mkdtemp,
   readFile,
@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireWriteLock,
+  isProcessAlive,
   WRITE_LOCK_CLAIM_FILE,
   WRITE_LOCK_FILE,
 } from "../src/lock.js";
@@ -18,6 +19,42 @@ import {
 async function root(): Promise<string> {
   return mkdtemp(join(tmpdir(), "memory-lock-"));
 }
+
+describe("isProcessAlive", () => {
+  it("treats only ESRCH as proof that the holder is dead", () => {
+    const kill = vi.spyOn(process, "kill");
+    try {
+      kill.mockImplementation(() => true);
+      expect(isProcessAlive(4242)).toBe(true);
+      kill.mockImplementation(() => {
+        throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      });
+      expect(isProcessAlive(4242)).toBe(false);
+      // EPERM and any unexpected errno are uncertain: fail closed so a live
+      // holder is never displaced by the claim-file takeover (ADR-0010).
+      for (const code of ["EPERM", "EIO", "EINVAL"]) {
+        kill.mockImplementation(() => {
+          throw Object.assign(new Error(code), { code });
+        });
+        expect(isProcessAlive(4242)).toBe(true);
+      }
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("rejects invalid pids without signalling", () => {
+    const kill = vi.spyOn(process, "kill");
+    try {
+      expect(isProcessAlive(0)).toBe(false);
+      expect(isProcessAlive(-1)).toBe(false);
+      expect(isProcessAlive(Number.NaN)).toBe(false);
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+    }
+  });
+});
 
 describe("acquireWriteLock", () => {
   it("creates a PID record and releases it", async () => {
