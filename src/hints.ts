@@ -1,14 +1,15 @@
 /**
  * INDEX tell-tale (spec §§5.2, 5.7 + c4-06-code).
  *
- * `matchIndex` parses the latest user-authored text from the `context`
- * event's `messages: Message[]` (the event carries no `prompt.text`) and
- * returns at most one hint line on an exact INDEX term hit — never content,
- * never fuzzy/semantic. The call target is the structural file of the
- * matched INDEX line (first stem on the line; default `decisions.md`).
- * Throttled to once per prompt per session via the
- * ledger key `<projectID>/hint/<sessionID>/<promptHash>` so tool-driven
- * continuations do not re-inject the same hint.
+ * `matchIndex` parses the latest user-authored text from the `prompt`
+ * event (or a `context` event's `messages: Message[]`) and returns at most
+ * one hint line on an exact INDEX term hit — never content, never
+ * fuzzy/semantic. The call target is the structural file of the matched
+ * INDEX line (first stem on the line; default `decisions.md`). Throttled to
+ * once per prompt per session via the ledger key
+ * `<projectID>/hint/<sessionID>/<promptHash>` so tool-driven continuations
+ * do not re-inject the same hint. The **prompt** hook renders the line as a
+ * prompt-tail notice; the system `context` prefix carries only the brief.
  *
  * `matchRememberNearMiss` (E11) is the other filler of the same one-line hint
  * slot: when the latest user text looks like a `remember:` attempt but is not
@@ -17,13 +18,11 @@
  * hint→recall correlation (the caller decides that). Async, never throws.
  */
 import { createHash } from "node:crypto";
-import {
-  hasHint,
-  setHint,
-  type LedgerStorage,
-} from "./capture.js";
-import { readCapped } from "./files.js";
+import { claimHint, type LedgerStorage } from "./capture.js";
+import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
+import { readContainedLines } from "./files.js";
 import { isRememberNearMiss } from "./provenance.js";
+import { redact } from "./redact.js";
 
 export interface MatchIndexOptions {
   readonly storage: LedgerStorage;
@@ -33,6 +32,8 @@ export interface MatchIndexOptions {
   readonly promptHash?: string;
   /** When omitted, INDEX.md is read from `memoryRoot`. */
   readonly indexContent?: string;
+  /** INDEX line cap; over-cap INDEX is not hint-eligible. Defaults to 30. */
+  readonly indexLines?: number;
   /** Absolute path to `.opencode/memory`. Defaults to `<cwd>/.opencode/memory`. */
   readonly memoryRoot?: string;
   readonly now?: number;
@@ -211,7 +212,7 @@ function indexTerms(index: string): IndexTerm[] {
       const file = targetForLine(stripped);
       for (const match of stripped.matchAll(TERM_PATTERN)) {
         const term = match[0];
-        if (term.length < 4 || /^\d+$/.test(term)) continue;
+        if (term.length < 4 || term.length > 80 || /^\d+$/.test(term)) continue;
         const lower = term.toLowerCase();
         if (STOPWORDS.has(lower) || seen.has(lower)) continue;
         seen.add(lower);
@@ -259,9 +260,23 @@ export async function matchIndex(
     let index = options.indexContent;
     if (index === undefined) {
       try {
-        index = await readCapped("INDEX.md", {
+        const cap =
+          Number.isInteger(options.indexLines) && (options.indexLines ?? 0) > 0
+            ? options.indexLines!
+            : DEFAULT_MEMORY_OPTIONS.indexLines;
+        const loaded = await readContainedLines("INDEX.md", {
           memoryRoot: options.memoryRoot,
+          maxLines: cap + 1,
+          maxBytes: 1_048_576,
         });
+        if (
+          loaded === undefined ||
+          loaded.truncated ||
+          loaded.lines.length > cap
+        ) {
+          return undefined;
+        }
+        index = redact(loaded.lines.join("\n"));
       } catch {
         return undefined;
       }
@@ -273,17 +288,16 @@ export async function matchIndex(
     if (hit === undefined) return undefined;
     const promptHash = options.promptHash ?? promptHashFor(text);
     if (
-      await hasHint(options.storage, options.projectID, options.sessionID, promptHash)
+      !(await claimHint(
+        options.storage,
+        options.projectID,
+        options.sessionID,
+        promptHash,
+        options.now,
+      ))
     ) {
       return undefined;
     }
-    await setHint(
-      options.storage,
-      options.projectID,
-      options.sessionID,
-      promptHash,
-      options.now,
-    );
     return `[memory-hint] Past decisions mention \`${hit.term}\`. Call memory_recall("${hit.file}") for the why.`;
   } catch {
     return undefined;
@@ -293,7 +307,7 @@ export async function matchIndex(
 /**
  * Fixed one-line nudge for a directive-shaped `remember` miss (E11). It
  * explains the documented forms; it never records anything and never names a
- * memory file to recall, so the context hook must not arm the hint→recall
+ * memory file to recall, so the prompt hook must not arm the hint→recall
  * correlation for it.
  */
 export const REMEMBER_NEAR_MISS_HINT =
@@ -314,22 +328,16 @@ export async function matchRememberNearMiss(
     if (text === undefined || !isRememberNearMiss(text)) return undefined;
     const promptHash = options.promptHash ?? promptHashFor(text);
     if (
-      await hasHint(
+      !(await claimHint(
         options.storage,
         options.projectID,
         options.sessionID,
         promptHash,
-      )
+        options.now,
+      ))
     ) {
       return undefined;
     }
-    await setHint(
-      options.storage,
-      options.projectID,
-      options.sessionID,
-      promptHash,
-      options.now,
-    );
     return REMEMBER_NEAR_MISS_HINT;
   } catch {
     return undefined;

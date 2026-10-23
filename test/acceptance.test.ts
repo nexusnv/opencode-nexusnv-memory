@@ -4,11 +4,17 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  BRIEF_MAX_LINES,
   indexWithinCap,
   loadBrief,
   loadPriors,
+  newestHandoffLine,
 } from "../src/brief.js";
+import {
+  briefInjectionCap,
+  planPromptNotices,
+  PROMPT_NOTICE_MAX_LINES,
+  promptNoticeBudget,
+} from "../src/prompt-notices.js";
 import {
   captureFailure,
   dispatchEvent,
@@ -29,10 +35,7 @@ import { matchIndex } from "../src/hints.js";
 import { classifyProvenance } from "../src/provenance.js";
 import { redact } from "../src/redact.js";
 import { statusLine, REVIEW_DUE_PENDING } from "../src/status.js";
-import {
-  AGENTS_PROTOCOL_BLOCK,
-  permissionsSnippet,
-} from "../src/templates.js";
+import { AGENTS_PROTOCOL_BLOCK, permissionsSnippet } from "../src/templates.js";
 import {
   createMemoryApplyExecute,
   createMemoryRecallExecute,
@@ -77,10 +80,7 @@ class FakeStorage implements LedgerStorage {
     const page = rest.slice(0, limit);
     return {
       entries: page.map((key) => ({ key, value: this.data.get(key) })),
-      next:
-        rest.length > page.length
-          ? page[page.length - 1]
-          : undefined,
+      next: rest.length > page.length ? page[page.length - 1] : undefined,
     };
   }
 }
@@ -142,7 +142,9 @@ describe("acceptance_budgets_every_write_path", () => {
     }
     // decisions.md is unbounded on disk.
     await writeCapped("decisions.md", over(500), { memoryRoot });
-    expect(countLines(await readFile(join(memoryRoot, "decisions.md"), "utf8"))).toBe(500);
+    expect(
+      countLines(await readFile(join(memoryRoot, "decisions.md"), "utf8")),
+    ).toBe(500);
     // activeContext.md rotates the oldest Known-Errors block instead of throwing.
     // activeContext.md rotates the oldest Known-Errors block instead of throwing.
     const errors = Array.from(
@@ -174,18 +176,36 @@ describe("acceptance_budgets_every_write_path", () => {
     );
     const attached = await indexWithinCap(join(memoryRoot, "INDEX.md"));
     expect(attached).toBe(true);
-    const brief = await loadBrief(memoryRoot);
+    const briefCap = briefInjectionCap(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
+    );
+    const brief = await loadBrief(memoryRoot, { maxLines: briefCap });
     const status = await statusLine(storage, PROJECT);
     const hint = await matchIndex(
-      [{ role: "user", content: [{ type: "text", text: "tell me about topic-7" }] }],
-      { storage, projectID: PROJECT, sessionID: SESSION, indexContent: indexLines },
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "tell me about topic-7" }],
+        },
+      ],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: indexLines,
+      },
+    );
+    const pointer = await newestHandoffLine(memoryRoot);
+    const noticeLines = [pointer, status, hint].filter(Boolean).length;
+    const noticeBudget = promptNoticeBudget(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
+      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
     const payloadLines =
-      countLines(indexLines) +
-      countLines(brief) +
-      (hint ? 1 : 0) +
-      (status ? 1 : 0);
-    expect(countLines(brief)).toBeLessThanOrEqual(BRIEF_MAX_LINES);
+      countLines(indexLines) + countLines(brief) + noticeLines;
+    expect(countLines(brief)).toBeLessThanOrEqual(briefCap);
+    expect(noticeLines).toBeLessThanOrEqual(noticeBudget);
     expect(payloadLines).toBeLessThanOrEqual(
       DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
@@ -194,7 +214,9 @@ describe("acceptance_budgets_every_write_path", () => {
 
 describe("acceptance_index_attach_and_brief_shape", () => {
   it("over_cap_INDEX_is_not_attached", async () => {
-    const over = Array.from({ length: 31 }, (_, i) => `- t${i}: d.md`).join("\n");
+    const over = Array.from({ length: 31 }, (_, i) => `- t${i}: d.md`).join(
+      "\n",
+    );
     await writeMemory("INDEX.md", `${over}\n`);
     expect(await indexWithinCap(join(memoryRoot, "INDEX.md"))).toBe(false);
   });
@@ -249,12 +271,12 @@ describe("acceptance_redaction", () => {
     for (const line of secrets.split("\n").filter((l) => l.trim().length > 0)) {
       expect(redacted).not.toContain(line.trim());
     }
-    expect(redact("before <private>hunter2 hunter2</private> after")).not.toContain(
-      "hunter2",
-    );
-    expect(redact("before <PRIVATE>multi\nline\nsecret</PRIVATE> after")).not.toContain(
-      "secret",
-    );
+    expect(
+      redact("before <private>hunter2 hunter2</private> after"),
+    ).not.toContain("hunter2");
+    expect(
+      redact("before <PRIVATE>multi\nline\nsecret</PRIVATE> after"),
+    ).not.toContain("secret");
     // Unclosed tag strips to EOF.
     const unclosed = redact("visible <private>sk-live-abcdef1234567890");
     expect(unclosed).toContain("visible");
@@ -272,10 +294,18 @@ describe("acceptance_recall_and_apply_contracts", () => {
   it("recall_rejects_traversal_and_returns_toolResult_envelope", async () => {
     await writeMemory("INDEX.md", "- a: b\n");
     const execute = createMemoryRecallExecute({ memoryRoot });
-    const out = await execute({ file: "INDEX.md" }, {
-      sessionID: SESSION, agent: "primary", messageID: "m1", id: "c1",
-    });
-    expect(out).toEqual(toolResult(await readCapped("INDEX.md", { memoryRoot })));
+    const out = await execute(
+      { file: "INDEX.md" },
+      {
+        sessionID: SESSION,
+        agent: "primary",
+        messageID: "m1",
+        id: "c1",
+      },
+    );
+    expect(out).toEqual(
+      toolResult(await readCapped("INDEX.md", { memoryRoot })),
+    );
     expect(out).toEqual({ content: expect.any(String) });
     for (const bad of [
       "../INDEX.md",
@@ -286,9 +316,15 @@ describe("acceptance_recall_and_apply_contracts", () => {
       "%2e%2e/INDEX.md",
     ]) {
       await expect(
-        execute({ file: bad }, {
-          sessionID: SESSION, agent: "primary", messageID: "m1", id: "c1",
-        }),
+        execute(
+          { file: bad },
+          {
+            sessionID: SESSION,
+            agent: "primary",
+            messageID: "m1",
+            id: "c1",
+          },
+        ),
       ).rejects.toThrow();
     }
   });
@@ -308,10 +344,19 @@ describe("acceptance_recall_and_apply_contracts", () => {
       {
         candidates: [
           { file: "style.md", line: "- r1 source:user", source: "user" },
-          { file: "issues.md", line: "- [todo] t (#1) source:tool", source: "tool" },
+          {
+            file: "issues.md",
+            line: "- [todo] t (#1) source:tool",
+            source: "tool",
+          },
         ],
       },
-      { sessionID: SESSION, agent: "primary", messageID: "msg-9", id: "call-9" },
+      {
+        sessionID: SESSION,
+        agent: "primary",
+        messageID: "msg-9",
+        id: "call-9",
+      },
     );
     expect(permission.calls).toHaveLength(2);
     for (const call of permission.calls) {
@@ -358,7 +403,11 @@ describe("acceptance_recall_and_apply_contracts", () => {
           candidates: [
             { file: "style.md", line: "- u1 source:tool", source: "tool" },
             { file: "style.md", line: "- u2 source:model", source: "model" },
-            { file: "style.md", line: "- u3 source:snapshot", source: "snapshot" },
+            {
+              file: "style.md",
+              line: "- u3 source:snapshot",
+              source: "snapshot",
+            },
           ],
         },
         { sessionID: SESSION, agent: "primary", messageID: "m", id: "c" },
@@ -374,12 +423,17 @@ describe("acceptance_recall_and_apply_contracts", () => {
       line: "- u2 source:model",
       source: "model",
     });
-  });
+    // The apply path now takes the E14 file lock plus the containment
+    // checks: well above the default 5 s per-test budget under coverage.
+  }, 20_000);
 });
 
 describe("acceptance_handoff_routing", () => {
   it("HHmmss_session6_names_at_handoffs_root_archive_stays_recall_only", async () => {
-    const name = handoffName("session-abcdef123456", Date.UTC(2026, 9, 15, 12, 34, 56));
+    const name = handoffName(
+      "session-abcdef123456",
+      Date.UTC(2026, 9, 15, 12, 34, 56),
+    );
     expect(name).toBe("handoffs/2026-10-15-123456-123456.md");
     expect(name).toMatch(
       /^handoffs\/\d{4}-\d{2}-\d{2}-\d{6}-[A-Za-z0-9._-]+\.md$/,
@@ -404,8 +458,10 @@ describe("acceptance_handoff_routing", () => {
     );
     const top = await readdir(join(memoryRoot, "handoffs"));
     expect(top.some((n) => n.endsWith(".md"))).toBe(true);
-    // Archive entries are never pointed at by the brief loader.
+    // Archive entries are never pointed at by the prompt pointer or brief.
     await writeMemory("handoffs/archive/retired-abc.md", "retired body");
+    const pointer = await newestHandoffLine(memoryRoot);
+    expect(pointer).not.toContain("retired-abc");
     const brief = await loadBrief(memoryRoot);
     expect(brief).not.toContain("retired-abc");
   });
@@ -471,9 +527,10 @@ describe("acceptance_isolation_and_lifecycle", () => {
       { type: "session.idle", n: 2 },
     ];
     await startEventLoop(
-      () => (async function* () {
-        yield* events;
-      })(),
+      () =>
+        (async function* () {
+          yield* events;
+        })(),
       {
         signal: new AbortController().signal,
         handleEvent: async (event) => {
@@ -512,18 +569,31 @@ describe("acceptance_status_line", () => {
       storage,
       permission: new FakePermission(),
     });
-    await execute({ candidates: [] }, {
-      sessionID: SESSION, agent: "primary", messageID: "m", id: "c",
-    });
+    await execute(
+      { candidates: [] },
+      {
+        sessionID: SESSION,
+        agent: "primary",
+        messageID: "m",
+        id: "c",
+      },
+    );
     expect(await getPending(storage, PROJECT)).toBe(0);
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
   });
 
   it("status_dropped_before_hint_under_budget_pressure", () => {
-    // Ordering rule lives in the context hook: brief, then status, then
-    // hint — the status line is dropped before the hint on overflow.
-    expect(srcOf("index.ts")).toMatch(/status/);
-    expect(srcOf("index.ts")).toMatch(/matchIndex|hint/);
+    // The ordering rule is executable, not just a source-code shape: a
+    // one-line budget keeps the hint and drops status + pointer.
+    const plan = planPromptNotices({
+      handoff: "[memory] handoff: handoffs/x.md (latest)",
+      status: "[memory] rotated 1 block(s)",
+      hint: "[memory-hint] hit",
+      budget: 1,
+    });
+    expect(plan.lines).toEqual([expect.stringContaining("[memory-hint] hit")]);
+    expect(plan.statusDropped).toBe(true);
+    expect(plan.pointerDropped).toBe(true);
   });
 });
 
@@ -555,7 +625,9 @@ describe("acceptance_containment_and_provenance", () => {
   it("fence_and_quote_reject_user_provenance", () => {
     expect(classifyProvenance("remember: ship the plugin")).toBe("user");
     expect(classifyProvenance("remember that we chose X")).toBe("user");
-    expect(classifyProvenance("```\nremember: ship the plugin\n```")).toBe("tool");
+    expect(classifyProvenance("```\nremember: ship the plugin\n```")).toBe(
+      "tool",
+    );
     expect(classifyProvenance("> remember: ship the plugin")).toBe("tool");
     expect(classifyProvenance("`remember: ship it` inline")).toBe("tool");
     expect(classifyProvenance("I remember when we used X")).toBe("tool");
@@ -576,33 +648,37 @@ describe("acceptance_evals_three_numbers", () => {
       Math.ceil(MEMORY_RECALL_DESCRIPTION.length / 80) +
       Math.ceil(MEMORY_SEARCH_DESCRIPTION.length / 80);
     expect(staticLines).toBeLessThanOrEqual(16);
-    // Per-prompt with content: static + INDEX(≤30, once) + brief(≤48) +
-    // hint(≤1) + status(≤1). The injectable portion is budget-capped at 80.
-    const perPromptInjectable =
-      DEFAULT_MEMORY_OPTIONS.indexLines + BRIEF_MAX_LINES + 1 + 1;
-    expect(perPromptInjectable).toBeLessThanOrEqual(
+    // Per-prompt with content: static + INDEX(≤30, once) + brief(≤47) +
+    // notices(≤3). The injectable portion is budget-capped at 80.
+    const briefCap = briefInjectionCap(
+      DEFAULT_MEMORY_OPTIONS.indexLines,
       DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
     );
+    const perPromptInjectable =
+      DEFAULT_MEMORY_OPTIONS.indexLines + briefCap + PROMPT_NOTICE_MAX_LINES;
+    expect(perPromptInjectable).toBe(DEFAULT_MEMORY_OPTIONS.injectBudgetLines);
     const perPromptWithContent = staticLines + perPromptInjectable;
-    // Session-total: per-prompt × model steps (context hook runs per model
-    // call, including tool-driven continuations; hint throttled to once).
+    // Session-total: the context hook runs per model call (brief × steps);
+    // INDEX and volatile notices are admitted once per prompt.
     const modelSteps = 4;
-    const sessionTotal = perPromptWithContent * modelSteps;
+    const sessionTotal =
+      staticLines +
+      DEFAULT_MEMORY_OPTIONS.indexLines +
+      PROMPT_NOTICE_MAX_LINES +
+      briefCap * modelSteps;
     // eslint-disable-next-line no-console
     console.log(
       `[memory-evals] static=${staticLines} per-prompt-with-content=${perPromptWithContent} ` +
         `session-total(steps=${modelSteps})=${sessionTotal}`,
     );
-    expect(perPromptWithContent).toBeLessThanOrEqual(staticLines + 80);
-    expect(sessionTotal).toBe(perPromptWithContent * modelSteps);
+    expect(perPromptWithContent).toBe(96);
+    expect(sessionTotal).toBe(237);
   });
 });
 
 describe("acceptance_compatibility_and_deploy_gate", () => {
   it("published_form_loads_via_plugin_list_and_supported_range_recorded", () => {
-    const pkg = JSON.parse(
-      readFileSync(resolve(ROOT, "package.json"), "utf8"),
-    );
+    const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
     expect(pkg.name).toBe("opencode-nexusnv-memory");
     expect(pkg.type).toBe("module");
     expect(pkg.exports?.["."]).toBe("./src/index.ts");
@@ -659,7 +735,10 @@ describe("acceptance_compatibility_and_deploy_gate", () => {
     }
     // Diagnostics for other compaction events also flow through the log.
     await dispatchEvent(
-      { type: "session.compaction.started", location: { directory: projectRoot } },
+      {
+        type: "session.compaction.started",
+        location: { directory: projectRoot },
+      },
       {
         storage,
         projectID: PROJECT,
@@ -681,7 +760,9 @@ describe("acceptance_compatibility_and_deploy_gate", () => {
         .filter((n) => n.endsWith(".md"))
         .map((n) => readFile(join(memoryRoot, "handoffs", n), "utf8")),
     );
-    expect(bodies.some((b) => b.includes("ACCEPT-COMPACTION-MARKER"))).toBe(true);
+    expect(bodies.some((b) => b.includes("ACCEPT-COMPACTION-MARKER"))).toBe(
+      true,
+    );
     // eslint-disable-next-line no-console
     console.log(
       `[memory-deploy] observed event.type: ${[...new Set(seenTypes)].sort().join(", ")}`,
@@ -694,7 +775,11 @@ describe("acceptance_handoff_collision", () => {
 
   it("same_second_different_content_mints_suffixed_sibling_never_overwrites", async () => {
     const base = handoffName(SESSION, NOW);
-    await writeFile(join(memoryRoot, base), "pre-existing different body\n", "utf8");
+    await writeFile(
+      join(memoryRoot, base),
+      "pre-existing different body\n",
+      "utf8",
+    );
     const outcome = await snapshotHandoffIfChanged(
       {
         type: "session.idle",
@@ -716,8 +801,9 @@ describe("acceptance_handoff_collision", () => {
       "pre-existing different body\n",
     );
     // The newest pointer resolves to the newer sibling, not the base.
-    const brief = await loadBrief(memoryRoot);
-    expect(brief).toContain("handoffs/2026-10-15-123456-123456-01.md");
+    expect(await newestHandoffLine(memoryRoot)).toContain(
+      "handoffs/2026-10-15-123456-123456-01.md",
+    );
   });
 
   it("same_content_dedupes_to_the_existing_file", async () => {

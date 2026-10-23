@@ -1,14 +1,25 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../src/index.js";
 import {
   BRIEF_MAX_ERROR_LINES,
   BRIEF_MAX_LINES,
+  indexLineCount,
   indexWithinCap,
+  listHandoffs,
   loadBrief,
   loadPriors,
+  newestHandoffLine,
+  parseHandoffTimestamp,
 } from "../src/brief.js";
 import {
   extractLatestUserText,
@@ -17,23 +28,31 @@ import {
   REMEMBER_NEAR_MISS_HINT,
 } from "../src/hints.js";
 import { getScaffoldFiles } from "../src/templates.js";
-import { REVIEW_DUE_PENDING, statusLine } from "../src/status.js";
+import {
+  hasStatusLine,
+  REVIEW_DUE_PENDING,
+  statusLine,
+} from "../src/status.js";
 import {
   attemptKey,
   failureContentID,
   getNotice,
   getPending,
   getThrottle,
+  incNotice,
   incPending,
   setNotice,
   setRotated,
   snapshotIfDue,
   type LedgerStorage,
 } from "../src/capture.js";
-import { DEFAULT_MEMORY_OPTIONS } from "../src/config.js";
 import { withWriteLock } from "../src/files.js";
 import { readDays, readTotals } from "../src/metrics.js";
 import { redact } from "../src/redact.js";
+import {
+  PROMPT_NOTICES_LABEL,
+  PROMPT_NOTICES_MARKER,
+} from "../src/prompt-notices.js";
 
 /** Persisted fake storage (same contract as test/ledger.test.ts). */
 class FakeStorage implements LedgerStorage {
@@ -276,6 +295,31 @@ describe("indexWithinCap", () => {
     expect(await indexWithinCap(memoryRoot, 30)).toBe(false);
     expect(await indexWithinCap("", 30)).toBe(false);
   });
+
+  it("rejects a symlinked INDEX.md", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-index-outside-"));
+    try {
+      const target = join(outside, "INDEX.md");
+      await writeFile(target, "- leaked\n");
+      const abs = join(memoryRoot, "INDEX.md");
+      await symlink(target, abs);
+      expect(await indexWithinCap(abs, 30)).toBe(false);
+      expect(
+        await indexLineCount(join(outside, "INDEX.md"), memoryRoot),
+      ).toBeUndefined();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not undercount a >1 MB INDEX", async () => {
+    const lines = Array.from(
+      { length: 35 },
+      (_, i) => `- line ${i} ${"x".repeat(40_000)}`,
+    ).join("\n");
+    await writeMemory("INDEX.md", lines);
+    expect(await indexWithinCap(join(memoryRoot, "INDEX.md"), 30)).toBe(false);
+  });
 });
 
 describe("prompt hook", () => {
@@ -292,6 +336,133 @@ describe("prompt hook", () => {
     // Second admission with the attachment present: no duplicate.
     await runHook(hooks, "prompt", event);
     expect(event.prompt.files).toHaveLength(1);
+  });
+
+  it("appends status, hint and handoff pointer once at the prompt tail", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    await writeMemory(
+      "activeContext.md",
+      "# Active context\n\n## Goal\n- ship it\n",
+    );
+    await writeMemory("handoffs/2026-10-15-120000-abcdef.md", "snapshot");
+    await setRotated(storage, PROJECT, 2);
+    const { hooks } = await setupHooks();
+    const event = promptEvent("how does auth-service login work?");
+    await runHook(hooks, "prompt", event);
+    const text = event.prompt.text;
+    expect(text).toContain("handoffs/2026-10-15-120000-abcdef.md (latest)");
+    expect(text).toContain("[memory] rotated 2 block(s)");
+    expect(text).toContain("[memory-hint] Past decisions mention");
+    expect(text).toContain("<!-- memory:prompt-notices -->");
+    expect(text.indexOf("how does auth-service")).toBeLessThan(
+      text.indexOf("[memory] handoff:"),
+    );
+    const markerCount = text.split("<!-- memory:prompt-notices -->").length - 1;
+    expect(markerCount).toBe(1);
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.text).toBe(text);
+  });
+
+  it("keeps status/hint out of the context system prefix", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    await writeMemory(
+      "activeContext.md",
+      "# Active context\n\n## Goal\n- ship it\n",
+    );
+    await setRotated(storage, PROJECT, 2);
+    const { hooks } = await setupHooks();
+    const event = contextEvent([userMessage("how does auth-service work?")]);
+    await runHook(hooks, "context", event);
+    expect(event.system).toHaveLength(1);
+    expect(event.system[0]!.text).toContain("ship it");
+    expect(event.system[0]!.text).not.toContain("[memory] rotated");
+    expect(event.system[0]!.text).not.toContain("[memory-hint]");
+  });
+
+  it("does not let a user-quoted bare marker suppress notices", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    await setNotice(storage, PROJECT, "captureFailed", 1);
+    const { hooks } = await setupHooks();
+    const event = promptEvent(
+      `please explain ${PROMPT_NOTICES_MARKER} in this note`,
+    );
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.text).toContain("failure capture(s) skipped");
+    expect(event.prompt.text).toContain(
+      `${PROMPT_NOTICES_MARKER} (${PROMPT_NOTICES_LABEL})`,
+    );
+  });
+
+  it("retains a notice when the prompt budget drops the status line", async () => {
+    await setNotice(storage, PROJECT, "captureFailed", 1);
+    const { hooks } = await setupHooks({ injectBudgetLines: 5 }, storage);
+    const event = promptEvent("hello there");
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.text).not.toContain("[memory] 1 failure capture");
+    expect(await statusLine(storage, PROJECT)).toContain(
+      "1 failure capture(s) skipped",
+    );
+  });
+
+  it("drops status before hint under budget pressure", async () => {
+    await writeMemory(
+      "INDEX.md",
+      "- auth-service: login flow in src/auth.ts\n",
+    );
+    await writeMemory("activeContext.md", activeContextWithErrors(2));
+    await incPending(storage, PROJECT, 5);
+    const { hooks } = await setupHooks({ injectBudgetLines: 31 });
+    const event = promptEvent("how does auth-service handle login?");
+    await runHook(hooks, "prompt", event);
+    expect(event.prompt.text).toContain("[memory-hint]");
+    expect(event.prompt.text).not.toContain("uncurated captures");
+  });
+
+  it("prefers the near-miss nudge and does not arm", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    const { hooks } = await setupHooks();
+    const event = promptEvent(
+      "Please remember: auth-service deploys on Fridays",
+    );
+    await runHook(hooks, "prompt", event);
+
+    const hints = event.prompt.text
+      .split("\n")
+      .filter((line) => line.startsWith("[memory-hint]"));
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain(REMEMBER_NEAR_MISS_HINT);
+    expect(
+      await storage.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
+    ).toBeUndefined();
+    // Flush the fire-and-forget metric bump before reading totals.
+    await withWriteLock(async () => undefined);
+    expect((await readTotals(storage, PROJECT))["hint.shown"]).toBe(1);
+  });
+
+  it("a real INDEX hint still arms after a near-miss on a different prompt", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    const { hooks } = await setupHooks();
+    const armKey = `${PROJECT}/metrics/arm/hint/${SESSION}`;
+
+    await runHook(
+      hooks,
+      "prompt",
+      promptEvent("Please remember: deploy Fridays"),
+    );
+    expect(await storage.get(armKey)).toBeUndefined();
+
+    await runHook(hooks, "prompt", promptEvent("how does auth-service work?"));
+    expect(await storage.get(armKey)).toBeDefined();
+  });
+
+  it("narrative remember text still gets the ordinary INDEX hint", async () => {
+    await writeMemory("INDEX.md", "- auth-service: login flow\n");
+    const { hooks } = await setupHooks();
+    const event = promptEvent("remember when auth-service changed?");
+    await runHook(hooks, "prompt", event);
+
+    expect(event.prompt.text).not.toContain("Nothing was recorded");
+    expect(event.prompt.text).toContain("[memory-hint] Past decisions mention");
   });
 
   it("does not attach an over-cap or missing INDEX", async () => {
@@ -319,8 +490,9 @@ describe("prompt hook", () => {
     const event = promptEvent("hello");
     await runHook(hooks, "prompt", event);
     expect(event.prompt.files).toHaveLength(0);
-    const line = await statusLine(storage, PROJECT, { indexLines: 30 });
-    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(event.prompt.text).toContain(
+      "INDEX.md is over the 30-line injection cap or too large to inspect",
+    );
     expect(await getNotice(storage, PROJECT, "indexOverCap")).toBeUndefined();
   });
 
@@ -377,14 +549,91 @@ describe("loadBrief", () => {
     expect(brief).not.toContain("TAIL-MARKER-UNIQUE-12345");
   });
 
-  it("redacts secrets and points at the newest handoff", async () => {
+  it("sanitizes source:tool blocks when the Known-Errors heading is missing", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "## Goal",
+        "- ship the fix",
+        "- npm build failed source:tool",
+        "  src/a.ts: detail before blank",
+        "  ",
+        "  ## Known errors",
+        "  SECRET-DETAIL-MARKER after a blank detail line",
+      ].join("\n"),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("npm build failed source:tool");
+    expect(brief).not.toContain("SECRET-DETAIL-MARKER");
+    expect(brief).not.toContain("## Known errors");
+  });
+
+  it("recognizes a BOM-prefixed source:tool block without a heading", async () => {
+    await writeMemory(
+      "activeContext.md",
+      ["\uFEFF- npm build failed source:tool", "  SECRET-BOM-DETAIL"].join(
+        "\n",
+      ),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).toContain("npm build failed source:tool");
+    expect(brief).not.toContain("SECRET-BOM-DETAIL");
+  });
+
+  it("does not promote detail when a private span covers the summary", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "<private>",
+        "- npm build failed source:tool",
+        "</private>",
+        "  SECRET-DETAIL-AFTER-SPAN",
+      ].join("\n"),
+    );
+    const brief = await loadBrief(memoryRoot);
+    expect(brief).not.toContain("SECRET-DETAIL-AFTER-SPAN");
+  });
+
+  it("redacts secrets and omits the newest-handoff pointer", async () => {
     await writeMemory("activeContext.md", activeContextWithErrors(1));
     await writeMemory("handoffs/2026-10-14-100000-aaaaaa.md", "old");
     await writeMemory("handoffs/2026-10-15-120000-bbbbbb.md", "new");
     const brief = await loadBrief(memoryRoot);
     expect(brief).not.toContain("sk-test-secret-value-1234567890");
-    expect(brief).toContain("handoffs/2026-10-15-120000-bbbbbb.md");
+    expect(brief).not.toContain("handoffs/");
     expect(brief).not.toContain("2026-10-14-100000-aaaaaa");
+    expect(brief).not.toContain("2026-10-15-120000-bbbbbb");
+  });
+
+  it("keeps a truncation notice when pruning removes the sentinel", async () => {
+    const lines = ["# Active context", "## Goal", "- keep"];
+    for (let i = 0; i < 43; i += 1) lines.push(`- item-${i}`);
+    lines.push("", "", "", "- dropped-tail");
+    await writeMemory("activeContext.md", lines.join("\n"));
+    const brief = await loadBrief(memoryRoot, { maxLines: 47 });
+    expect(brief).toContain("[truncated:");
+    expect(brief).not.toContain("dropped-tail");
+  });
+
+  it("honors a dynamic maxLines cap and returns empty at zero", async () => {
+    await writeMemory("activeContext.md", activeContextWithErrors(1));
+    const compact = await loadBrief(memoryRoot, { maxLines: 3 });
+    expect(compact.split("\n").length).toBeLessThanOrEqual(3);
+    expect(compact).toContain("[truncated:");
+    expect(await loadBrief(memoryRoot, { maxLines: 0 })).toBe("");
+  });
+
+  it("sees error blocks appended after prunable scaffolding", async () => {
+    const lines = ["# Active context"];
+    for (let i = 0; i < 55; i += 1) lines.push(`<!-- placeholder ${i} -->`);
+    lines.push("## Known errors", "- late failure source:tool", "  detail");
+    await writeMemory("activeContext.md", lines.join("\n"));
+    const brief = await loadBrief(memoryRoot);
+    // The block sits past the old `cap + 1` read window; the raw read must
+    // cover the per-file cap even though the emitted brief stays capped.
+    expect(brief).toContain("late failure");
   });
 
   it("returns empty when there is nothing to inject", async () => {
@@ -396,17 +645,142 @@ describe("loadBrief", () => {
   });
 });
 
+describe("contained memory reads", () => {
+  it("does not inject a brief through a symlinked activeContext", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-brief-outside-"));
+    try {
+      await writeFile(join(outside, "activeContext.md"), "SECRET\n");
+      await symlink(
+        join(outside, "activeContext.md"),
+        join(memoryRoot, "activeContext.md"),
+      );
+      expect(await loadBrief(memoryRoot)).toBe("");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not list handoffs through a symlinked directory", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-handoffs-outside-"));
+    try {
+      const handoffs = join(outside, "handoffs");
+      await mkdir(handoffs, { recursive: true });
+      await writeFile(
+        join(handoffs, "2026-10-20-110000-abcdef.md"),
+        "outside\n",
+      );
+      await rm(join(memoryRoot, "handoffs"), {
+        recursive: true,
+        force: true,
+      });
+      await symlink(handoffs, join(memoryRoot, "handoffs"), "dir");
+      expect(await newestHandoffLine(memoryRoot)).toBeUndefined();
+      expect((await listHandoffs(memoryRoot, "root")).names).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat in-root handoff aliases as handoffs", async () => {
+    await writeFile(join(memoryRoot, "2026-10-20-110000-abcdef.md"), "root\n");
+    await rm(join(memoryRoot, "handoffs"), { recursive: true, force: true });
+    await symlink(memoryRoot, join(memoryRoot, "handoffs"), "dir");
+    expect(await newestHandoffLine(memoryRoot)).toBeUndefined();
+    expect((await listHandoffs(memoryRoot, "root")).names).toEqual([]);
+  });
+
+  it("does not list an aliased archive", async () => {
+    await symlink("..", join(memoryRoot, "handoffs", "archive"), "dir");
+    expect((await listHandoffs(memoryRoot, "archive")).names).toEqual([]);
+  });
+
+  it("sorts forgotten and rotated archives by their embedded time", async () => {
+    await writeMemory(
+      "handoffs/archive/forgotten-20261020T100000Z-aaa.md",
+      "forgotten older\n",
+    );
+    await writeMemory(
+      "handoffs/archive/rotated-2026-10-21-12-00-00-000Z-123-abc.md",
+      "rotated newest\n",
+    );
+    await writeMemory(
+      "handoffs/archive/forgotten-20261019T090000Z-bbb.md",
+      "forgotten oldest\n",
+    );
+    const archive = await listHandoffs(memoryRoot, "archive", 10);
+    expect(archive.names).toEqual([
+      "rotated-2026-10-21-12-00-00-000Z-123-abc.md",
+      "forgotten-20261020T100000Z-aaa.md",
+      "forgotten-20261019T090000Z-bbb.md",
+    ]);
+  });
+
+  it("does not list an off-root archive", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-archive-outside-"));
+    try {
+      const archive = join(outside, "archive");
+      await mkdir(archive, { recursive: true });
+      await writeFile(
+        join(archive, "rotated-2026-10-20-110000-abcdef.md"),
+        "outside\n",
+      );
+      await symlink(archive, join(memoryRoot, "handoffs", "archive"), "dir");
+      expect((await listHandoffs(memoryRoot, "archive")).names).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parseHandoffTimestamp", () => {
+  it("accepts generated names and rejects impossible dates", () => {
+    expect(parseHandoffTimestamp("2026-10-15-120000-abcdef.md")).toBe(
+      Date.UTC(2026, 9, 15, 12, 0, 0),
+    );
+    expect(
+      parseHandoffTimestamp("2026-02-31-120000-abcdef.md"),
+    ).toBeUndefined();
+    expect(
+      parseHandoffTimestamp("2026-99-99-120000-abcdef.md"),
+    ).toBeUndefined();
+    expect(
+      parseHandoffTimestamp("2026-10-15-120000-abcdef.txt"),
+    ).toBeUndefined();
+    expect(parseHandoffTimestamp("unexpected.md")).toBeUndefined();
+  });
+
+  it("never selects an impossible date as the newest handoff", async () => {
+    await writeMemory("handoffs/2026-10-15-120000-abcdef.md", "valid");
+    await writeMemory("handoffs/2026-99-99-120000-abcdef.md", "impossible");
+    expect(await newestHandoffLine(memoryRoot)).toBe(
+      "[memory] handoff: handoffs/2026-10-15-120000-abcdef.md (latest)",
+    );
+  });
+
+  it("returns no pointer when every handoff name is invalid", async () => {
+    await writeMemory("handoffs/unexpected.md", "legacy");
+    await writeMemory("handoffs/2026-99-99-120000-abcdef.md", "impossible");
+    expect(await newestHandoffLine(memoryRoot)).toBeUndefined();
+  });
+});
+
 describe("matchIndex", () => {
-  const INDEX = "- auth-service: login flow in src/auth.ts\n- billing: invoices\n";
+  const INDEX =
+    "- auth-service: login flow in src/auth.ts\n- billing: invoices\n";
 
   it("emits one hint line on exact match", async () => {
-    const hint = await matchIndex([userMessage("how does auth-service login work?")], {
-      storage,
-      projectID: PROJECT,
-      sessionID: SESSION,
-      indexContent: INDEX,
-    });
-    expect(hint).toMatch(/^\[memory-hint\] Past decisions mention `auth-service`/);
+    const hint = await matchIndex(
+      [userMessage("how does auth-service login work?")],
+      {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        indexContent: INDEX,
+      },
+    );
+    expect(hint).toMatch(
+      /^\[memory-hint\] Past decisions mention `auth-service`/,
+    );
     expect(hint).toContain('Call memory_recall("decisions.md")');
     expect(hint!.split("\n")).toHaveLength(1);
   });
@@ -476,6 +850,37 @@ describe("matchIndex", () => {
     ).toBeUndefined();
   });
 
+  it("does not hint from an over-cap INDEX on disk", async () => {
+    await writeMemory(
+      "INDEX.md",
+      Array.from({ length: 31 }, (_, i) => `- auth-service ${i}`).join("\n"),
+    );
+    await expect(
+      matchIndex([userMessage("how does auth-service work?")], {
+        storage,
+        projectID: PROJECT,
+        sessionID: SESSION,
+        memoryRoot,
+        indexLines: 30,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("claims the once-per-prompt hint atomically", async () => {
+    const messages = [userMessage("how does auth-service login work?")];
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        matchIndex(messages, {
+          storage,
+          projectID: PROJECT,
+          sessionID: SESSION,
+          indexContent: INDEX,
+        }),
+      ),
+    );
+    expect(results.filter((line) => line !== undefined)).toHaveLength(1);
+  });
+
   it("parses the latest user text and reads INDEX from disk", async () => {
     expect(
       extractLatestUserText({
@@ -487,10 +892,12 @@ describe("matchIndex", () => {
       }),
     ).toBe("billing invoices overdue?");
     await writeMemory("INDEX.md", INDEX);
-    const hint = await matchIndex(
-      [userMessage("billing dispute process?")],
-      { storage, projectID: PROJECT, sessionID: SESSION, memoryRoot },
-    );
+    const hint = await matchIndex([userMessage("billing dispute process?")], {
+      storage,
+      projectID: PROJECT,
+      sessionID: SESSION,
+      memoryRoot,
+    });
     expect(hint).toContain("billing");
   });
 
@@ -573,31 +980,34 @@ describe("statusLine", () => {
   it("reports an over-cap INDEX notice once, then clears it", async () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT, { indexLines: 30 });
-    expect(line).toContain("INDEX.md is 31 lines (cap 30)");
+    expect(line).toContain(
+      "INDEX.md is over the 30-line injection cap or too large to inspect",
+    );
     expect(line).toContain("not attached");
     expect(line!.split("\n")).toHaveLength(1);
-    expect(await statusLine(storage, PROJECT, { indexLines: 30 })).toBeUndefined();
+    expect(
+      await statusLine(storage, PROJECT, { indexLines: 30 }),
+    ).toBeUndefined();
   });
 
   it("uses the cap-free wording without an options argument", async () => {
     await setNotice(storage, PROJECT, "indexOverCap", 31);
     const line = await statusLine(storage, PROJECT);
-    expect(line).toContain("INDEX.md is 31 lines (over cap)");
+    expect(line).toContain(
+      "INDEX.md is over its injection cap or too large to inspect",
+    );
     expect(line).toContain("not attached");
   });
 
-  it("retains a notice when the budget drops the status line", async () => {
-    await setNotice(storage, PROJECT, "captureFailed", 1);
-    const { hooks } = await setupHooks({ injectBudgetLines: 5 }, storage);
-    const event = contextEvent([userMessage("hello there")]);
-    await runHook(hooks, "context", event);
-    expect(event.system.some((p) => p.text.startsWith("[memory] "))).toBe(
-      false,
-    );
-    // Not consumed by the dropped line: the next render still reports it.
-    expect(await statusLine(storage, PROJECT)).toContain(
-      "1 failure capture(s) skipped",
-    );
+  it("reports a forget operation once, with the archive/git warning", async () => {
+    await incNotice(storage, PROJECT, "forgotten");
+    expect(await hasStatusLine(storage, PROJECT)).toBe(true);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("1 forget operation(s) applied");
+    expect(line).toContain("handoffs/archive/");
+    expect(line).toContain("git history");
+    expect(await statusLine(storage, PROJECT)).toBeUndefined();
+    expect(await hasStatusLine(storage, PROJECT)).toBe(false);
   });
 
   it("reports skipped failure captures once, then clears the notice", async () => {
@@ -645,7 +1055,36 @@ describe("loadPriors", () => {
     expect(priors).toContain("TAIL-MARKER-UNIQUE-12345");
     expect(priors).toContain("handoffs/2026-10-15-120000-cccccc.md");
     expect(priors).not.toContain("sk-test-secret-value-1234567890");
-    expect(priors.split("\n").length).toBeLessThanOrEqual(2 * 60 + 5);
+    expect(priors.split("\n").length).toBeLessThanOrEqual(2 * 60 + 11);
+  });
+
+  it("carries error summaries, never raw captured detail", async () => {
+    await writeMemory(
+      "activeContext.md",
+      [
+        "# Active context",
+        "## Goal",
+        "- ship the memory plugin",
+        "## Known errors",
+        "- npm build failed source:tool",
+        "  RAW-DETAIL-ONLY-RECALLABLE",
+      ].join("\n"),
+    );
+    const priors = await loadPriors(memoryRoot);
+    expect(priors).toContain("ship the memory plugin");
+    expect(priors).toContain("npm build failed");
+    expect(priors).not.toContain("RAW-DETAIL-ONLY-RECALLABLE");
+  });
+
+  it("keeps the truncation notice when the window holds only error blocks", async () => {
+    const lines: string[] = ["# Active context", "## Known errors"];
+    for (let i = 0; i < 40; i += 1) {
+      lines.push(`- error ${i} source:tool`, `  detail ${i}`);
+    }
+    await writeMemory("activeContext.md", lines.join("\n") + "\n");
+    const priors = await loadPriors(memoryRoot, { fileLines: 10 });
+    expect(priors).toContain("## known errors (summaries)");
+    expect(priors).toContain("[truncated:");
   });
 
   it("never throws", async () => {
@@ -653,7 +1092,10 @@ describe("loadPriors", () => {
   });
 
   it("a truncated fresh activeContext contributes no priors section", async () => {
-    await writeMemory("activeContext.md", getScaffoldFiles()["activeContext.md"]!);
+    await writeMemory(
+      "activeContext.md",
+      getScaffoldFiles()["activeContext.md"]!,
+    );
     const priors = await loadPriors(memoryRoot, { fileLines: 10 });
     expect(priors).not.toContain("## active context");
     expect(priors).not.toContain("[truncated");
@@ -768,41 +1210,12 @@ describe("context hook", () => {
     return event;
   }
 
-  it("pushes brief, status, hint in order within budget", async () => {
+  it("pushes only the stable brief into the system prefix", async () => {
     const event = await fullContext();
-    expect(event.system).toHaveLength(3);
+    expect(event.system).toHaveLength(1);
     expect(event.system[0]!.text).toContain("ship the memory plugin");
-    expect(event.system[1]!.text).toMatch(/^\[memory\] rotated/);
-    expect(event.system[2]!.text).toMatch(/^\[memory-hint\]/);
-    const indexLines = (
-      await readFile(join(memoryRoot, "INDEX.md"), "utf8")
-    ).split("\n").length;
-    const injected =
-      indexLines +
-      event.system.reduce((n, p) => n + p.text.split("\n").length, 0);
-    expect(indexLines).toBeLessThanOrEqual(
-      DEFAULT_MEMORY_OPTIONS.indexLines,
-    );
-    expect(injected).toBeLessThanOrEqual(
-      DEFAULT_MEMORY_OPTIONS.injectBudgetLines,
-    );
-  });
-
-  it("drops status before hint under budget pressure", async () => {
-    await writeMemory(
-      "INDEX.md",
-      "- auth-service: login flow in src/auth.ts\n",
-    );
-    await writeMemory("activeContext.md", activeContextWithErrors(2));
-    await incPending(storage, PROJECT, 5);
-    const { hooks } = await setupHooks({ injectBudgetLines: 31 });
-    const event = contextEvent([
-      userMessage("how does auth-service handle login?"),
-    ]);
-    await runHook(hooks, "context", event);
-    const texts = event.system.map((p) => p.text);
-    expect(texts.some((t) => t.startsWith("[memory-hint]"))).toBe(true);
-    expect(texts.some((t) => t.startsWith("[memory]"))).toBe(false);
+    expect(event.system[0]!.text).not.toContain("[memory] rotated");
+    expect(event.system[0]!.text).not.toContain("[memory-hint]");
   });
 
   it("leaves tools and options untouched and snapshots fire-and-forget", async () => {
@@ -814,65 +1227,6 @@ describe("context hook", () => {
     // Fire-and-forget writer ran without blocking the hook.
     await new Promise((r) => setTimeout(r, 25));
     expect(await getThrottle(storage, PROJECT, SESSION)).toBeDefined();
-  });
-
-  it("prefers the near-miss nudge and does not arm", async () => {
-    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
-    const { hooks } = await setupHooks();
-    const event = contextEvent([
-      userMessage("Please remember: auth-service deploys on Fridays"),
-    ]);
-    await runHook(hooks, "context", event);
-
-    const hints = event.system.filter((p) =>
-      p.text.startsWith("[memory-hint]"),
-    );
-    expect(hints).toHaveLength(1);
-    expect(hints[0]!.text).toBe(REMEMBER_NEAR_MISS_HINT);
-    expect(
-      await storage.get(`${PROJECT}/metrics/arm/hint/${SESSION}`),
-    ).toBeUndefined();
-    // Flush the fire-and-forget metric bump before reading totals.
-    await withWriteLock(async () => undefined);
-    expect((await readTotals(storage, PROJECT))["hint.shown"]).toBe(1);
-  });
-
-  it("a real INDEX hint still arms after a near-miss on a different prompt", async () => {
-    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
-    const { hooks } = await setupHooks();
-    const armKey = `${PROJECT}/metrics/arm/hint/${SESSION}`;
-
-    await runHook(
-      hooks,
-      "context",
-      contextEvent([userMessage("Please remember: deploy Fridays")]),
-    );
-    expect(await storage.get(armKey)).toBeUndefined();
-
-    await runHook(
-      hooks,
-      "context",
-      contextEvent([userMessage("how does auth-service work?")]),
-    );
-    expect(await storage.get(armKey)).toBeDefined();
-  });
-
-  it("narrative remember text still gets the ordinary INDEX hint", async () => {
-    await writeMemory("INDEX.md", "- auth-service: login flow\\n");
-    const { hooks } = await setupHooks();
-    const event = contextEvent([
-      userMessage("remember when auth-service changed?"),
-    ]);
-    await runHook(hooks, "context", event);
-
-    expect(
-      event.system.some((part) => part.text.includes("Nothing was recorded")),
-    ).toBe(false);
-    expect(
-      event.system.some((part) =>
-        part.text.startsWith("[memory-hint] Past decisions mention"),
-      ),
-    ).toBe(true);
   });
 
   it("never throws with hostile storage", async () => {
@@ -915,7 +1269,16 @@ describe("compaction hook", () => {
 
 describe("execute.after failure hook", () => {
   function toolEvent(status: string, error?: unknown, input?: unknown) {
-    return { tool: "bash", sessionID: SESSION, agent: "primary", messageID: "m1", id: "call-1", status, error, input };
+    return {
+      tool: "bash",
+      sessionID: SESSION,
+      agent: "primary",
+      messageID: "m1",
+      id: "call-1",
+      status,
+      error,
+      input,
+    };
   }
 
   it("registers execute.after and captures failures only", async () => {
@@ -927,7 +1290,10 @@ describe("execute.after failure hook", () => {
     // activeContext.md from setup is untouched).
     await handler!(toolEvent("completed") as never);
     expect(await getPending(storage, PROJECT)).toBe(0);
-    const scaffolded = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
+    const scaffolded = await readFile(
+      join(memoryRoot, "activeContext.md"),
+      "utf8",
+    );
     expect(scaffolded).not.toContain("wiring-boom-UNIQUE-789");
 
     // Failures append a source:tool summary line.
@@ -966,9 +1332,7 @@ describe("execute.after failure hook", () => {
     const { toolHooks } = await setupHooks({ captureFailures: false });
     const handler = toolHooks.get("execute.after");
     expect(handler, "hook execute.after registered").toBeDefined();
-    await handler!(
-      toolEvent("error", { message: "must-not-land" }) as never,
-    );
+    await handler!(toolEvent("error", { message: "must-not-land" }) as never);
     // Scaffold activeContext.md from setup is untouched: no failure entry.
     const active = await readFile(join(memoryRoot, "activeContext.md"), "utf8");
     expect(active).not.toContain("must-not-land");
@@ -984,9 +1348,7 @@ describe("execute.after failure hook", () => {
     await expect(
       handler!(toolEvent("completed") as never),
     ).resolves.toBeUndefined();
-    await expect(
-      handler!(null as never),
-    ).resolves.toBeUndefined();
+    await expect(handler!(null as never)).resolves.toBeUndefined();
   });
 });
 
@@ -1056,6 +1418,7 @@ describe("metrics taps (M-T3)", () => {
       expect(await totalsOf(store)).toEqual({
         "hook.prompt": 1,
         "index.overCap": 1,
+        "status.shown": 1,
       });
     }
 
@@ -1082,21 +1445,30 @@ describe("metrics taps (M-T3)", () => {
       });
     }
 
-    // -- context hook: brief + status + hint all injected ------------------
+    // -- context hook: stable brief; prompt hook: status + hint ------------
     {
       const store = countedStore();
       await writeFullMemory(store);
       const { hooks } = await setupHooks({}, store);
-      const event = contextEvent([
+      const context = contextEvent([
         userMessage("how does auth-service handle login?"),
       ]);
-      await runHook(hooks, "context", event);
+      await runHook(hooks, "context", context);
+      expect(await totalsOf(store)).toEqual({
+        "hook.context": 1,
+        "brief.injected": 1,
+        // `brief.lines` counts the injected brief by its line count.
+        "brief.lines": context.system[0]!.text.split("\n").length,
+      });
+      const prompt = promptEvent("how does auth-service handle login?");
+      await runHook(hooks, "prompt", prompt);
       const totals = await totalsOf(store);
       expect(totals).toEqual({
         "hook.context": 1,
         "brief.injected": 1,
-        // `brief.lines` counts the injected brief by its line count.
-        "brief.lines": event.system[0]!.text.split("\n").length,
+        "brief.lines": context.system[0]!.text.split("\n").length,
+        "hook.prompt": 1,
+        "index.attach": 1,
         "status.shown": 1,
         "hint.shown": 1,
       });
@@ -1124,18 +1496,16 @@ describe("metrics taps (M-T3)", () => {
       }
     }
 
-    // -- context hook: forced truncation drops the status before the hint --
+    // -- prompt hook: forced squeeze drops the status before the hint ------
     {
       const store = countedStore();
       await writeFullMemory(store);
       const { hooks } = await setupHooks({ injectBudgetLines: 5 }, store);
-      const event = contextEvent([
-        userMessage("how does auth-service handle login?"),
-      ]);
-      await runHook(hooks, "context", event);
+      const event = promptEvent("how does auth-service handle login?");
+      await runHook(hooks, "prompt", event);
       expect(await totalsOf(store)).toEqual({
-        "hook.context": 1,
-        "brief.truncated": 1,
+        "hook.prompt": 1,
+        "index.attach": 1,
         "status.dropped": 1,
         "hint.shown": 1,
       });

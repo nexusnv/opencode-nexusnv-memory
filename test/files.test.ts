@@ -1,10 +1,12 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  chmod,
   mkdtemp,
   mkdir,
   readdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -12,10 +14,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SEARCH_FILE_BYTES,
+  publishAtomicForTests,
   readCapped,
+  readContainedLines,
+  readContainedText,
   readFullRedacted,
+  readHandoffDirectory,
   updateCapped,
   writeCapped,
+  writeNewCapped,
+  withCappedTransaction,
   withWriteLock,
 } from "../src/files.js";
 
@@ -60,9 +68,7 @@ describe("rejects_traversal_and_enforces_caps", () => {
   it("rejects non-allowlisted names but allows handoff pattern", async () => {
     await expect(readCapped("random.md", opts())).rejects.toThrow();
     await expect(writeCapped("random.md", "x", opts())).rejects.toThrow();
-    await expect(
-      readCapped("handoffs/bad name!.md", opts()),
-    ).rejects.toThrow();
+    await expect(readCapped("handoffs/bad name!.md", opts())).rejects.toThrow();
 
     await writeCapped("handoffs/2026-10-15-120000-abcdef.md", "ok", opts());
     const out = await readCapped(
@@ -72,9 +78,9 @@ describe("rejects_traversal_and_enforces_caps", () => {
     expect(out).toContain("ok");
 
     await writeCapped("handoffs/archive/rotated-123.md", "archived", opts());
-    expect(await readCapped("handoffs/archive/rotated-123.md", opts())).toContain(
-      "archived",
-    );
+    expect(
+      await readCapped("handoffs/archive/rotated-123.md", opts()),
+    ).toContain("archived");
   });
 
   it("lists valid paths in the non-allowlisted rejection", async () => {
@@ -162,6 +168,20 @@ describe("rejects_traversal_and_enforces_caps", () => {
       "utf8",
     );
     expect(archivedContent).toContain("err-one");
+  });
+
+  it("does not treat an indented fake heading as the Known-Errors heading", async () => {
+    const lines = [
+      "# Active context",
+      "- trusted-1",
+      "  ## Known errors",
+      "- trusted-2",
+      ...Array.from({ length: 58 }, (_, i) => `- filler-${i}`),
+    ];
+    expect(lines.length).toBeGreaterThan(60);
+    await expect(
+      writeCapped("activeContext.md", lines.join("\n"), opts()),
+    ).rejects.toThrow(/no Known-Errors block to rotate/);
   });
 
   it("redacts secrets on write and read", async () => {
@@ -379,5 +399,185 @@ describe("readFullRedacted (memory_search support)", () => {
     expect(full!.text).not.toContain("https://");
     expect(full!.text).not.toContain("SuperSecretPW");
     expect(full!.text.length).toBeLessThanOrEqual(SEARCH_FILE_BYTES);
+  });
+});
+
+describe("contained read helpers", () => {
+  it("bounds full reads and reports truncation", async () => {
+    await writeFile(join(root, "style.md"), "x".repeat(128));
+    const out = await readContainedText("style.md", {
+      ...opts(),
+      maxBytes: 64,
+    });
+    expect(out?.truncated).toBe(true);
+    expect(out?.text).toHaveLength(64);
+  });
+
+  it("bounds line reads and refuses an oversized sparse line", async () => {
+    await writeFile(join(root, "style.md"), lines(10));
+    const out = await readContainedLines("style.md", {
+      ...opts(),
+      maxLines: 3,
+    });
+    expect(out?.lines).toEqual(["line-1", "line-2", "line-3"]);
+    expect(out?.truncated).toBe(true);
+
+    await writeFile(join(root, "style.md"), "x".repeat(4096));
+    const sparse = await readContainedLines("style.md", {
+      ...opts(),
+      maxLines: 5,
+      maxBytes: 64,
+    });
+    expect(sparse?.lines).toEqual([]);
+    expect(sparse?.truncated).toBe(true);
+  });
+
+  it("lists only the exact handoff directories", async () => {
+    await mkdir(join(root, "handoffs", "archive"), { recursive: true });
+    await writeFile(join(root, "handoffs", "2026-10-15-120000-abcdef.md"), "h");
+    await writeFile(join(root, "handoffs", "archive", "rotated-1.md"), "a");
+    expect(await readHandoffDirectory(root, "root")).toEqual([
+      "2026-10-15-120000-abcdef.md",
+    ]);
+    expect(await readHandoffDirectory(root, "archive")).toEqual([
+      "rotated-1.md",
+    ]);
+
+    await rm(join(root, "handoffs"), { recursive: true, force: true });
+    await symlink(root, join(root, "handoffs"), "dir");
+    expect(await readHandoffDirectory(root, "root")).toEqual([]);
+  });
+});
+
+describe("capped transaction lifecycle", () => {
+  it("revokes the transaction after its callback settles", async () => {
+    let leaked: { read: (file: string) => Promise<string> } | undefined;
+    await withCappedTransaction(opts(), async (tx) => {
+      await tx.write("decisions.md", "inside\n");
+      leaked = tx;
+    });
+    await expect(leaked!.read("decisions.md")).rejects.toThrow(
+      /transaction already closed/,
+    );
+  });
+});
+
+describe("atomic_publish_and_exclusive_create", () => {
+  // 500 atomic publishes plus a concurrent reader loop: far above the
+  // default 5 s per-test budget once the coverage instrumentation slows the
+  // suite down.
+  it("retries readers across an atomic replacement", async () => {
+    const abs = join(root, "decisions.md");
+    await writeFile(abs, "initial\n");
+    let done = false;
+    const writer = (async () => {
+      for (let i = 0; i < 500; i += 1) {
+        await publishAtomicForTests(root, abs, `v${i}\n`);
+      }
+    })().finally(() => {
+      done = true;
+    });
+    const errors: unknown[] = [];
+    let reads = 0;
+    while (!done) {
+      try {
+        await readCapped("decisions.md", opts());
+        reads += 1;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    await writer;
+    expect(errors).toEqual([]);
+    expect(reads).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("swaps complete files at rename time and leaves no temp files", async () => {
+    await writeCapped("decisions.md", "old\n", opts());
+    const next = `${"new\n".repeat(10_000)}`;
+    const target = join(root, "decisions.md");
+    let duringRename = "";
+    await publishAtomicForTests(root, target, next, async () => {
+      duringRename = await readFile(target, "utf8");
+    });
+    expect(duringRename).toBe("old\n");
+    expect(await readFile(target, "utf8")).toBe(next);
+    const entries = await readdir(root);
+    expect(entries.some((name) => name.startsWith(".tmp-"))).toBe(false);
+  });
+
+  it("exclusive create never overwrites an existing handoff", async () => {
+    const name = "handoffs/2026-10-15-120000-abcdef.md";
+    expect(await writeNewCapped(name, "first", opts())).toBe("created");
+    expect(await writeNewCapped(name, "second", opts())).toBe("exists");
+    expect(await readCapped(name, opts())).toBe("first");
+  });
+
+  it("preserves an existing target's mode across atomic overwrite", async () => {
+    const target = join(root, "decisions.md");
+    await writeCapped("decisions.md", "old\n", opts());
+    await chmod(target, 0o600);
+    await writeCapped("decisions.md", "new\n", opts());
+    expect((await stat(target)).mode & 0o777).toBe(0o600);
+  });
+
+  it("creates archives with a restrictive mode", async () => {
+    await withCappedTransaction(opts(), async (tx) => {
+      await tx.writeArchive("handoffs/archive/forgotten-test.md", "secret\n");
+    });
+    expect(
+      (await stat(join(root, "handoffs/archive/forgotten-test.md"))).mode &
+        0o777,
+    ).toBe(0o600);
+  });
+
+  it("creates a fresh memory root on first write", async () => {
+    const fresh = join(root, "fresh-root");
+    await writeCapped("decisions.md", "first\n", { memoryRoot: fresh });
+    expect(await readCapped("decisions.md", { memoryRoot: fresh })).toContain(
+      "first",
+    );
+  });
+
+  it("refuses to publish through a symlinked handoffs parent", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await symlink(outside, join(root, "handoffs"), "dir");
+      await expect(
+        writeNewCapped("handoffs/2026-10-15-120000-abcdef.md", "x", opts()),
+      ).rejects.toThrow(/symlink escape/);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to publish through a symlinked archive parent", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "memory-files-outside-"));
+    try {
+      await mkdir(join(root, "handoffs"));
+      await symlink(outside, join(root, "handoffs", "archive"), "dir");
+      await expect(
+        writeNewCapped("handoffs/archive/rotated-1.md", "x", opts()),
+      ).rejects.toThrow(/symlink escape/);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to publish through an in-root handoffs alias", async () => {
+    await symlink(root, join(root, "handoffs"), "dir");
+    await expect(
+      writeNewCapped("handoffs/2026-10-15-120000-abcdef.md", "x", opts()),
+    ).rejects.toThrow(/handoff symlink alias/);
+  });
+
+  it("refuses to publish through an in-root archive alias", async () => {
+    await mkdir(join(root, "handoffs"));
+    await symlink("..", join(root, "handoffs", "archive"), "dir");
+    await expect(
+      writeNewCapped("handoffs/archive/rotated-1.md", "x", opts()),
+    ).rejects.toThrow(/handoff symlink alias/);
   });
 });

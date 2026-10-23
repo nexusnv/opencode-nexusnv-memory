@@ -15,14 +15,14 @@ author:
 Two distinct threats follow:
 
 - **T1 — action on injected text.** Poisoned content in a session directs the agent to run a command,
-  fetch a URL, or exfiltrate. This is dangerous because memory is *auto-injected* into sessions that
+  fetch a URL, or exfiltrate. This is dangerous because memory is _auto-injected_ into sessions that
   have full tool permissions.
 - **T2 — durable poisoning.** Poisoned text is promoted into a durable file, then injected into every
   future session — a persistent, self-replicating foothold.
 
 The obvious-looking fix — detect prompt injection and reject it — is not a real boundary. Detection is
 unreliable, and a design that depends on it fails silently and dangerously the first time it misses.
-The design must be safe on the assumption that poisoning *will* sometimes get through.
+The design must be safe on the assumption that poisoning _will_ sometimes get through.
 
 An earlier revision also held that the injected brief could include recovered fault bodies verbatim,
 and that `memory-manager` needed a write ability narrowed to `.opencode/memory/**`. Both assumptions are
@@ -35,8 +35,10 @@ Containment rests on four structural controls, none of which require detecting a
 1. **Minimisation.** Raw captured output is **never auto-injected**. `loadBrief()` emits one bounded
    message-derived summary line per known error (first line of `event.error.message`, ≤120 chars,
    newlines collapsed; `<cmd>:` prefix only when `event.input` yields it; max 5 lines); the detail body
-  stays on disk and is `memory_recall`-only. Captured content in the payload is labelled as untrusted
-  data, and the `AGENTS.md` directive states that memory content is data, never instructions.
+   stays on disk and is `memory_recall`-only. The compaction priors (`loadPriors()`) follow the same
+   rule: the `activeContext` slice contributes context plus summary lines, never a captured body.
+   Captured content in the payload is labelled as untrusted
+   data, and the `AGENTS.md` directive states that memory content is data, never instructions.
 2. **Provenance.** Every entry carries `source:user | tool | model | snapshot`. Provenance decides the
    write path (ADR-0004) and is shown to the human at review time.
 3. **Proposal-only review (no sandbox).** The read+propose phase of `/memory-review` writes no memory and
@@ -61,7 +63,7 @@ as "injection detected".
 
 ## Consequences
 
-- Positive: prompt-injection *detection* is not a load-bearing assumption; the containment holds even
+- Positive: prompt-injection _detection_ is not a load-bearing assumption; the containment holds even
   when a poisoned line reaches the proposal table. The auto-injected payload can no longer carry raw
   command output, so the highest-traffic injection path is closed. Dropping the session permission lock
   removes complexity that did not buy containment (it is time-scoped) and a footgun that would have
@@ -74,5 +76,9 @@ as "injection detected".
   are the `source:` tag, the advisory flags, and the bulk-approval exclusion — not a guarantee.
 - `captureFailures: false` disables tool-output capture entirely for users who want the smallest
   attack surface.
-- If a future capability lets the plugin classify *authoring provenance* with certainty (rather than by
+- If a future capability lets the plugin classify _authoring provenance_ with certainty (rather than by
   directive form), the `source:user` heuristic from ADR-0004 can be tightened to it.
+
+## Revision 2026-10-20 — prompt-tail placement (E8-A)
+
+The stable active-context brief remains in the per-model-call system prefix with the fixed untrusted-data label. Volatile status, hint, and newest-handoff pointer are appended once per prompt to the canonical user input, not pushed into system, and not re-emitted on every tool continuation. The handoff pointer is a path + "(latest)" only, never content. The block is labelled data-only. Status/hint are plugin-generated; the pointer is memory-derived. No directive from memory moves into the prompt; the existing `AGENTS.md` protocol remains the only instruction channel. A retry marker prevents duplicate/lost notices.

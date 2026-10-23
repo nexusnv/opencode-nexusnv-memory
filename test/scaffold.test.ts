@@ -212,9 +212,11 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     });
 
     // Command editor received ALL plugin commands, in setup order
-    // (memory-review, memory-metrics, memory-status).
+    // (memory-review, memory-forget, memory-gc, memory-metrics, memory-status).
     expect([...commands.keys()]).toEqual([
       "memory-review",
+      "memory-forget",
+      "memory-gc",
       "memory-metrics",
       "memory-status",
     ]);
@@ -271,7 +273,7 @@ describe("install_surface_P0_parity", () => {
     const index = read("src/index.ts");
     expect(index).toContain("HANDOFFS_DIR");
     expect(index).toContain("ARCHIVE_DIR");
-    expect(index).toMatch(/flag:\s*["']wx["']/);
+    expect(index).toMatch(/writeNewCapped/);
 
     // Commented options snippet: exactly the 5 spec §3 options, all commented.
     const options = optionsSnippet();

@@ -1,32 +1,34 @@
 /**
  * Brief + priors loaders (spec §§5.2, 5.6 + c4-06-code).
  *
- * `loadBrief` feeds the per-model-call `context` hook: a capped
- * `activeContext` slice (goal/pending/next + summarised known-errors) plus a
- * one-line newest-handoff pointer, ≤48 lines including at most 5
- * message-derived error lines. It never carries the INDEX map (the `prompt`
- * hook is the sole INDEX injector) nor the `decisions.md` tail (recall-only
- * plus `loadPriors` for compaction only). Known Errors contribute
- * `sanitizeForBrief` summary lines only; captured bodies stay on disk for
- * `memory_recall`.
+ * `loadBrief` feeds the per-model-call `context` hook: only the stable
+ * `activeContext` slice (goal/pending/next + summarised known-errors), capped
+ * dynamically (47 lines at defaults) and including at most 5 message-derived
+ * error summary lines. The newest-handoff pointer is append-only prompt
+ * admission data, never part of the stable system prefix. It never carries
+ * the INDEX map (the `prompt` hook is the sole INDEX injector) nor the
+ * `decisions.md` tail (recall-only plus `loadPriors` for compaction only).
+ * Known Errors contribute `sanitizeForBrief` summary lines only; captured
+ * bodies stay on disk for `memory_recall`.
  *
  * `loadPriors` feeds the `compaction` hook only: `activeContext` slice +
  * `decisions.md` injectable tail (≤60 lines) + handoff pointer.
  *
  * All loaders are async and never throw (missing/unreadable → `""`/false);
- * output is always redacted and truncated with a notice.
+ * output is always redacted and truncated with a notice. Reads and handoff
+ * listings are contained to the memory root.
  */
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, relative } from "node:path";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import {
-  countLines,
   readCapped,
+  readContainedLines,
+  readHandoffDirectory,
   resolveMemoryRoot,
-  splitTruncationNotice,
 } from "./files.js";
 import { sanitizeForBrief, UNTRUSTED_LABEL } from "./guard.js";
-import { redact } from "./redact.js";
+import { splitKnownErrorSections } from "./known-errors.js";
+import { redact, redactPreservingLines } from "./redact.js";
 
 /** Injection cap for `loadBrief` output (fixed slice of `injectBudgetLines`). */
 export const BRIEF_MAX_LINES = 48;
@@ -37,6 +39,8 @@ export const BRIEF_MAX_ERROR_LINES = 5;
 export interface BriefOptions {
   /** Per-file cap for the underlying reads. Defaults to `fileLines` (60). */
   readonly fileLines?: number;
+  /** Dynamic output cap (≤`BRIEF_MAX_LINES`); defaults to `BRIEF_MAX_LINES`. */
+  readonly maxLines?: number;
 }
 
 export interface PriorsOptions {
@@ -70,14 +74,29 @@ export function truncateLinesWithNotice(
 /**
  * Async INDEX line count for the `prompt` hook: missing/unreadable/invalid
  * resolves `undefined` (never throws), so the caller can distinguish
- * "missing" (silent) from "over cap" (report the count).
+ * "missing" (silent) from "over cap" (report the count). The optional root
+ * must be paired with an exact `INDEX.md` path; a byte-guard hit is treated
+ * as over-cap.
  */
 export async function indexLineCount(
   absPath: string,
+  memoryRoot?: string,
+  indexLines = DEFAULT_MEMORY_OPTIONS.indexLines,
 ): Promise<number | undefined> {
   try {
     if (typeof absPath !== "string" || absPath.length === 0) return undefined;
-    return countLines(await readFile(absPath, "utf8"));
+    const root = memoryRoot ?? dirname(absPath);
+    if (relative(root, absPath) !== "INDEX.md") return undefined;
+    const cap =
+      Number.isInteger(indexLines) && indexLines >= 0 ? indexLines : 30;
+    const loaded = await readContainedLines("INDEX.md", {
+      memoryRoot: root,
+      maxLines: cap + 1,
+      maxBytes: 1_048_576,
+      onMissing: "skip",
+    });
+    if (loaded === undefined) return undefined;
+    return loaded.truncated ? cap + 1 : loaded.lines.length;
   } catch {
     return undefined;
   }
@@ -88,78 +107,56 @@ export async function indexLineCount(
  * `indexLines` (delegates to `indexLineCount`). Missing, over-cap, or
  * unreadable resolves `false` (no attach, never throws). A file attachment
  * cannot be truncated, so an over-cap INDEX is skipped, not attached in part.
+ * When `memoryRoot` is supplied, the contained reader validates against that
+ * fixed root instead of a path derived from `absPath`.
  */
 export async function indexWithinCap(
   absPath: string,
   indexLines: number = DEFAULT_MEMORY_OPTIONS.indexLines,
+  memoryRoot?: string,
 ): Promise<boolean> {
   try {
     if (!Number.isInteger(indexLines) || indexLines <= 0) return false;
-    const count = await indexLineCount(absPath);
+    const count = await indexLineCount(absPath, memoryRoot, indexLines);
     return count !== undefined && count <= indexLines;
   } catch {
     return false;
   }
 }
 
-async function readTextOrEmpty(absPath: string): Promise<string> {
-  try {
-    return await readFile(absPath, "utf8");
-  } catch {
-    return "";
-  }
-}
-
-const KNOWN_ERRORS_HEADING = /^##\s+known errors\s*$/i;
-const BULLET_START = /^\s*-\s+/;
-const SECTION_HEADING = /^##\s+/;
-
 /**
- * Split `activeContext` lines into the context slice (everything outside
- * the Known-errors region) and Known-errors bullet blocks (bullet plus its
- * continuation lines, detail bodies included — the caller summarises each
- * block to one line and drops the body).
+ * Split raw `activeContext` lines into the trusted context slice and the
+ * Known-errors blocks.
+ *
+ * The **structure** is computed on the raw text; only the emitted content is
+ * redacted. Parsing the redacted text instead would let a `<private>` span
+ * that swallows a captured `source:tool` bullet erase the block and promote
+ * its detail into trusted context (ADR-0007). Redaction preserves line
+ * positions, so the two views stay aligned.
  */
-function splitKnownErrors(allLines: string[]): {
+function splitKnownErrors(rawLines: readonly string[]): {
   contextLines: string[];
   errorBlocks: string[][];
 } {
-  const headingIdx = allLines.findIndex((l) =>
-    KNOWN_ERRORS_HEADING.test(l.trim()),
-  );
-  if (headingIdx === -1) {
-    return { contextLines: [...allLines], errorBlocks: [] };
+  const redacted = redactPreservingLines(rawLines.join("\n"));
+  const redactedLines = redacted.length === 0 ? [] : redacted.split("\n");
+  if (redactedLines.length !== rawLines.length) {
+    // Unreachable in practice (redaction preserves line counts); stay
+    // fail-closed by parsing the redacted text rather than emitting raw
+    // content that was never redacted.
+    const fallback = splitKnownErrorSections(redactedLines);
+    return {
+      contextLines: fallback.contextLines,
+      errorBlocks: fallback.blocks.map((block) => [...block.lines]),
+    };
   }
-  const contextLines = allLines.slice(0, headingIdx);
-  const errorBlocks: string[][] = [];
-  let current: string[] | undefined;
-  let i = headingIdx + 1;
-  for (; i < allLines.length; i += 1) {
-    const line = allLines[i]!;
-    if (BULLET_START.test(line)) {
-      if (current) errorBlocks.push(current);
-      current = [line];
-    } else if (current) {
-      // Column-0 `##` only: captured detail bodies are stored 2-space
-      // indented (`  ${line}`), so a trimmed test would let tool output
-      // containing `## Next` terminate the block early and launder the
-      // remainder into the trusted context slice unsanitized (H-1).
-      if (SECTION_HEADING.test(line)) {
-        errorBlocks.push(current);
-        current = undefined;
-        break;
-      }
-      current.push(line);
-    }
-  }
-  if (current) errorBlocks.push(current);
-  // A section after Known errors belongs to the context slice, not the errors.
-  if (i < allLines.length) contextLines.push(...allLines.slice(i));
-  // Drop the heading itself plus blank padding around it: the brief carries
-  // content lines, and the loader caps the total.
+  const { contextLines, contextIndexes, blocks } =
+    splitKnownErrorSections(rawLines);
   return {
-    contextLines: contextLines.filter((l) => l.trim().length > 0),
-    errorBlocks,
+    contextLines: contextIndexes.map((index) => redactedLines[index] ?? ""),
+    errorBlocks: blocks.map((block) =>
+      redactedLines.slice(block.start, block.end),
+    ),
   };
 }
 
@@ -241,18 +238,110 @@ export function pruneScaffoldNoise(lines: readonly string[]): string[] {
  * (legacy/unexpected, never newest).
  */
 function handoffOrder(name: string): {
-  stamp: string;
+  stamp: number;
   seq: number;
   name: string;
 } {
+  // Archive names (`forgotten-*`, `rotated-*`) carry a different embedded
+  // stamp shape. Without this, archive listings hid them at the old end
+  // instead of sorting them among the retired entries.
+  const archiveStamp = archiveHandoffStamp(name);
+  if (archiveStamp !== undefined) {
+    return { stamp: archiveStamp, seq: 0, name };
+  }
+  // Impossible dates (e.g. 2026-02-31) are unexpected names, never newest.
+  const stamp = parseHandoffTimestamp(name);
+  if (stamp === undefined) {
+    return { stamp: 0, seq: 0, name };
+  }
   const match = name.match(/^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)\.md$/);
-  if (!match) return { stamp: "", seq: 0, name };
+  if (!match) return { stamp: 0, seq: 0, name };
   const rest = match[2]!;
   const seqMatch = rest.match(/^(.*)-(\d{2})$/);
   if (seqMatch && seqMatch[1]!.length === 6) {
-    return { stamp: match[1]!, seq: Number.parseInt(seqMatch[2]!, 10), name };
+    return { stamp, seq: Number.parseInt(seqMatch[2]!, 10), name };
   }
-  return { stamp: match[1]!, seq: 0, name };
+  return { stamp, seq: 0, name };
+}
+
+/**
+ * Embedded timestamp for a generated archive name. Supports
+ * `forgotten-YYYYMMDDTHHMMSSZ-*`, `rotated-YYYY-MM-DD-HH-MM-SS-mmmZ-*`, and
+ * the legacy `rotated-YYYY-MM-DD-HHMMSS-*` shape. Invalid dates/names are
+ * unexpected and sort first.
+ */
+function archiveHandoffStamp(name: string): number | undefined {
+  const match = name.match(
+    /^(?:forgotten|rotated)-(\d{4})-?(\d{2})-?(\d{2})[T-](\d{2})-?(\d{2})-?(\d{2})/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, hours, minutes, seconds] = match;
+  const yearNum = Number.parseInt(year!, 10);
+  const monthNum = Number.parseInt(month!, 10);
+  const dayNum = Number.parseInt(day!, 10);
+  const hourNum = Number.parseInt(hours!, 10);
+  const minuteNum = Number.parseInt(minutes!, 10);
+  const secondNum = Number.parseInt(seconds!, 10);
+  const stamp = Date.UTC(
+    yearNum,
+    monthNum - 1,
+    dayNum,
+    hourNum,
+    minuteNum,
+    secondNum,
+  );
+  const date = new Date(stamp);
+  if (
+    date.getUTCFullYear() !== yearNum ||
+    date.getUTCMonth() !== monthNum - 1 ||
+    date.getUTCDate() !== dayNum ||
+    date.getUTCHours() !== hourNum ||
+    date.getUTCMinutes() !== minuteNum ||
+    date.getUTCSeconds() !== secondNum
+  ) {
+    return undefined;
+  }
+  return Number.isFinite(stamp) ? stamp : undefined;
+}
+
+/**
+ * Parse the generated `YYYY-MM-DD-HHmmss-` prefix. Returns `undefined` for
+ * unexpected names; GC never deletes a name it cannot timestamp.
+ */
+export function parseHandoffTimestamp(name: string): number | undefined {
+  const match = name.match(
+    /^(\d{4})-(\d{2})-(\d{2})-(\d{6})-[A-Za-z0-9._-]+\.md$/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, time] = match;
+  const yearNum = Number.parseInt(year!, 10);
+  const monthNum = Number.parseInt(month!, 10);
+  const dayNum = Number.parseInt(day!, 10);
+  const hours = Number.parseInt(time!.slice(0, 2), 10);
+  const minutes = Number.parseInt(time!.slice(2, 4), 10);
+  const seconds = Number.parseInt(time!.slice(4, 6), 10);
+  const stamp = Date.UTC(
+    yearNum,
+    monthNum - 1,
+    dayNum,
+    hours,
+    minutes,
+    seconds,
+  );
+  const date = new Date(stamp);
+  // Date.UTC normalizes 2026-02-31 and 2026-99-99 into other days/months.
+  // Round-trip every component so an impossible name is never "newest".
+  if (
+    date.getUTCFullYear() !== yearNum ||
+    date.getUTCMonth() !== monthNum - 1 ||
+    date.getUTCDate() !== dayNum ||
+    date.getUTCHours() !== hours ||
+    date.getUTCMinutes() !== minutes ||
+    date.getUTCSeconds() !== seconds
+  ) {
+    return undefined;
+  }
+  return Number.isFinite(stamp) ? stamp : undefined;
 }
 
 /** Newest-last order for top-level/archive handoff names (shared). */
@@ -262,7 +351,7 @@ function sortedHandoffNames(names: readonly string[]): string[] {
     .map(handoffOrder)
     .sort(
       (a, b) =>
-        (a.stamp < b.stamp ? -1 : a.stamp > b.stamp ? 1 : 0) ||
+        a.stamp - b.stamp ||
         a.seq - b.seq ||
         (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
     )
@@ -271,15 +360,18 @@ function sortedHandoffNames(names: readonly string[]): string[] {
 
 /**
  * Newest top-level `handoffs/*.md` pointer line, or `undefined` when there
- * is none. Archive entries are recall-only and never pointed at. Never
+ * is none. Archive entries are recall-only and never pointed at. The listing
+ * is contained: handoff aliases (in-root or off-root) yield no names. Never
  * throws.
  */
 export async function newestHandoffLine(
   memoryRoot: string,
 ): Promise<string | undefined> {
   try {
-    const entries = await readdir(join(memoryRoot, "handoffs"));
-    const names = sortedHandoffNames(entries);
+    const entries = await readHandoffDirectory(memoryRoot, "root");
+    const names = sortedHandoffNames(entries).filter(
+      (name) => parseHandoffTimestamp(name) !== undefined,
+    );
     if (names.length === 0) return undefined;
     return `[memory] handoff: handoffs/${names[names.length - 1]!} (latest)`;
   } catch {
@@ -295,9 +387,36 @@ export interface HandoffListing {
 }
 
 /**
+ * Names-only listing that fails closed: a missing/unreadable directory is
+ * empty, but any other error propagates. GC uses this so it can never claim
+ * "nothing to delete" when it could not read `handoffs/`.
+ */
+export async function listHandoffsStrict(
+  memoryRoot: string,
+  subdir: "root" | "archive",
+  limit = 20,
+): Promise<HandoffListing> {
+  let sorted: string[];
+  try {
+    sorted = sortedHandoffNames(
+      await readHandoffDirectory(memoryRoot, subdir, { strict: true }),
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { names: [], total: 0 };
+    }
+    throw error;
+  }
+  const total = sorted.length;
+  const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
+  return { names: sorted.reverse().slice(0, cap), total };
+}
+
+/**
  * Names-only listing for `memory_recall` (never content, never throws):
- * newest first, bounded to `limit`. A missing/unreadable directory resolves
- * to an empty listing.
+ * newest first, bounded to `limit`. A missing/unreadable directory or a
+ * symlinked/aliased handoff directory resolves to an empty listing.
  */
 export async function listHandoffs(
   memoryRoot: string,
@@ -305,21 +424,19 @@ export async function listHandoffs(
   limit = 20,
 ): Promise<HandoffListing> {
   try {
-    const dir = subdir === "archive" ? join("handoffs", "archive") : "handoffs";
-    const sorted = sortedHandoffNames(await readdir(join(memoryRoot, dir)));
-    const total = sorted.length;
-    const cap = Number.isInteger(limit) && limit > 0 ? limit : 0;
-    return { names: sorted.reverse().slice(0, cap), total };
+    return await listHandoffsStrict(memoryRoot, subdir, limit);
   } catch {
     return { names: [], total: 0 };
   }
 }
 
 /**
- * Bounded per-model-call brief: `activeContext` slice + newest-handoff
- * pointer, ≤48 lines including at most 5 message-derived error summary
- * lines. Never the INDEX map, never the decisions tail. Redacted,
- * truncated with notice, never throws.
+ * Bounded per-model-call brief: only the `activeContext` slice, capped
+ * dynamically (default and maximum 48 lines) and including at most 5
+ * message-derived error summary lines. Never the INDEX map, never the
+ * decisions tail, never the newest-handoff pointer (the prompt hook appends
+ * that notice to the user input). Reads are contained, redacted, truncated
+ * with notice, never throws.
  */
 export async function loadBrief(
   memoryRoot?: string,
@@ -327,13 +444,33 @@ export async function loadBrief(
 ): Promise<string> {
   try {
     const root = resolveMemoryRoot(memoryRoot);
-    // fileLines intentionally unused: the brief is bounded by BRIEF_MAX_LINES
-    // (48), which is tighter than any per-file disk cap.
-    void options;
-    const raw = await readTextOrEmpty(join(root, "activeContext.md"));
-    const redacted = redact(raw);
-    const allLines = redacted.length === 0 ? [] : redacted.split("\n");
-    const { contextLines, errorBlocks } = splitKnownErrors(allLines);
+    const requested = options?.maxLines ?? BRIEF_MAX_LINES;
+    const cap =
+      Number.isInteger(requested) && requested >= 0
+        ? Math.min(requested, BRIEF_MAX_LINES)
+        : BRIEF_MAX_LINES;
+    if (cap === 0) return "";
+    // Read through the per-file cap: captureFailure appends new Known-Errors
+    // blocks at the end, so a `cap`-line window can hide them behind prunable
+    // scaffolding. The emitted brief stays bounded by `cap` below.
+    const requestedFileLines = options?.fileLines;
+    const fileLines =
+      requestedFileLines !== undefined &&
+      Number.isInteger(requestedFileLines) &&
+      requestedFileLines > 0
+        ? requestedFileLines
+        : DEFAULT_MEMORY_OPTIONS.fileLines;
+    const loaded = await readContainedLines("activeContext.md", {
+      memoryRoot: root,
+      maxLines: Math.max(cap, fileLines) + 1,
+      maxBytes: 1_048_576,
+      onMissing: "skip",
+    });
+    const raw = loaded?.lines.join("\n") ?? "";
+    const rawLines = raw.length === 0 ? [] : raw.split("\n");
+    // Structure comes from the raw text; only the emitted content is
+    // redacted (see splitKnownErrors).
+    const { contextLines, errorBlocks } = splitKnownErrors(rawLines);
 
     const body: string[] = pruneScaffoldNoise(contextLines);
     const summaries: string[] = [];
@@ -346,14 +483,25 @@ export async function loadBrief(
       body.push(UNTRUSTED_LABEL);
       body.push(...summaries);
     }
-    const pointer = await newestHandoffLine(root);
-    if (pointer !== undefined) body.push(pointer);
 
-    if (body.length === 0) return "";
-    const capped = truncateLinesWithNotice(
-      ["[memory] active context", ...body],
-      BRIEF_MAX_LINES,
-    );
+    const inputTruncated = loaded?.truncated === true;
+    const sourceLines = Math.max(loaded?.lines.length ?? 0, 1);
+    if (body.length === 0 && !inputTruncated) return "";
+    const candidates = ["[memory] active context", ...body];
+    // A bounded read only knows a lower bound on the source length. Do not
+    // print that bound as an exact total; say "at least" instead. Pruning can
+    // also remove the sentinel line, so force the notice whenever the reader
+    // stopped early.
+    const capped = inputTruncated
+      ? (() => {
+          const keep = cap <= 1 ? 0 : cap - 1;
+          const shown = Math.min(candidates.length, keep);
+          return [
+            ...candidates.slice(0, keep),
+            `[truncated: showing first ${shown} of at least ${sourceLines} lines]`,
+          ];
+        })()
+      : truncateLinesWithNotice(candidates, cap);
     return redact(capped.join("\n"));
   } catch {
     return "";
@@ -372,17 +520,34 @@ export async function loadPriors(
 ): Promise<string> {
   try {
     const root = resolveMemoryRoot(memoryRoot);
-    const fileLines =
-      options?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
+    const fileLines = options?.fileLines ?? DEFAULT_MEMORY_OPTIONS.fileLines;
     const cap = Number.isInteger(fileLines) && fileLines > 0 ? fileLines : 60;
-    let active = "";
+    let activeLines: string[] = [];
+    let activeSummaries: string[] = [];
+    let activeTruncated = false;
+    let activeSourceLines = 0;
     try {
-      active = await readCapped("activeContext.md", {
+      // Read raw lines: the Known-errors structure is parsed from the raw
+      // text and only the emitted content is redacted, so captured detail
+      // can never be promoted into the compaction payload (ADR-0007).
+      const loaded = await readContainedLines("activeContext.md", {
         memoryRoot: root,
-        fileLines: cap,
+        maxLines: cap + 1,
+        maxBytes: 1_048_576,
+        onMissing: "skip",
       });
+      const rawLines = loaded?.lines ?? [];
+      const structured = splitKnownErrors(rawLines);
+      activeLines = pruneScaffoldNoise(structured.contextLines).slice(0, cap);
+      activeSummaries = structured.errorBlocks
+        .filter((block) => !isScaffoldNoise(block[0] ?? ""))
+        .slice(0, BRIEF_MAX_ERROR_LINES)
+        .map((block) => sanitizeForBrief(block.join("\n")))
+        .filter((summary) => summary.length > 0);
+      activeTruncated = loaded?.truncated === true;
+      activeSourceLines = Math.max(rawLines.length, 1);
     } catch {
-      active = "";
+      activeLines = [];
     }
     let tail = "";
     try {
@@ -399,17 +564,27 @@ export async function loadPriors(
     // data-only like loadBrief does — the compaction summarizer must not
     // treat priors as trusted instructions.
     lines.push(UNTRUSTED_LABEL);
-    if (active.trim().length > 0) {
+    if (activeLines.length > 0) {
+      lines.push("## active context");
+      lines.push(...activeLines);
+    }
+    if (activeSummaries.length > 0) {
+      // Captured detail is recall-only: the compaction payload carries the
+      // message-derived summary lines, never the raw tool output.
+      lines.push("## known errors (summaries)");
+      lines.push(...activeSummaries);
+    }
+    if (
+      activeTruncated &&
+      (activeLines.length > 0 || activeSummaries.length > 0)
+    ) {
       // The loader-generated truncation notice is not content: a truncated
       // fresh scaffold injects no section, and the notice rides after real
-      // content only.
-      const { body, notice } = splitTruncationNotice(active);
-      const activeLines = pruneScaffoldNoise(body.split("\n"));
-      if (activeLines.length > 0) {
-        lines.push("## active context");
-        lines.push(...activeLines);
-        if (notice !== undefined) lines.push(notice);
-      }
+      // content only. It is independent of the context slice: a window that
+      // holds only Known-Errors blocks still shows real content.
+      lines.push(
+        `[truncated: showing first ${cap} of at least ${activeSourceLines} lines]`,
+      );
     }
     if (tail.trim().length > 0) {
       lines.push("## decisions (tail)");
@@ -418,9 +593,9 @@ export async function loadPriors(
     const pointer = await newestHandoffLine(root);
     if (pointer !== undefined) lines.push(pointer);
     if (lines.length <= 2) return "";
-    return redact(
-      truncateLinesWithNotice(lines, cap * 2 + 5).join("\n"),
-    );
+    // The payload carries the context slice, the Known-Errors summary
+    // section (≤6 lines), the decisions tail and the pointer.
+    return redact(truncateLinesWithNotice(lines, cap * 2 + 11).join("\n"));
   } catch {
     return "";
   }

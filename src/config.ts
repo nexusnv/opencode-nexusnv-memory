@@ -148,7 +148,7 @@ export function parseMemoryOptions(
       warnOnce(
         "coherence.injectBudgetLines",
         warn,
-        `[memory] option coherence: injectBudgetLines (${resolved.injectBudgetLines}) is not above indexLines (${resolved.indexLines}); no budget remains for the brief/status/hint — raise injectBudgetLines or lower indexLines`,
+        `[memory] option coherence: injectBudgetLines (${resolved.injectBudgetLines}) is not above indexLines (${resolved.indexLines}); no budget remains for the brief or status line (a one-line hint is exempt) — raise injectBudgetLines or lower indexLines`,
       );
     }
     if (resolved.fileLines < 10) {
