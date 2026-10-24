@@ -66,7 +66,7 @@ test/
 
 ## Setup / dev
 
-- Config location matters. If config is `.opencode/opencode.jsonc`: `"plugins": ["./plugins/memory"]`. If config is repo-root `opencode.jsonc`: `"plugins": ["./.opencode/plugins/memory"]`. Drop-in alternative: `.opencode/plugins/memory/` auto-discovery; `opencode plugin list` verifies load; touch the entry file or restart the runtime per its reload guidance if a stale load is suspected.
+- Config location matters. If config is `.opencode/opencode.jsonc`: `"plugins": ["./plugins/memory"]`. If config is repo-root `opencode.jsonc`: `"plugins": ["./.opencode/plugins/memory"]`. Drop-in alternative: `.opencode/plugins/memory/` auto-discovery; `/memory-status` verifies load (`opencode plugin list` only covers global package plugins); touch the entry file or restart the runtime per its reload guidance if a stale load is suspected.
 - First run scaffolds templates + `handoffs/` and emits one consolidated install checklist (permission rule + protocol block + commented ≤5-option snippet + `/memory-status` pointer); later setups keep the unconditional permission warning. It never edits `opencode.jsonc` or `AGENTS.md` (ADR-0006).
 - Pin an exact tested `@opencode/plugin` release (2.0.x; tested `2.0.29`); never `latest`.
 

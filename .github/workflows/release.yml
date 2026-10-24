@@ -1,9 +1,9 @@
 name: release
 
 # Two jobs by design (see Sourcery/CodeRabbit review on PR #11):
-# - build: full gates + tag guards. NO id-token here, so dependency
-#   lifecycle scripts can never run in a job that can mint publish
-#   credentials.
+# - build: typecheck + coverage + tag guards. NO id-token here, so
+#   dependency lifecycle scripts can never run in a job that can mint
+#   publish credentials.
 # - publish: minimal OIDC-only job. No `npm ci` (no dependency code runs
 #   here at all), no registry-url (setup-node would otherwise write an
 #   auth entry referencing NODE_AUTH_TOKEN, which makes npm skip the OIDC
@@ -13,8 +13,8 @@ name: release
 # so CI stages the asserted tarball and a maintainer approves it on
 # npmjs.com (with 2FA) before it goes live. Nothing direct-publishes.
 #
-# Break-glass: workflow_dispatch with token_fallback runs the same gates
-# but stages with NPM_TOKEN instead of OIDC (see README "Releases").
+# Break-glass: workflow_dispatch with token_fallback runs the same release
+# checks but stages with NPM_TOKEN instead of OIDC (see CONTRIBUTING.md).
 
 permissions:
   contents: read

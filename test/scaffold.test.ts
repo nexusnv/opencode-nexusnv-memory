@@ -352,29 +352,33 @@ describe("install_surface_P0_parity", () => {
     expect(md).toMatch(/human approves/i);
   });
 
-  it("readme_covers_install_uninstall_P0_budgets", () => {
+  it("readme_covers_user_install_use_uninstall_budgets", () => {
     const md = read("README.md");
     const lower = md.toLowerCase();
-    // Install matrices: drop-in vs package, both config locations.
-    expect(md).toMatch(/drop-in/i);
-    expect(md).toMatch(/opencode-nexusnv-memory/);
+    // User-facing install path: package, config file, and verification.
+    expect(md).toMatch(/npm install opencode-nexusnv-memory/);
     expect(md).toContain(".opencode/opencode.jsonc");
-    expect(lower).toContain("repo-root");
-    // Merge order.
-    expect(md).toMatch(/merge global/i);
-    // plugin list verify + reload guidance.
-    expect(md).toMatch(/opencode plugin list/);
-    expect(lower).toContain("reload");
+    expect(lower).toContain("repository root");
+    expect(md).toMatch(/\/memory-status/);
+    // The required permission rule and the hand-owned protocol block.
+    expect(md).toMatch(/memory_write/);
+    expect(md).toMatch(
+      /\{\s*"action":\s*"memory_write",\s*"resource":\s*"\*",\s*"effect":\s*"ask"\s*\}/,
+    );
+    expect(md).toMatch(/AGENTS\.md/);
+    expect(md).toMatch(/permissions/);
+    // Core workflow surface.
+    expect(md).toMatch(/\/memory-review/);
+    expect(md).toMatch(/remember:/);
+    expect(md).toMatch(/memory_recall/);
+    expect(md).toMatch(/INDEX\.md/);
+    expect(md).toMatch(/activeContext\.md/);
     // Uninstall: hand-remove AGENTS block, explicit git rm, orphaned ledger harmless.
     expect(md).toMatch(/## Uninstall/);
     expect(md).toMatch(/by hand/);
     expect(md).toMatch(/git rm/);
     expect(md).toMatch(/orphan/i);
-    // P0 manual section: six files by hand, restores from INDEX + activeContext.
-    expect(md).toMatch(/P0|without code/i);
-    expect(md).toMatch(/INDEX\.md/);
-    expect(md).toMatch(/activeContext\.md/);
-    expect(md).toMatch(/no re-explaining/);
+    expect(md).toMatch(/re-explaining/);
     // Budgets.
     expect(lower).toContain("budget");
     expect(md).toMatch(/30/);
@@ -382,6 +386,22 @@ describe("install_surface_P0_parity", () => {
     expect(md).toMatch(/80/);
     // Supported range.
     expect(md).toMatch(/2\.0/);
+  });
+
+  it("contributing_covers_developer_install_and_manual_mode", () => {
+    const md = read("CONTRIBUTING.md");
+    // Drop-in/local install, both config locations, merge order, reload.
+    expect(md).toMatch(/drop-in/i);
+    expect(md).toContain(".opencode/opencode.jsonc");
+    expect(md).toMatch(/merge global/i);
+    expect(md).toMatch(/reload/i);
+    // Manual mode: six files by hand, restores from INDEX + activeContext.
+    expect(md).toMatch(/P0|no plugin/i);
+    expect(md).toMatch(/INDEX\.md/);
+    expect(md).toMatch(/activeContext\.md/);
+    expect(md).toMatch(/no re-explaining/);
+    // Developer deploy-check content lives here, not in the user README.
+    expect(md).toMatch(/Deploy checks/i);
   });
 
   it("changelog_records_P1_and_supported_range", () => {

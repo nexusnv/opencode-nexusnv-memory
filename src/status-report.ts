@@ -321,7 +321,7 @@ function deriveActions(report: StatusReportBase): string[] {
   }
   if (report.snapshotsWritten + report.compactionCaptures === 0) {
     actions.push(
-      "no idle/compaction captures observed yet — run the README deploy check",
+      "no idle/compaction captures observed yet — use the session normally, then re-check",
     );
   }
   if (report.agent === "absent") {
@@ -427,7 +427,7 @@ function agentLabel(status: AgentStatus): string {
 
 function activityLabel(report: StatusReport): string {
   if (report.snapshotsWritten + report.compactionCaptures === 0) {
-    return "none observed — see README deploy check";
+    return "none observed yet";
   }
   return `${report.snapshotsWritten} snapshot(s), ${report.compactionCaptures} compaction capture(s)`;
 }

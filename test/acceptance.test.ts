@@ -677,14 +677,14 @@ describe("acceptance_evals_three_numbers", () => {
 });
 
 describe("acceptance_compatibility_and_deploy_gate", () => {
-  it("published_form_loads_via_plugin_list_and_supported_range_recorded", () => {
+  it("published_form_loads_via_project_status_and_supported_range_recorded", () => {
     const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
     expect(pkg.name).toBe("opencode-nexusnv-memory");
     expect(pkg.type).toBe("module");
     expect(pkg.exports?.["."]).toBe("./src/index.ts");
     expect(pkg.dependencies?.["@opencode/plugin"]).toBe("2.0.29");
     const readme = readFileSync(resolve(ROOT, "README.md"), "utf8");
-    expect(readme).toMatch(/opencode plugin list/);
+    expect(readme).toMatch(/\/memory-status/);
     expect(readme).toMatch(/opencode-nexusnv-memory/);
     expect(readme).toMatch(/2\.0/);
     const changelog = readFileSync(resolve(ROOT, "CHANGELOG.md"), "utf8");
