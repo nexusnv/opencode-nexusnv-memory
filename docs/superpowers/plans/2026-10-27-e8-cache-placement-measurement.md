@@ -1,0 +1,1315 @@
+# E8 Cache-Placement Measurement Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Measure whether the E8-A prompt-tail notice placement preserves prefix-cache reuse better than the pre-E8 system placement on a prompt-caching provider, record the raw usage and the user-visible transcript verdict, and apply an explicit keep/change/revert decision with matching tests and docs.
+
+**Architecture:** A dev-only Node harness creates two isolated OpenCode projects from the current `src/` and the pre-E8 source at `7629611^`, disables the handoff snapshot writer, denies skills/MCP so the model cannot wander, runs a two-prompt multi-tool session with `opencode run --standalone`, exports per-message token usage from `opencode session export`, and computes paired raw and baseline-adjusted cache metrics. The results go to a dated measurement doc; a pre-registered gate selects keep, attachment, or E8-B, and only the selected branch changes code/docs.
+
+**Tech Stack:** Node.js 20+, OpenCode CLI 2.1.4, `opencode session export` JSON, Google Gemini 3.5 Flash Lite via `GEMINI_API_KEY` (Google AI Studio **free tier**, observed 15 requests/minute), Vitest 5, TypeScript 5.9, Prettier. No new runtime dependency.
+
+**Branch:** `issue-22-e8-cache-placement` (already created from `origin/main` at `8a1f2bb`). `src/` is clean; no code or docs have been changed yet.
+
+**Normative sources:**
+
+- Issue #22: `E8: measure cache placement and decide the prompt-tail notice surface`.
+- `docs/2026-10-20-e8-cache-placement-spike.md` — protocol and non-claims.
+- `docs/2026-10-20-tier3-context-lifecycle-concurrency-research.md` §4 — E8 rationale, provider caching, E8-A/E8-B.
+- `docs/design-spec-v2-production.md` §5.2 (placement), §9 (budget/eval language).
+- `docs/adr/0002-agents-md-injection.md`, `0004-ledger-and-promotion.md`, `0007-untrusted-memory-content.md` — E8-A revisions.
+- `src/prompt-notices.ts`, `src/index.ts`, `test/prompt-notices.test.ts`, `test/hooks.test.ts`.
+
+**Non-goals:** production cache metrics (ADR-0008 freezes the 45-name vocabulary), changing line budgets without evidence, general context-budget redesign, or a billed-token savings claim. A free-tier account cannot produce a billed-cost claim; this plan measures token counts and cache fields only.
+
+AGENTS.md instruction: prefer typed, framework-agnostic PHP, but this repository is TypeScript; follow the repository's existing TypeScript/Vitest conventions, `strict` typing, and the existing script style in `scripts/assert-pack.mjs`.
+
+---
+
+## 1. Why this plan exists
+
+E8-A moved the volatile `[memory]` notices (newest-handoff pointer, status line, INDEX hint) from the per-model-call `context` system prefix to the canonical user prompt. The structural goal — a stable system prefix — is implemented, but no provider cache measurement was run. The spike doc explicitly says so and makes no billed-token claim.
+
+The measurement must answer two different questions:
+
+1. **Cache:** does the stable system prefix let the provider reuse the message-history prefix on later tool calls and on the next prompt, compared with pre-E8?
+2. **Visibility:** what does the user actually see in the persisted prompt, and is up to three labelled lines acceptable?
+
+A cache loss means the placement is not a win, and the issue's fallback (E8-B) or the attachment option wins. A cache-neutral result means the decision turns on trust/visibility: the stable prefix and user-data channel may still be worth keeping, but no savings claim is allowed. A cache win does not by itself justify the visibility; the user-text review is a separate, explicit gate.
+
+### Tested starting point (historical context, not measurement evidence)
+
+A draft harness exists at `/tmp/opencode/e8-harness-draft.mjs` (created during plan preparation; not committed). It already:
+
+- extracts two prompts and per-message assistant token rows from `opencode session export` (`input`, `output`, `reasoning`, `cache.read`, `cache.write`);
+- prepares pre-E8 and E8-A projects from `git archive 7629611^ src` and the working-tree `src/`;
+- patches `capture.ts` in both copies to disable `snapshotIfDue` so the brief cannot change mid-run;
+- runs two prompts, validates the tool calls, and renders paired deltas;
+- passes `--self-test`, `--dry-run`, and a complete pre-E8 end-to-end run.
+
+Plan-preparation experiments added the following findings:
+
+- `google/gemini-3.5-flash-lite` works through the OpenCode CLI and reports `cache.read` (for example, `cache.read: 12203` on a repeated 14k-token session).
+- The Gemini key is **free tier**: a 429 error names `generate_content_free_tier_requests`, limit `15` requests per minute. Pacing and retry are mandatory.
+- `opencode run --standalone` loads the project-local plugin on the first prompt (no warm-up needed) and, with an isolated `OPENCODE_CONFIG_DIR`/`XDG_CONFIG_HOME`, avoids the long-lived background server's stale project/plugin state.
+- A project `policies` entry `{ "action": "integration.use", "resource": "skill:*", "effect": "deny" }` removes skills; the model then uses the `read` tool as instructed. Without it, Gemini sometimes invokes `using-superpowers`, which adds a call and confounds the comparison.
+- A measurement-only load marker written at the start of the `prompt` hook (a directory named `.e8-plugin-loaded` under the project root) gives a deterministic "plugin is live" signal without changing the model request.
+- A unique salt in `AGENTS.md`/`activeContext.md` and the unique project path reduce cross-session cache hits, but the provider still reports a large shared base-system-prefix hit on the first call. The analysis therefore reports **baseline-adjusted** cache reads as well as raw hit rates.
+
+The draft is the starting point for Task 1. The plan records the deltas that must be applied; do not commit the draft unchanged.
+
+---
+
+## 2. Pre-registered measurement protocol
+
+This section is fixed **before** the full run. Do not change the metrics, scenarios, or gate after seeing the results. If the harness has to change for a correctness reason, record the change and re-run all reps; do not cherry-pick runs.
+
+### 2.1 Provider, model, and account tier
+
+| Field              | Value                                                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider           | Google AI Studio / Gemini API (`google`)                                                                                                                      |
+| Model              | `google/gemini-3.5-flash-lite`                                                                                                                                |
+| Account tier       | **Free Tier** (evidence: 429 `generate_content_free_tier_requests`, limit 15 requests/minute)                                                                 |
+| OpenCode           | 2.1.4                                                                                                                                                         |
+| Credential         | `GEMINI_API_KEY` in the environment; never write it to the repo or the measurement doc                                                                        |
+| Secondary provider | `opencode/deepseek-v4.1-flash-free` is rate-limited until roughly 2026-10-28; do not block the primary run on it. Record it as a follow-up, not a substitute. |
+
+One provider is enough for the issue. Do not generalize the result to OpenAI/Anthropic/DeepSeek; record them as unmeasured.
+
+### 2.2 Variants and scenarios
+
+| Variant  | Source                                        | Placement under test                                                                                                                |
+| -------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `pre-e8` | `git archive 7629611^ src`                    | Brief + status + hint + newest-handoff pointer in `event.system` on every model call; hint throttled to the first call of a prompt. |
+| `e8-a`   | Working-tree `src/` at the measurement commit | Stable brief in `event.system`; pointer/status/hint appended once to the canonical prompt as ≤3 marker-guarded data lines.          |
+
+| Scenario             | Fixture                                                          | What it exercises                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hint`               | `INDEX.md` 3 lines, one handoff, prompt mentions `auth-service`  | Within-turn churn: pre-E8's hint disappears on the continuation; E8-A keeps the prompt prefix append-only.                                           |
+| `status`             | `INDEX.md` 31 lines (over the 30-line cap), one handoff, no hint | Status-line churn: pre-E8 consumes `indexOverCap` on the first call and the line disappears on later calls; E8-A puts the status in the prompt once. |
+| `control` (optional) | Under-cap INDEX, no handoff                                      | Sanity check that the harness itself does not create notices. Not required for the decision; run only if the smoke run is ambiguous.                 |
+
+Two prompts per session:
+
+1. `prompt 1`: "Context: auth-service login. Use the read tool to read `<project>/alpha.txt`, then use the read tool to read `<project>/beta.txt`. Then answer in one sentence."
+   - `hint` adds the auth-service phrase; `status` uses the same prompt without the phrase.
+   - The prompt explicitly asks for `read`; the skill policy prevents the model from substituting a skill.
+2. `prompt 2` (same session): "Reply with exactly: SECOND-DONE".
+
+The measured session is new for each variant/rep. Do not reuse a session across variants.
+
+### 2.3 Harness controls (must all hold)
+
+- [ ] Each run uses a **unique project directory** containing the scenario fixture, a unique salt in `AGENTS.md` and `activeContext.md`, and a copy of exactly one variant's `src/*.ts`.
+- [ ] The snapshot writer is disabled in **both** copies by inserting `if (true) return false; // E8 measurement: disable handoff writer` at the start of `snapshotIfDue` in `capture.ts`. This is a measurement control; disclose it in the doc. It does not change the notice placement under test.
+- [ ] The measurement-only load marker (`.e8-plugin-loaded`) is created by the prompt hook in both copies. It is outside the model request and does not affect the prefix.
+- [ ] `activeContext.md`, `INDEX.md`, and the handoff fixture are hashed before prompt 1 and after prompt 2. The hashes must match; if they do not, the run is invalid. (The status/hint ledger lives in `ctx.storage`, not in these files.)
+- [ ] The project config denies skills and MCP: `policies: [{action:"integration.use",resource:"skill:*",effect:"deny"}, {action:"integration.use",resource:"mcp:*",effect:"deny"}]`. The model must use `read`.
+- [ ] The project config denies `shell` and `edit`/`write` so the model cannot read files another way or mutate the fixture. Keep `read` allowed. The memory plugin's own write paths are not model tools.
+- [ ] Every CLI call uses `opencode run --standalone`, `-m google/gemini-3.5-flash-lite`, `--format json`, `--auto`. The harness sets `OPENCODE_CONFIG_DIR=<out>/config/opencode` and `XDG_CONFIG_HOME=<out>/xdg` for the whole process, and creates both empty directories before the first call.
+- [ ] Model calls are paced at least 6 seconds apart (global pacer across runs) to stay under the 15 RPM free-tier limit. On a 429/quota error, retry with backoff (5 s, 10 s, 20 s, 30 s; max 4 retries) and log the retry. Do not count a retried call as a new measurement.
+- [ ] The harness rejects a run when the E8-A prompt has no notice marker (hint/status), the pre-E8 prompt has a marker, fewer than 2 assistant calls or fewer than 2 `read` tool parts occur, `alpha.txt`/`beta.txt` were not both read, a `skill`/`shell` tool part appears, the marker file is absent, or the brief hashes differ.
+- [ ] The harness records the exact user prompt text for both prompts, the notice line count, the brief line count, and the raw per-call token rows.
+
+### 2.4 Metrics
+
+For each assistant call:
+
+```
+promptTokens = input + cache.read + cache.write
+cacheHitRate = cache.read / promptTokens
+uncachedTokens = input + cache.write
+```
+
+Per valid run:
+
+- `prompt1First`: first assistant call of prompt 1.
+- `prompt1Later`: all later assistant calls of prompt 1 (the tool continuations and final answer).
+  - `laterCacheRead` = sum of `cache.read`.
+  - `laterPromptTokens` = sum of `promptTokens`.
+  - `laterCacheHitRate` = `laterCacheRead / laterPromptTokens`.
+- `prompt2First`: first assistant call of prompt 2.
+- `prompt1Total` / `prompt2Total`: sum of `promptTokens` for all calls in that prompt.
+- `sessionTotal`: sum across all calls.
+- **Baseline-adjusted** (removes the shared base-system-prefix hit that is constant across variants):
+  - `p1LaterIncrementalRead = laterCacheRead − prompt1First.cacheRead × laterCallCount` (floored at 0 per call; report the raw subtraction too).
+  - `p2FirstIncrementalRead = prompt2First.cacheRead − prompt1First.cacheRead` (floored at 0).
+- `noticeLines`: number of `[memory]`/`[memory-hint]` lines in prompt 1's user text.
+- `briefHashBefore` / `briefHashAfter`: SHA-256 of `activeContext.md` + `INDEX.md` + handoff files, in order.
+
+Paired delta for each scenario/rep: `e8-a` minus `pre-e8`. Report medians and the count of positive/negative pairs; do not report a single best run.
+
+Raw usage fields to keep in `summary.json` and the doc:
+
+- `input`, `output`, `reasoning`, `cache.read`, `cache.write` per assistant call;
+- `promptTokens`, `cacheHitRate`, `uncachedTokens`;
+- the `model`, `providerID`, `variant`, and `tokens` fields from the export's `info` and each message;
+- the OpenCode version, repo HEAD, pre-E8 ref, date/time, and account tier.
+
+### 2.5 Validity gates
+
+A pair is valid only when both runs are valid. A run is invalid if any control in §2.3 fails. The full run must produce at least **5 of 6 valid pairs** (3 reps × 2 scenarios). If fewer, run 2 more reps (5 total) or record **not measurable**.
+
+The smoke run (1 rep) is a harness check, not evidence. Never put smoke numbers in the decision table.
+
+### 2.6 Pre-registered decision rule
+
+Let:
+
+- `Δlater` = median over valid pairs of `(e8-a.laterCacheHitRate − pre-e8.laterCacheHitRate)`.
+- `Δp2` = median over valid pairs of `(e8-a.prompt2First.cacheHitRate − pre-e8.prompt2First.cacheHitRate)`.
+- `ΔlaterRead` = median over valid pairs of the baseline-adjusted later cache-read delta.
+- `Δp2Read` = median over valid pairs of the baseline-adjusted prompt-2 cache-read delta.
+- `positiveLater` / `negativeLater` = pair counts by sign on `Δlater`; same for `Δp2`.
+
+Apply the first matching row:
+
+| Condition                                                                                            | Decision                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Δlater ≥ +0.05`, `positiveLater ≥ 4/6`, and `Δp2 ≥ −0.03`                                           | **Keep E8-A** (cache supported; visibility still needs the UX gate).                                                                                                                                                                                               |
+| `Δp2 ≥ +0.05`, `positive` on `Δp2 ≥ 4/6`, and `Δlater ≥ −0.03`                                       | **Keep E8-A** (cross-prompt cache supported).                                                                                                                                                                                                                      |
+| `abs(Δlater) ≤ 0.03` and `abs(Δp2) ≤ 0.03`                                                           | **Keep E8-A if the UX gate accepts; otherwise change.** Cache-neutral: no savings claim; the placement is justified by the stable prefix and user-data channel only.                                                                                               |
+| `Δlater ≤ −0.05` or `Δp2 ≤ −0.05`, with `negative ≥ 4/6` on that metric                              | **Change.** Use the attachment if the UX gate rejects user-text visibility; use E8-B if the loss is within-turn churn (`Δlater` negative) and the UX gate accepts the prompt-tail but the cache is not a win. If neither is a win, revert to pre-E8 and record it. |
+| Fewer than 5/6 valid pairs, no cache fields, or the scenarios disagree in sign after the 5-rep rerun | **Not measurable.** Keep issue #22 open/blocked; do not claim a win or a loss.                                                                                                                                                                                     |
+
+The UX gate is a **veto**, not a tie-breaker:
+
+- **Accept** if the user's own text stays first and unmodified, the block is separated by a blank line, every line is visibly labelled (`[memory]` / `[memory-hint]`), the data-only suffix is present, the block is ≤3 lines, and a first-time user would not mistake it for their own instruction.
+- **Accept with a wording fix** if the only objection is the visible HTML marker or a long handoff line. A wording fix is still a keep: update `PROMPT_NOTICES_MARKER`/labels and the tests, then re-run the smoke (not the full measurement unless the block length changes).
+- **Reject** if the block reads as noise, an instruction, or a security prompt in the user's own message. Rejection forces a change even if the cache is better.
+
+If the decision is **keep** but the UX gate says "accept with a wording fix", apply the wording fix in Task 6 and record it; the full measurement's placement is unchanged (only the marker/label bytes change).
+
+### 2.7 "Not measurable" is a valid outcome
+
+If the free-tier quota, provider outage, or cache-field absence prevents 5 valid pairs, write "not measurable" in the doc, list what was attempted, and leave issue #22 open/blocked. Do not close on "CI has no credentials" or on a partial run. Do not claim a billed-token savings in any case; the account is free tier.
+
+---
+
+## 3. File structure
+
+**Create**
+
+- `scripts/e8-cache-measure.mjs` — dev-only measurement harness (Node, no deps). Not included in the npm package (`files` excludes `scripts/`; it stays a repo tool).
+- `docs/2026-10-27-e8-measurement.md` — dated protocol, raw usage tables, paired deltas, limitations, UX verdict, decision, follow-ups.
+
+**Modify (keep branch)**
+
+- `docs/2026-10-20-e8-cache-placement-spike.md` — status update + link to the measurement; no new claim.
+- `docs/design-spec-v2-production.md` §5.2 and §9 — explicit transcript-visibility acceptance and measurement note.
+- `README.md` — budget/visibility note.
+- `CHANGELOG.md` — Unreleased docs entry.
+- `docs/adr/0002-agents-md-injection.md`, `0004-ledger-and-promotion.md`, `0007-untrusted-memory-content.md` — one measurement/decision note in each E8 revision.
+
+**Modify (change branch only; one of)**
+
+- `src/prompt-notices.ts`, `src/index.ts`, `test/prompt-notices.test.ts`, `test/hooks.test.ts` — attachment channel or E8-B freeze.
+- The same spec/README/ADR/CHANGELOG files with the changed-placement wording.
+
+**Not modified:** `package.json` (no new dependency), `src/config.ts` (no new option), `src/metrics.ts` (no new metric name), line budgets (no evidence to change them).
+
+---
+
+## 4. Tasks
+
+### Task 1: Promote the tested draft into `scripts/e8-cache-measure.mjs`
+
+**Files:**
+
+- Create: `scripts/e8-cache-measure.mjs`
+- Reference: `/tmp/opencode/e8-harness-draft.mjs` (tested draft; not committed)
+
+**Purpose:** Make the measurement reproducible and robust enough that a failed run is a provider/plugin failure, not a harness race.
+
+- [ ] **Step 1: Copy the draft and keep its tested parser/self-test**
+
+```bash
+cp /tmp/opencode/e8-harness-draft.mjs scripts/e8-cache-measure.mjs
+node scripts/e8-cache-measure.mjs --self-test
+```
+
+Expected: `self-test ok`.
+
+- [ ] **Step 2: Apply the provider/CLI defaults**
+
+Change the top constants:
+
+```js
+const DEFAULT_MODEL = "google/gemini-3.5-flash-lite";
+const DEFAULT_REPS = 3;
+const DEFAULT_SCENARIOS = ["hint", "status"];
+const ALL_SCENARIOS = ["hint", "status", "control"];
+const VARIANTS = ["pre-e8", "e8-a"];
+const LOAD_MARKER = ".e8-plugin-loaded";
+const DEFAULT_PACE_MS = 6000;
+```
+
+Add CLI flags in `parseArgs`/`printHelp`:
+
+```text
+--pace-ms <ms>       Minimum gap between model calls (default: 6000)
+--max-retries <n>    Retries for a 429/quota error (default: 4)
+```
+
+- [ ] **Step 3: Run every CLI call through a private, isolated server**
+
+`runCli` must inject the isolated config roots into the child environment:
+
+```js
+function runCli(args, options = {}) {
+  const result = spawnSync("opencode", args, {
+    cwd: options.cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENCODE_CONFIG_DIR: join(options.out, "config", "opencode"),
+      XDG_CONFIG_HOME: join(options.out, "xdg"),
+    },
+    timeout: options.timeoutMs ?? 300_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  // ... unchanged error handling ...
+}
+```
+
+`prepareProject` must create `<out>/config/opencode` and `<out>/xdg/opencode` once, before the first project. The project's own `.opencode/opencode.jsonc` remains the source of the plugin and policy config. Do not put a global config file in the isolated directory; an empty config root plus the project config is the controlled baseline.
+
+`runPrompt` must add `--standalone`:
+
+```js
+const args = ["run", "--standalone", "-m", model, "--format", "json", "--auto"];
+```
+
+Why: `--standalone` starts a private server per invocation, so the project-local plugin loads on the first prompt and a stale background server cannot serve an old plugin. The session DB is shared, so `--session <id>` still resumes the session.
+
+- [ ] **Step 4: Pace and retry 429s**
+
+Make `runPrompt` async and add a module-level pacer:
+
+```js
+let lastModelCallAt = 0;
+
+async function pace(ms) {
+  const wait = Math.max(0, ms - (Date.now() - lastModelCallAt));
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastModelCallAt = Date.now();
+}
+
+function isQuotaError(text) {
+  return /quota|rate.?limit|429|free-limit|RESOURCE_EXHAUSTED/i.test(text);
+}
+```
+
+`runPrompt` loop:
+
+```js
+for (let attempt = 1; attempt <= opts.maxRetries + 1; attempt += 1) {
+  await pace(opts.paceMs);
+  const result = runCli(args, { cwd: projectDir, out: opts.out, timeoutMs });
+  const events = parseJsonLines(result.stdout);
+  const error = events.find((event) => event?.type === "error");
+  if (error && isQuotaError(`${result.stdout}\n${result.stderr}`)) {
+    if (attempt > opts.maxRetries)
+      throw new Error(`quota retries exhausted: ${error.error?.message ?? ""}`);
+    const wait = [5000, 10000, 20000, 30000][attempt - 1];
+    console.warn(`[pace] quota error; retrying in ${wait} ms`);
+    await new Promise((r) => setTimeout(r, wait));
+    continue;
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `opencode run failed (${result.status}): ${String(result.stderr).slice(-2000)}\n${String(result.stdout).slice(-4000)}`,
+    );
+  }
+  const session =
+    sessionID ?? events.find((event) => event?.sessionID)?.sessionID;
+  if (!session) throw new Error("opencode run produced no sessionID");
+  return { sessionID: session, stdout: result.stdout, stderr: result.stderr };
+}
+```
+
+Include both stdout and stderr in the failure message: the CLI reports provider errors as JSON events on stdout, and an empty stderr made the draft's earlier failures opaque.
+
+- [ ] **Step 5: Add the measurement-only load marker**
+
+In `sourceFor`, after copying the variant's `index.ts`, insert the marker at the start of the prompt hook:
+
+```js
+const hookStart = 'await ctx.session.hook("prompt", async (event) => {';
+const markerLine =
+  `\n        await mkdir(join(projectRootOf(ctx), ${JSON.stringify(LOAD_MARKER)}), ` +
+  `{ recursive: true }).catch(() => {});`;
+```
+
+Both the E8-A and pre-E8 `index.ts` already import `mkdir`, `join`, and define `projectRootOf`. The marker is a directory outside the model request; it is how the harness distinguishes "the plugin never loaded" from "the plugin loaded but produced no notice". Keep the `snapshotIfDue` disable patch.
+
+- [ ] **Step 6: Deny skills, MCP, and escape tools in every fixture**
+
+`prepareProject` writes:
+
+```json
+{
+  "plugins": ["./plugins/memory"],
+  "permissions": [
+    { "action": "memory_write", "resource": "*", "effect": "ask" },
+    { "action": "shell", "resource": "*", "effect": "deny" },
+    { "action": "edit", "resource": "*", "effect": "deny" },
+    { "action": "write", "resource": "*", "effect": "deny" }
+  ],
+  "policies": [
+    { "action": "integration.use", "resource": "skill:*", "effect": "deny" },
+    { "action": "integration.use", "resource": "mcp:*", "effect": "deny" }
+  ]
+}
+```
+
+The exact `edit`/`write` action names must match the host's permission actions; if the host rejects one, use the names in `src/templates.ts` / the permissions docs and record the change. The purpose is to force `read` and prevent fixture mutation, not to test permissions.
+
+- [ ] **Step 7: Add the unique salt to `AGENTS.md` and the brief**
+
+`prepareProject` already receives a `salt`. Write:
+
+```js
+await writeFile(
+  join(projectDir, "AGENTS.md"),
+  `# E8 measurement fixture ${salt}\n\nSynthetic project for cache-placement measurement. Do not edit files.\n`,
+);
+```
+
+The active-context fixture already includes `- run salt: ${salt}`. The salt changes the system prefix early enough to prevent a prior run from satisfying the whole prefix, while remaining stable within the measured session.
+
+- [ ] **Step 8: Replace the fixed warm-up loop with a standalone readiness check**
+
+With `--standalone`, no provider warm-up is needed. After `prepareProject` and writing the measured salt:
+
+1. Run prompt 1.
+2. Export the session.
+3. Validate the run (including the load marker and the variant's expected notice).
+4. If the marker is absent, retry the whole run in a **new project directory** (include the attempt in the directory name: `<scenario>-<variant>-r<rep>-a<attempt>`). Do not reuse a project directory across attempts; a stale server/plugin state was the draft's failure mode.
+5. Delete only the warm-up/probe sessions if you add any. The measured session stays until its export is saved.
+
+No warm-up session is allowed before the measured prompt: it would seed the provider cache and bias the first-call baseline. If a future host version requires a warm-up, run it in a separate disposable project and record the deviation.
+
+- [ ] **Step 9: Hash the brief inputs and verify stability**
+
+After writing the measured salt and before prompt 1:
+
+```js
+const briefFiles = [
+  join(memoryDir, "activeContext.md"),
+  join(memoryDir, "INDEX.md"),
+  ...(await readdir(join(memoryDir, "handoffs")))
+    .filter((n) => n.endsWith(".md"))
+    .sort()
+    .map((n) => join(memoryDir, "handoffs", n)),
+];
+const hashFiles = async () =>
+  createHash("sha256")
+    .update((await Promise.all(briefFiles.map((p) => readFile(p)))).join("\n"))
+    .digest("hex");
+```
+
+Save `briefHashBefore`; re-hash after prompt 2 and require equality. Add `createHash` to the `node:crypto` import.
+
+- [ ] **Step 10: Extend the analyzer with the baseline-adjusted metrics**
+
+In `analyzeExport`, add:
+
+```js
+const laterCalls = prompt1Calls.slice(1);
+const laterCallCount = laterCalls.length;
+const laterCacheRead = sum(laterCalls, "cacheRead");
+const firstCacheRead = prompt1First?.cacheRead ?? 0;
+const p1LaterIncrementalRead = Math.max(
+  0,
+  laterCacheRead - firstCacheRead * laterCallCount,
+);
+const p2FirstIncrementalRead = Math.max(
+  0,
+  (prompt2First?.cacheRead ?? 0) - firstCacheRead,
+);
+```
+
+Add `prompt1Total.promptTokens`, `prompt2Total.promptTokens`, `sessionTotal.promptTokens`, `noticeLines` (count of lines starting with `[memory]`/`[memory-hint]` in prompt 1's text), and `skillToolParts` (tool parts named `skill`) to the summary. The report must show the raw metrics and the adjusted metrics; do not hide the raw numbers.
+
+- [ ] **Step 11: Extend the report**
+
+Add columns to the per-run table:
+
+```text
+| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | brief hash match | marker |
+```
+
+Add a "Validity" section that prints the failed checks per run. Add a "Brief stability" section with the before/after hashes per run. Add a "Raw usage" section that points to `summary.json` and the per-run export path.
+
+- [ ] **Step 12: Extend the self-test**
+
+Add assertions to `selfTest` for:
+
+- `prompt1Later.laterCacheHitRate` and the adjusted metrics on the synthetic export;
+- `prompt2First` incremental read;
+- `noticeLines` for the E8-A synthetic prompt;
+- `skillToolParts` detected on a synthetic `skill` tool part;
+- the pre-E8 synthetic export has no marker and no notice lines.
+
+Run:
+
+```bash
+node scripts/e8-cache-measure.mjs --self-test
+```
+
+Expected: `self-test ok`.
+
+- [ ] **Step 13: Add a header comment that says what is measured and what is not**
+
+The script header must state:
+
+- this is a dev-only harness, not a package entrypoint;
+- the snapshot writer is disabled in the copies;
+- the account is free tier, so no billed-cost claim;
+- the two primary metrics are `prompt1Later.cacheHitRate` and `prompt2First.cacheHitRate`, with baseline-adjusted reads reported alongside;
+- the provider, model, and OpenCode version are recorded in `summary.json`.
+
+- [ ] **Step 14: Run the dry run**
+
+```bash
+node scripts/e8-cache-measure.mjs --dry-run \
+  --out /tmp/opencode/e8-dry-2026-10-27
+```
+
+Expected: four `dry-run ok:` lines for `pre-e8/hint`, `e8-a/hint`, `pre-e8/status`, `e8-a/status`; no model calls; the projects contain `.e8-plugin-loaded` only after a real prompt (not during dry-run).
+
+- [ ] **Step 15: Commit the harness**
+
+```bash
+git add scripts/e8-cache-measure.mjs
+git commit -m "test: add E8 cache-placement measurement harness"
+```
+
+---
+
+### Task 2: Preflight the provider and the harness
+
+**Files:** none (read-only checks; no repo changes)
+
+- [ ] **Step 1: Confirm the model and credential**
+
+```bash
+opencode models | grep '^google/gemini-3.5-flash-lite$'
+```
+
+Expected: one line. If the model is absent, re-check `GEMINI_API_KEY` and the provider catalog; do not substitute a model without updating the plan and the doc.
+
+- [ ] **Step 2: Confirm cache fields through the CLI**
+
+```bash
+cd /tmp/opencode
+opencode run --standalone -m google/gemini-3.5-flash-lite \
+  --format json --auto "Reply with exactly: PREFLIGHT_OK" \
+  > /tmp/opencode/e8-preflight.jsonl 2>&1
+```
+
+Extract the session ID, run a second prompt in the same session, export it, and print the assistant token rows:
+
+```bash
+SID=$(python3 -c "import json,sys; [print(json.loads(l)['sessionID']) for l in open('/tmp/opencode/e8-preflight.jsonl') if l.strip().startswith('{') and 'sessionID' in l]" | head -1)
+opencode run --standalone -m google/gemini-3.5-flash-lite --session "$SID" \
+  --format json --auto "Reply with exactly: PREFLIGHT_TWO" >/dev/null 2>&1
+opencode session export "$SID" > /tmp/opencode/e8-preflight-export.json
+python3 - <<'EOF'
+import json
+d = json.load(open('/tmp/opencode/e8-preflight-export.json'))
+for m in d['messages']:
+    if m['type'] == 'assistant':
+        print(m['tokens'])
+print('session', d['info']['tokens'])
+EOF
+```
+
+Expected: the second assistant row has `cache.read > 0` (the first may be 0 or a small shared-prefix hit). If `cache.read` is always 0, the provider/model path is not measurable; record the exact output and stop with "not measurable" (issue #22 stays open).
+
+- [ ] **Step 3: Record the account tier**
+
+If a 429 occurs, capture the error text. It must name the free-tier quota:
+
+```text
+generate_content_free_tier_requests
+limit: 15
+Generate content requests per minute limit exceeded on Free Tier.
+```
+
+Record: **Google AI Studio free tier, 15 requests/minute**. Do not claim billed costs.
+
+- [ ] **Step 4: Confirm the harness refuses to run on a dirty `src/`**
+
+```bash
+touch src/.e8-dirty-probe
+node scripts/e8-cache-measure.mjs --run --reps 1 --out /tmp/opencode/e8-dirty-check
+rm src/.e8-dirty-probe
+```
+
+Expected: `src/ is dirty; commit or stash before measuring`; no provider calls. This check must run before the variant copy.
+
+---
+
+### Task 3: Smoke run (1 rep)
+
+**Files:** none (writes only to `/tmp/opencode/e8-smoke-2026-10-27`)
+
+- [ ] **Step 1: Run one rep of both scenarios**
+
+```bash
+node scripts/e8-cache-measure.mjs --run \
+  --model google/gemini-3.5-flash-lite \
+  --reps 1 --scenarios hint,status \
+  --pace-ms 6000 --max-retries 4 \
+  --out /tmp/opencode/e8-smoke-2026-10-27
+```
+
+Expected: two paired runs (4 sessions) with no failures; `summary.md` shows `p1 later hit`, `p2 first hit`, adjusted reads, and `marker=yes` for E8-A, `marker=no` for pre-E8.
+
+- [ ] **Step 2: Inspect the raw export for one E8-A run**
+
+```bash
+ls /tmp/opencode/e8-smoke-2026-10-27/raw/
+python3 - <<'EOF'
+import json, glob
+p = sorted(glob.glob('/tmp/opencode/e8-smoke-2026-10-27/raw/hint-e8-a-r1.json'))[0]
+d = json.load(open(p))
+for m in d['messages']:
+    if m['type'] == 'user':
+        print('USER:', repr(m.get('text', '')))
+    if m['type'] == 'assistant':
+        print('ASSISTANT:', m.get('tokens'))
+EOF
+```
+
+Expected: the E8-A user text contains the user's sentence, a blank line, `[memory] handoff: ... (latest)`, the marker/label, and a `[memory-hint]` line. The pre-E8 user text contains only the user's sentence. The assistant rows contain all five usage fields.
+
+- [ ] **Step 3: Inspect the brief hashes**
+
+```bash
+python3 - <<'EOF'
+import json
+s = json.load(open('/tmp/opencode/e8-smoke-2026-10-27/summary.json'))
+for r in s['runs']:
+    print(r['scenario'], r['variant'], r['briefHashBefore'] == r['briefHashAfter'])
+EOF
+```
+
+Expected: `True` for every run. If `False`, stop and fix the snapshot/probe leakage before the full run.
+
+- [ ] **Step 4: Inspect the UX block**
+
+Copy the exact E8-A user text into a scratch note. Check the §2.6 UX checklist. Do not decide yet; the smoke is for the full-run review.
+
+- [ ] **Step 5: Fix harness issues, not the data**
+
+If a run is invalid, read the failure (quota, marker, tool call, brief hash), fix the harness/control, and re-run the smoke. Never edit the measured fixture or the export to make a run valid.
+
+---
+
+### Task 4: Full run (3 reps; 5 if ambiguous)
+
+**Files:** none (writes only to `/tmp/opencode/e8-measurement-2026-10-27`)
+
+- [ ] **Step 1: Run the full protocol**
+
+```bash
+node scripts/e8-cache-measure.mjs --run \
+  --model google/gemini-3.5-flash-lite \
+  --reps 3 --scenarios hint,status \
+  --pace-ms 6000 --max-retries 4 \
+  --out /tmp/opencode/e8-measurement-2026-10-27
+```
+
+Expected: 6 valid pairs (3 reps × 2 scenarios), `summary.json`, `summary.md`, and 12 raw exports. The run may take 20–40 minutes because of the free-tier pacing; do not parallelize model calls.
+
+- [ ] **Step 2: Check validity before looking at the decision**
+
+```bash
+python3 - <<'EOF'
+import json
+s = json.load(open('/tmp/opencode/e8-measurement-2026-10-27/summary.json'))
+print('runs', len(s['runs']), 'failures', len(s['failures']), 'pairs', len(s['pairs']))
+for f in s['failures']:
+    print('FAIL', f['scenario'], f['variant'], f['rep'], f['error'])
+EOF
+```
+
+Expected: `pairs 6`, `failures 0`. If `pairs < 5`, run the 5-rep protocol (Step 5) or record "not measurable".
+
+- [ ] **Step 3: Compute the decision table**
+
+```bash
+python3 - <<'EOF'
+import json, statistics
+s = json.load(open('/tmp/opencode/e8-measurement-2026-10-27/summary.json'))
+pairs = s['pairs']
+def med(xs): return statistics.median(xs) if xs else None
+for scenario in ('hint', 'status'):
+    rows = [p for p in pairs if p['scenario'] == scenario]
+    if not rows: continue
+    dl = [p['deltaLaterHit'] for p in rows]
+    dp = [p['deltaPrompt2Hit'] for p in rows]
+    print(scenario, 'n', len(rows),
+          'Δlater', med(dl), '+', sum(x > 0 for x in dl), '-', sum(x < 0 for x in dl),
+          'Δp2', med(dp), '+', sum(x > 0 for x in dp), '-', sum(x < 0 for x in dp))
+EOF
+```
+
+Record the medians and sign counts for `Δlater`, `Δp2`, `ΔlaterRead`, and `Δp2Read` in the measurement doc. Apply the §2.6 rule exactly. Do not change the thresholds after seeing the numbers.
+
+- [ ] **Step 4: Check the two scenarios for disagreement**
+
+If `hint` and `status` have opposite signs on the primary metric, inspect the per-rep rows. Do not average them into a misleading single number; report both. If the disagreement is caused by a provider cache reset or a call-structure difference, note it and use the 5-rep rerun.
+
+- [ ] **Step 5: If needed, run 2 extra reps**
+
+```bash
+node scripts/e8-cache-measure.mjs --run \
+  --model google/gemini-3.5-flash-lite \
+  --reps 5 --scenarios hint,status \
+  --pace-ms 6000 --max-retries 4 \
+  --out /tmp/opencode/e8-measurement-2026-10-27-r5
+```
+
+Use the 5-rep medians for the gate only if the first run was ambiguous or had fewer than 5 valid pairs; record both runs and why the rerun happened.
+
+- [ ] **Step 6: Save the evidence path**
+
+Record in the measurement doc:
+
+```text
+Harness: scripts/e8-cache-measure.mjs
+Run directory: /tmp/opencode/e8-measurement-2026-10-27
+summary.json: <sha256>
+summary.md: <sha256>
+Raw exports: 12 files under raw/
+```
+
+Do not commit the `/tmp` directory. If the doc needs a full raw table, paste the per-call rows from `summary.json` into a fenced code block or a Markdown table; do not include API keys or auth headers.
+
+---
+
+### Task 5: Write `docs/2026-10-27-e8-measurement.md` and apply the decision gate
+
+**Files:**
+
+- Create: `docs/2026-10-27-e8-measurement.md`
+- Modify: `docs/2026-10-20-e8-cache-placement-spike.md`
+
+- [ ] **Step 1: Write the header and method**
+
+Use this skeleton and fill the bracketed values from the run; do not leave placeholders:
+
+```markdown
+# E8 cache-placement measurement — 2026-10-27
+
+## Status
+
+Measured against Google Gemini 3.5 Flash Lite (Google AI Studio free tier)
+on 2026-10-27. Decision: **<keep | change to attachment | fall back to E8-B | not measurable>**.
+No billed-token savings claim is made; the account is free tier.
+
+## Method
+
+- Provider: Google AI Studio / Gemini API (`google`)
+- Model: `google/gemini-3.5-flash-lite`
+- Account tier: Free Tier (15 requests/minute; 429 evidence recorded)
+- OpenCode: 2.1.4
+- Repo HEAD: `<sha>`
+- Pre-E8 ref: `7629611^`
+- Harness: `scripts/e8-cache-measure.mjs` (`<sha256>`)
+- Variants: pre-E8 system placement vs E8-A prompt-tail placement
+- Scenarios: hint (within-turn churn), status (status-line churn)
+- Reps: 3 per scenario per variant (6 pairs); smoke run excluded
+- Controls: snapshot writer disabled in both copies; unique project/salt per
+  run; skills/MCP denied; read-only tool surface; brief hashes equal before
+  and after; `--standalone`; free-tier pacing.
+```
+
+- [ ] **Step 2: Add the raw usage table**
+
+One row per assistant call. Include the scenario, rep, variant, prompt, call index, tool names, `input`, `output`, `reasoning`, `cache.read`, `cache.write`, `promptTokens`, `uncachedTokens`, `cacheHitRate`.
+
+Use the `summary.json` values verbatim. If the table is too large for Markdown, include the session-level totals here and put the per-call rows in a fenced JSON block or a linked artifact. The issue requires the raw fields, not a pretty chart.
+
+- [ ] **Step 3: Add the paired deltas and the baseline-adjusted table**
+
+```markdown
+## Paired deltas (E8-A minus pre-E8)
+
+| scenario | pairs | median Δlater | +/− | median Δp2 | +/− | median ΔlaterRead | median Δp2Read |
+| -------- | ----- | ------------- | --- | ---------- | --- | ----------------- | -------------- |
+```
+
+Explain the sign convention and that medians are over pairs, not over all calls. Include the `hint` and `status` rows separately. Include the 5-rep rerun if it happened.
+
+- [ ] **Step 4: Add the validity and control evidence**
+
+- Number of valid pairs; failed runs and why.
+- Brief hashes before/after (all equal).
+- Load marker present in every E8-A and pre-E8 run.
+- E8-A marker/label present in hint/status prompts; pre-E8 has none.
+- No `skill`/`shell` tool parts; both `read alpha.txt` and `read beta.txt` present.
+- Snapshot writer disabled (link to the harness patch line).
+- The exact provider quota evidence and pacing.
+
+- [ ] **Step 5: Add the UX review**
+
+Quote the exact E8-A prompt-1 user text from one `hint` run and one `status` run (redact absolute `/tmp` paths to `<project>` if desired; do not redact the notice text). Include:
+
+- What the user sees: their text, a blank line, the notice block, labels.
+- Whether the HTML marker is visible in the raw export and whether rendered Markdown hides it.
+- Line count, length, and repetition across prompts.
+- The §2.6 checklist result: **accept**, **accept with a wording fix**, or **reject**.
+- The explicit conclusion required by issue #22: "Accepting transcript visibility is/is not an explicit decision."
+
+Do not bury this in the cache section. It is a separate decision input.
+
+- [ ] **Step 6: Add limitations and non-claims**
+
+- One provider/model; Gemini implicit prefix caching; do not generalize to OpenAI/Anthropic/DeepSeek.
+- Free tier; no billed-cost claim; the reported `cost` field is an estimate, not a charge.
+- The shared base-system-prefix hit is large and constant; the raw hit rate can understate the placement effect. The adjusted metrics are reported for that reason.
+- The snapshot writer is disabled in the copies; production snapshots can change the brief and invalidate the cache. This measurement isolates the placement, not the snapshot cadence.
+- The line budgets are unchanged; 237/96 remain uncached line guardrails, not token metrics.
+- No production cache metrics; ADR-0008 vocabulary unchanged.
+
+- [ ] **Step 7: Record the decision and rationale**
+
+Use the §2.6 rule. Example (choose one, not all):
+
+```markdown
+## Decision
+
+**Keep E8-A prompt-tail placement.** Median Δlater = +0.xx (x/6 positive),
+median Δp2 = +0.xx (x/6 positive). The direction is consistent on both
+scenarios and the adjusted reads do not contradict it. No billed-token claim:
+the account is free tier. The UX review accepts the block: it is ≤3 labelled
+data-only lines, the user's text remains first, and the visible HTML marker is
+a raw-transcript artifact that rendered Markdown hides. Transcript visibility
+is accepted explicitly, not implicitly.
+```
+
+or:
+
+```markdown
+## Decision
+
+**Not measurable.** Only x/6 pairs were valid because <reason>; the quota /
+provider behavior prevented a fair comparison. Issue #22 stays open/blocked
+until a maintainer-keyed run is possible. No savings claim.
+```
+
+- [ ] **Step 8: Update the spike doc**
+
+Change the status line to:
+
+```markdown
+## Status
+
+Placement is implemented and covered by tests. Measured on 2026-10-27 against
+Google Gemini 3.5 Flash Lite (free tier): see
+[`2026-10-27-e8-measurement.md`](./2026-10-27-e8-measurement.md). Decision:
+<keep/change/not measurable>. No billed-token claim. The line budget remains an
+uncached worst-case guardrail, not a billed-token metric.
+```
+
+Keep the measurement protocol section and the non-claims; add a one-line note that the protocol was executed and where the raw tables live. Do not delete the non-claims.
+
+- [ ] **Step 9: Commit the measurement + spike doc**
+
+```bash
+git add docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
+git commit -m "docs: record E8 cache-placement measurement"
+```
+
+---
+
+### Task 6: Keep branch — accept the prompt-tail placement and transcript visibility
+
+Execute this task only if Task 5 selected **keep** (including "accept with a wording fix").
+
+**Files:**
+
+- Modify: `docs/design-spec-v2-production.md` §5.2, §9
+- Modify: `README.md`
+- Modify: `CHANGELOG.md`
+- Modify: `docs/adr/0002-agents-md-injection.md`, `docs/adr/0004-ledger-and-promotion.md`, `docs/adr/0007-untrusted-memory-content.md`
+- Test: existing `test/hooks.test.ts`, `test/prompt-notices.test.ts` (no placement change; run them)
+- Optional wording fix: `src/prompt-notices.ts` + the two tests
+
+- [ ] **Step 1: Make transcript visibility explicit in spec §5.2**
+
+Replace the bullet that currently says the block is model-facing "not the user directly" with:
+
+```markdown
+- The prompt-tail block is **model-facing and transcript-visible**: it is
+  appended to the canonical persisted user prompt, so it appears in the user's
+  transcript as part of that message. The server-plugin API exposes no separate
+  UI/notification primitive, so delivery as a distinct alert still depends on
+  the model relaying it; that remains best-effort. The placement was measured
+  on 2026-10-27 (`docs/2026-10-27-e8-measurement.md`) and kept: the block is
+  labelled data-only, capped at three lines, and keeps the stable system prefix
+  free of volatile notices. The raw export shows the marker; rendered Markdown
+  may hide the HTML comment. This visibility is an explicit, accepted trade-off,
+  not an implicit side effect.
+```
+
+If the UX verdict was "accept with a wording fix", describe the final marker/label text here and in `src/prompt-notices.ts`.
+
+- [ ] **Step 2: Add the §9 measurement note**
+
+In the budget/eval section, after the 237-line sentence, add:
+
+```markdown
+The 2026-10-27 measurement (`docs/2026-10-27-e8-measurement.md`) compared
+pre-E8 system placement with E8-A prompt-tail placement on Gemini 3.5 Flash
+Lite (free tier). It records token/cache fields and the UX verdict; it does not
+convert line counts into billed tokens. The account was free tier, so no
+billed-cost claim is made.
+```
+
+- [ ] **Step 3: Add the README visibility note**
+
+After the "It costs some context" bullet in the context/cost section, add:
+
+```markdown
+- The volatile `[memory]` notice block (newest-handoff pointer, status, hint) is
+  appended to the user prompt itself, so it is visible in the transcript. It is
+  capped at three labelled data-only lines. The 2026-10-27 measurement and the
+  visibility decision are recorded in `docs/2026-10-27-e8-measurement.md`.
+```
+
+- [ ] **Step 4: Add the ADR measurement notes**
+
+At the end of the E8 revision in each ADR, add one sentence:
+
+```markdown
+Measurement (2026-10-27): compared with pre-E8 on Gemini 3.5 Flash Lite (free
+tier); see `docs/2026-10-27-e8-measurement.md`. The placement was kept and the
+transcript visibility was accepted explicitly (or: changed to <option>).
+```
+
+Do not rewrite the ADR's original decision or its trust rationale; the note is an addendum.
+
+- [ ] **Step 5: Add the CHANGELOG entry**
+
+Under `Unreleased`, add:
+
+```markdown
+- Docs: record the 2026-10-27 E8 cache-placement measurement (Gemini 3.5 Flash
+  Lite, free tier) and keep the prompt-tail notice placement. The prompt-tail
+  block remains visible in the transcript by design; no billed-token claim is
+  made.
+```
+
+If the wording fix changed the marker/label, mention it:
+
+```markdown
+- The prompt-tail marker/label was clarified to `<new text>`; the placement and
+  budget are unchanged.
+```
+
+- [ ] **Step 6: Optional wording fix (only if the UX gate asked for one)**
+
+If the only objection is the visible HTML marker:
+
+1. Change `PROMPT_NOTICES_MARKER` in `src/prompt-notices.ts` to the agreed text.
+2. Update the literal marker assertions in `test/prompt-notices.test.ts` and `test/hooks.test.ts`.
+3. Keep `hasPromptNotices` and `appendPromptNotices` behavior identical.
+4. Run the focused tests:
+
+```bash
+npx vitest run test/prompt-notices.test.ts test/hooks.test.ts
+```
+
+Expected: all pass. Then re-run the smoke measurement (Task 3) to confirm the notice still appears; the full measurement is not repeated unless the block length changed.
+
+- [ ] **Step 7: Run the keep-branch gates**
+
+```bash
+npm run typecheck
+npm test
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md docs/adr/0007-untrusted-memory-content.md
+git diff --check
+```
+
+Expected: typecheck clean, all tests pass, Prettier reports all files formatted, `git diff --check` silent.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add README.md CHANGELOG.md docs/design-spec-v2-production.md \
+  docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
+  docs/adr/0007-untrusted-memory-content.md docs/2026-10-27-e8-measurement.md
+git commit -m "docs: keep E8 prompt-tail placement after measurement"
+```
+
+If the wording fix touched `src/`/tests, include those files in the commit and use `docs: keep E8 prompt-tail placement and clarify notice marker`.
+
+---
+
+### Task 7: Change branch — attachment-based notice (conditional)
+
+Execute this task only if Task 5 selected **change** and the UX gate rejected user-text visibility while the cache was neutral/positive. Do not execute it together with Task 8.
+
+**Files:**
+
+- Modify: `src/prompt-notices.ts`, `src/index.ts`
+- Modify: `test/prompt-notices.test.ts`, `test/hooks.test.ts`
+- Modify: `docs/design-spec-v2-production.md` §5.2/§9, `README.md`, `CHANGELOG.md`, ADR-0002/0004/0007
+- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-attach` variant
+- Re-run: Task 4 with `pre-e8`, `e8-a` (at `8a1f2bb`), `e8-attach` (working tree)
+
+- [ ] **Step 1: Write the notice file instead of mutating the user text**
+
+In `src/prompt-notices.ts`, add:
+
+```ts
+export const PROMPT_NOTICES_FILE = "prompt-notices.md";
+
+export function promptNoticesUri(memoryRoot: string): string {
+  return pathToFileURL(join(memoryRoot, PROMPT_NOTICES_FILE)).href;
+}
+```
+
+In `src/index.ts` prompt hook, replace the `appendPromptNotices` call with:
+
+```ts
+if (plan.text.length > 0) {
+  await writeNewCapped(PROMPT_NOTICES_FILE, `${plan.text}\n`, {
+    memoryRoot,
+  });
+  const uri = promptNoticesUri(memoryRoot);
+  if (!event.prompt.files.some((file) => file?.uri === uri)) {
+    event.prompt.files.push({ uri });
+  }
+}
+```
+
+Use the repository's capped/atomic write path; if `writeNewCapped` refuses an existing file, use the existing `writeCapped`/replace path from `src/files.ts` and document which one. The file is plugin-owned scratch data, not a memory file; keep it out of `INDEX.md` and the brief. The marker stays inside the file so a retry overwrites rather than appends.
+
+The user's `event.prompt.text` must remain byte-for-byte unchanged. `hasPromptNotices` now checks the file content, not the user text; add a helper that reads the file and returns the marker state, or overwrite unconditionally (the block is deterministic for the same prompt).
+
+- [ ] **Step 2: Add tests**
+
+`test/prompt-notices.test.ts`:
+
+- file content has the pointer/status/hint order and the marker;
+- no notices → no file is attached;
+- retry overwrites the file with one block, not two;
+- budget drop still omits the pointer/status as before.
+
+`test/hooks.test.ts`:
+
+- `event.prompt.text` equals the user text exactly (no appended block);
+- `event.prompt.files` contains the INDEX URI and the notice URI;
+- the notice URI is not duplicated on a retry;
+- the pre-existing INDEX attachment logic is unchanged;
+- the file is written under `.opencode/memory/prompt-notices.md`.
+
+Run:
+
+```bash
+npx vitest run test/prompt-notices.test.ts test/hooks.test.ts
+```
+
+Expected: all pass.
+
+- [ ] **Step 3: Update the docs to describe the attachment**
+
+Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
+
+- [ ] **Step 4: Add the `e8-attach` variant to the harness**
+
+`sourceFor` gains:
+
+```js
+} else if (variant === "e8-attach") {
+  // working-tree src/ (the attachment implementation)
+  for (const name of await readdir(join(REPO_ROOT, "src"))) {
+    if (name.endsWith(".ts")) await cp(join(REPO_ROOT, "src", name), join(dest, name));
+  }
+} else if (variant === "e8-a") {
+  // the measured E8-A source, not the working tree after the attachment change
+  const tar = execFileSync("git", ["-C", REPO_ROOT, "archive", "--format=tar", "8a1f2bb", "src"], { maxBuffer: 64 * 1024 * 1024 });
+  // ... extract as in the pre-e8 branch ...
+}
+```
+
+Update `VARIANTS`, the CLI `--variants` parsing, the report tables, and the self-test. The comparison is `e8-attach` vs `e8-a`, with `pre-e8` as the baseline.
+
+- [ ] **Step 5: Re-run the measurement**
+
+```bash
+node scripts/e8-cache-measure.mjs --run \
+  --model google/gemini-3.5-flash-lite \
+  --variants pre-e8,e8-a,e8-attach \
+  --reps 3 --scenarios hint,status \
+  --pace-ms 6000 --max-retries 4 \
+  --out /tmp/opencode/e8-measurement-attach-2026-10-27
+```
+
+Add the results to the measurement doc as a second table. The decision stands only if the attachment is not worse than E8-A on `Δlater`/`Δp2` by more than 0.05; otherwise record the regression and reconsider keep/E8-B. Do not claim a win from the attachment if the cache regressed.
+
+- [ ] **Step 6: Run gates and commit**
+
+```bash
+npm run typecheck
+npm test
+node scripts/e8-cache-measure.mjs --self-test
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+git diff --check
+git add src/prompt-notices.ts src/index.ts test/prompt-notices.test.ts test/hooks.test.ts \
+  scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+  docs/design-spec-v2-production.md README.md CHANGELOG.md \
+  docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
+  docs/adr/0007-untrusted-memory-content.md
+git commit -m "feat: attach E8 prompt notices instead of appending user text"
+```
+
+---
+
+### Task 8: Fallback branch — E8-B frozen per-prompt bundle (conditional)
+
+Execute this task only if Task 5 selected **change** and the cache loss is within-turn churn (`Δlater` negative) while the UX gate accepts keeping notices out of the user text (or the attachment branch was rejected). Do not execute it together with Task 7.
+
+**Files:**
+
+- Modify: `src/index.ts` (context hook and prompt hook), `src/prompt-notices.ts` (shared bundle builder)
+- Modify: `test/hooks.test.ts`, `test/prompt-notices.test.ts`
+- Modify: `docs/design-spec-v2-production.md` §5.2/§9, `README.md`, `CHANGELOG.md`, ADR-0002/0004/0007
+- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-b` variant
+- Re-run: Task 4 with `pre-e8`, `e8-b` (and `e8-a` if useful)
+
+- [ ] **Step 1: Freeze the bundle per prompt in `ctx.storage`**
+
+In the `context` hook, derive the current prompt from the last user message ID:
+
+```ts
+const promptID =
+  event.messages.findLast?.((message) => message.role === "user")?.id ??
+  event.messages.filter((message) => message.role === "user").at(-1)?.id ??
+  "unknown";
+const bundleKey = `e8b/${event.sessionID}`;
+const cached = await ctx.storage.get(bundleKey);
+let bundle: string | undefined;
+if (
+  cached !== undefined &&
+  typeof cached === "object" &&
+  cached !== null &&
+  "promptID" in cached &&
+  cached.promptID === promptID &&
+  typeof cached.text === "string"
+) {
+  bundle = cached.text;
+} else {
+  const brief = await loadBrief(memoryRoot, {
+    fileLines: options.fileLines,
+    maxLines: briefInjectionCap(options.indexLines, options.injectBudgetLines),
+  });
+  const status = await statusLine(ledger, projectID, {
+    indexLines: options.indexLines,
+  });
+  const handoff = await newestHandoffLine(memoryRoot);
+  const hint = await matchIndex(event.messages, {
+    storage: ledger,
+    projectID,
+    sessionID: event.sessionID,
+    memoryRoot,
+    indexLines: options.indexLines,
+  });
+  bundle = [brief, handoff, status, hint].filter(Boolean).join("\n");
+  await ctx.storage.set(bundleKey, { promptID, text: bundle });
+}
+if (bundle.length > 0) event.system.push({ type: "text", text: bundle });
+```
+
+Use the actual `event.messages` shape (`role` may be `type` in the installed API; check `src/hints.ts`'s `matchIndex` input and the plugin types, and follow the existing helper). Keep **one** bundle per session, overwritten when the last user message ID changes, so storage does not grow per prompt.
+
+Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX attach and the remember fast path). The status/hint are now computed in the context hook; the hint throttle still uses the session/prompt hash. `statusLine` consumes notices on the first call and the frozen bundle repeats the same text on later calls; the next prompt recomputes and may consume new notices.
+
+- [ ] **Step 2: Add tests**
+
+`test/hooks.test.ts`:
+
+- two context calls in the same prompt receive identical system text;
+- a second prompt (different last user message ID) recomputes and can change the bundle;
+- a status notice is consumed once and repeated identically in the frozen bundle;
+- a hint is present on every call of the same prompt (no re-injection churn);
+- the prompt hook no longer appends notices to `event.prompt.text`;
+- the snapshot writer remains per-call (it may update the brief for the next prompt, but not the frozen bundle);
+- storage has one key per session, overwritten on prompt change.
+
+`test/prompt-notices.test.ts`:
+
+- the bundle builder order is brief, pointer, status, hint;
+- the budget planner still drops the pointer first, then status, never a hint.
+
+Run:
+
+```bash
+npx vitest run test/hooks.test.ts test/prompt-notices.test.ts
+```
+
+Expected: all pass.
+
+- [ ] **Step 3: Update the docs**
+
+Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no within-turn churn) but a new prompt can still invalidate history; the prompt text stays clean. README: same, plus the trade-off. ADR-0002/0004/0007: a new 2026-10-27 revision explaining why E8-A was not kept and what E8-B changes. CHANGELOG: the change.
+
+- [ ] **Step 4: Add the `e8-b` variant and re-measure**
+
+`sourceFor` copies the working-tree `src/` for `e8-b` and `8a1f2bb` for `e8-a`. Add `e8-b` to `VARIANTS` and the report. Run:
+
+```bash
+node scripts/e8-cache-measure.mjs --run \
+  --model google/gemini-3.5-flash-lite \
+  --variants pre-e8,e8-a,e8-b \
+  --reps 3 --scenarios hint,status \
+  --pace-ms 6000 --max-retries 4 \
+  --out /tmp/opencode/e8-measurement-e8b-2026-10-27
+```
+
+Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a`. E8-B is a win only if it improves `Δlater` without making `Δp2` materially worse; record the cross-prompt trade-off explicitly.
+
+- [ ] **Step 5: Run gates and commit**
+
+```bash
+npm run typecheck
+npm test
+node scripts/e8-cache-measure.mjs --self-test
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+git diff --check
+git add src/index.ts src/prompt-notices.ts test/hooks.test.ts test/prompt-notices.test.ts \
+  scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+  docs/design-spec-v2-production.md README.md CHANGELOG.md \
+  docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
+  docs/adr/0007-untrusted-memory-content.md
+git commit -m "feat: freeze E8 notices per prompt (E8-B)"
+```
+
+---
+
+### Task 9: Verification, changelog, and PR
+
+**Files:** none beyond the selected branch; verify everything.
+
+- [ ] **Step 1: Run the full verification suite**
+
+```bash
+npm run typecheck
+npm test
+npm run test:coverage
+node scripts/e8-cache-measure.mjs --self-test
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
+git diff --check
+```
+
+Expected: typecheck clean; all tests pass; coverage thresholds pass; `self-test ok`; Prettier clean; no whitespace errors.
+
+- [ ] **Step 2: Verify the docs match the chosen placement**
+
+Check each of these against the actual code:
+
+- Spec §5.2 says prompt-tail, attachment, or E8-B exactly as implemented.
+- README budget/visibility language matches.
+- ADR-0002/0004/0007 revisions match.
+- CHANGELOG entry matches.
+- The measurement doc's decision matches.
+- No doc claims a billed-token saving; no doc says the line budget is a token metric.
+
+- [ ] **Step 3: Verify the transcript visibility statement is explicit**
+
+Search for the word "visible" in the spec/README/measurement doc:
+
+```bash
+grep -n "transcript\|visible\|visibility" README.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+```
+
+Expected: a clear sentence in each surface that the prompt-tail block is visible (keep), the user text is clean (attachment), or the system bundle is repeated (E8-B). No "model-facing only" wording that implies the user cannot see it.
+
+- [ ] **Step 4: Verify no secrets or private content leaked**
+
+```bash
+grep -RniE "api[_-]?key|authorization|bearer|GEMINI_API_KEY=[^<]" \
+  docs/2026-10-27-e8-measurement.md scripts/e8-cache-measure.mjs || true
+```
+
+Expected: no key values. The word `GEMINI_API_KEY` in a command is fine only when it is an env reference, not a value. The raw exports contain only fixture text and token fields; do not commit them.
+
+- [ ] **Step 5: Push and open the PR**
+
+```bash
+git status --short
+git log --oneline -5
+git push -u origin issue-22-e8-cache-placement
+gh pr create --repo nexusnv/opencode-nexusnv-memory \
+  --base main --head issue-22-e8-cache-placement \
+  --title "E8: measure cache placement and decide the prompt-tail surface" \
+  --body-file /tmp/opencode/e8-pr-body.md
+```
+
+Use `gh pr create` after writing the body to `/tmp/opencode/e8-pr-body.md`. The body must link issue #22 and include:
+
+- the provider/model/account tier and date;
+- the two-prompt/multi-tool method;
+- the paired raw and adjusted deltas;
+- the decision and rationale;
+- the UX verdict and whether transcript visibility is accepted;
+- the explicit non-claims (one provider, free tier, no billed-token claim, no production metrics);
+- the follow-ups (DeepSeek/OpenAI/Anthropic runs when keys are available; #26 for the broader UX pass).
+
+- [ ] **Step 6: Comment on issue #22**
+
+```bash
+gh issue comment 22 --repo nexusnv/opencode-nexusnv-memory \
+  --body "Measurement complete: <summary + link to the doc + decision>. The issue is <kept open for a multi-provider follow-up | closed by PR #N>."
+```
+
+If the result is "not measurable", do not close the issue; comment with the blocker and the exact failed commands.
+
+---
+
+## 5. Acceptance mapping
+
+| Issue #22 acceptance bullet                                                                    | Where covered                                |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Measured numbers for at least one caching provider, or "not measurable" and stays open/blocked | Tasks 2–5; §2.7                              |
+| No billed-token savings claim without measurement                                              | §2.1, §2.6, Task 5 Step 6; free-tier account |
+| Written keep/change/revert decision with rationale                                             | §2.6; Task 5 Step 7                          |
+| Tests and docs match the chosen placement                                                      | Task 6/7/8 per branch; Task 9 Step 2         |
+| If unchanged, accepting transcript visibility is explicit                                      | Task 5 Step 5; Task 6 Step 1; Task 9 Step 3  |
+| Two prompts, multi-tool turn, stable brief                                                     | §2.2, §2.3; Task 1 Steps 8–9; Task 4         |
+| Input/output, cache read/write, hit rate, raw fields                                           | §2.4; Task 5 Steps 2–4                       |
+| Compare pre-E8 with current placement                                                          | §2.2; Task 4                                 |
+| Record date, provider, model, account tier                                                     | §2.1; Task 5 Step 1                          |
+| UX review as a user would                                                                      | §2.6; Task 5 Step 5                          |
+| No production cache metrics, no budget change, no general redesign                             | Non-goals; file map                          |
+
+---
+
+## 6. Risks and rollback
+
+- **Free-tier quota (15 RPM):** the primary risk. Pace at 6 s, retry 429 with backoff, and never parallelize. If the quota is exhausted, stop and record "not measurable"; do not switch to a model without recording the substitution.
+- **Provider cache granularity:** Gemini's implicit cache may report a large shared base-prefix hit. Use paired medians and baseline-adjusted reads, not a single run's hit rate. If the adjustment is unstable, report both and treat a sign disagreement as "not measurable".
+- **Plugin load race:** `--standalone` plus a unique project per attempt plus the load marker. Never reuse a project directory across attempts; that was the draft's failure mode.
+- **Snapshot writer:** disabled in the copies to keep the brief byte-identical. Disclose it. If production snapshot cadence is the real question, that is a follow-up measurement, not this issue.
+- **Model nondeterminism:** skill/MCP/shell denial and a fixed `read` prompt; validate every run; use 3 reps. If the model still refuses `read`, record the invalid run and retry; do not count it.
+- **Scope creep:** do not add a sixth config option, a new metric name, a budget change, or a production cache counter. The measurement is a dev script + docs.
+- **Rollback:** if the measurement is invalid or the decision is not measurable, revert only the harness/doc commits if they are not wanted; leave `src/` untouched. If a change branch is implemented and the re-measurement fails, `git revert` the change commit and restore the keep/not-measurable doc.
+
+---
+
+## 7. Self-review notes
+
+- The plan's primary evidence is the paired `3 reps × 2 scenarios` run, not the smoke.
+- The harness is dev-only and not in the npm package; `package.json` is unchanged.
+- The account tier is recorded from the provider's own 429 text, not inferred from the cost field.
+- The decision rule has a cache-neutral path that still requires the UX gate; a neutral result cannot silently become a "win".
+- The keep branch's docs edits make transcript visibility explicit in spec/README/measurement/ADR; the issue's "not implicit" requirement is met.
+- The attachment and E8-B branches are conditional and mutually exclusive; do not execute both.
+- The plan does not claim billed savings, production metrics, or a budget change.
