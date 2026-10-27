@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Measure whether the E8-A prompt-tail notice placement preserves prefix-cache reuse better than the pre-E8 system placement on a prompt-caching provider, record the raw usage and the user-visible transcript verdict, and apply an explicit keep/change/revert decision with matching tests and docs.
+**Goal:** Measure whether the E8-A prompt-tail notice placement preserves prefix-cache reuse better than the pre-E8 system placement on a prompt-caching provider, record the raw usage and the user-visible transcript verdict, and apply an explicit keep / attachment / E8-B / not-measurable decision with matching tests and docs.
 
 **Architecture:** A dev-only Node harness creates two isolated OpenCode projects from the current `src/` and the pre-E8 source at `7629611^`, disables the handoff snapshot writer, denies skills/MCP so the model cannot wander, runs a two-prompt multi-tool session with `opencode run --standalone`, exports per-message token usage from `opencode session export`, and computes paired raw and baseline-adjusted cache metrics. The results go to a dated measurement doc; a pre-registered gate selects keep, attachment, or E8-B, and only the selected branch changes code/docs.
 
@@ -148,31 +148,49 @@ Raw usage fields to keep in `summary.json` and the doc:
 
 ### 2.5 Validity gates
 
-A pair is valid only when both runs are valid. A run is invalid if any control in §2.3 fails. The full run must produce at least **5 of 6 valid pairs** (3 reps × 2 scenarios). If fewer, run 2 more reps (5 total) or record **not measurable**.
+A pair is valid only when both runs are valid. A run is invalid if any control in §2.3 fails. The full run must produce at least **5 valid pairs** out of 6 (3 reps × 2 scenarios). If fewer, run 2 more reps (5 total) or record **not measurable**.
 
 The smoke run (1 rep) is a harness check, not evidence. Never put smoke numbers in the decision table.
 
 ### 2.6 Pre-registered decision rule
 
-Let:
+Let `N` be the number of valid pairs in the run used for the decision. The primary 3-rep run expects `N = 6` (3 reps × 2 scenarios); the 5-rep rerun expects `N = 10`. The sign-count threshold is `T = ceil(2N/3)` — 4/6 for the primary run, 4/5 if one pair is invalid, and 7/10 for the 5-rep rerun. Report the actual `N` and `T`; never keep a `/6` denominator after a 5-rep rerun.
+
+Pool the valid pairs across both scenarios for the medians and sign counts, and also report each scenario separately for the disagreement check. Define:
 
 - `Δlater` = median over valid pairs of `(e8-a.laterCacheHitRate − pre-e8.laterCacheHitRate)`.
 - `Δp2` = median over valid pairs of `(e8-a.prompt2First.cacheHitRate − pre-e8.prompt2First.cacheHitRate)`.
 - `ΔlaterRead` = median over valid pairs of the baseline-adjusted later cache-read delta.
 - `Δp2Read` = median over valid pairs of the baseline-adjusted prompt-2 cache-read delta.
-- `positiveLater` / `negativeLater` = pair counts by sign on `Δlater`; same for `Δp2`.
+- `positiveLater` / `negativeLater` = pooled pair counts by sign on `Δlater`; same for `positiveP2` / `negativeP2` on `Δp2`.
 
-Apply the first matching row:
+**Step 1 — validity.** If `N < 5`, the exports have no cache fields, or the `hint` and `status` scenarios still disagree in sign on the primary metric after the 5-rep rerun, record **not measurable** (issue #22 stays open/blocked). Do not pick a branch.
 
-| Condition                                                                                            | Decision                                                                                                                                                                                                                                                           |
-| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Δlater ≥ +0.05`, `positiveLater ≥ 4/6`, and `Δp2 ≥ −0.03`                                           | **Keep E8-A** (cache supported; visibility still needs the UX gate).                                                                                                                                                                                               |
-| `Δp2 ≥ +0.05`, `positive` on `Δp2 ≥ 4/6`, and `Δlater ≥ −0.03`                                       | **Keep E8-A** (cross-prompt cache supported).                                                                                                                                                                                                                      |
-| `abs(Δlater) ≤ 0.03` and `abs(Δp2) ≤ 0.03`                                                           | **Keep E8-A if the UX gate accepts; otherwise change.** Cache-neutral: no savings claim; the placement is justified by the stable prefix and user-data channel only.                                                                                               |
-| `Δlater ≤ −0.05` or `Δp2 ≤ −0.05`, with `negative ≥ 4/6` on that metric                              | **Change.** Use the attachment if the UX gate rejects user-text visibility; use E8-B if the loss is within-turn churn (`Δlater` negative) and the UX gate accepts the prompt-tail but the cache is not a win. If neither is a win, revert to pre-E8 and record it. |
-| Fewer than 5/6 valid pairs, no cache fields, or the scenarios disagree in sign after the 5-rep rerun | **Not measurable.** Keep issue #22 open/blocked; do not claim a win or a loss.                                                                                                                                                                                     |
+**Step 2 — cache verdict.** Apply the first matching row:
 
-The UX gate is a **veto**, not a tie-breaker:
+| Condition                                                | Cache verdict                                                        |
+| -------------------------------------------------------- | -------------------------------------------------------------------- |
+| `Δlater ≥ +0.05`, `positiveLater ≥ T`, and `Δp2 ≥ −0.03` | **win** (within-turn cache supported)                                |
+| `Δp2 ≥ +0.05`, `positiveP2 ≥ T`, and `Δlater ≥ −0.03`    | **win** (cross-prompt cache supported)                               |
+| `abs(Δlater) ≤ 0.03` and `abs(Δp2) ≤ 0.03`               | **neutral** (no savings claim)                                       |
+| `Δlater ≤ −0.05` and `negativeLater ≥ T`                 | **loss** (within-turn)                                               |
+| `Δp2 ≤ −0.05` and `negativeP2 ≥ T`                       | **loss** (cross-prompt)                                              |
+| anything else                                            | **ambiguous**: run the 5-rep protocol once; if still ambiguous, stop |
+
+**Step 3 — UX gate.** Classify the prompt-tail block as accept, accept with a wording fix, or reject using the checklist below. The UX gate is a **veto**, not a tie-breaker.
+
+**Step 4 — branch.** Apply exactly one row:
+
+| Cache verdict  | UX verdict           | Decision                                           |
+| -------------- | -------------------- | -------------------------------------------------- |
+| win or neutral | accept / wording fix | **Keep E8-A** (Task 6)                             |
+| win or neutral | reject               | **Change to attachment** (Task 7), then re-measure |
+| loss           | accept / wording fix | **Change to E8-B** (Task 8), then re-measure       |
+| loss           | reject               | **Change to attachment** (Task 7), then re-measure |
+
+For a change branch, adopt the candidate only if its re-measurement is not worse than E8-A by more than `0.05` on the metric that drove the decision; otherwise record the regression and leave issue #22 open with the evidence. Do not silently revert to pre-E8: revert is not one of issue #22's three options.
+
+The UX checklist:
 
 - **Accept** if the user's own text stays first and unmodified, the block is separated by a blank line, every line is visibly labelled (`[memory]` / `[memory-hint]`), the data-only suffix is present, the block is ≤3 lines, and a first-time user would not mistake it for their own instruction.
 - **Accept with a wording fix** if the only objection is the visible HTML marker or a long handoff line. A wording fix is still a keep: update `PROMPT_NOTICES_MARKER`/labels and the tests, then re-run the smoke (not the full measurement unless the block length changes).
@@ -203,7 +221,8 @@ If the free-tier quota, provider outage, or cache-field absence prevents 5 valid
 
 **Modify (change branch only; one of)**
 
-- `src/prompt-notices.ts`, `src/index.ts`, `test/prompt-notices.test.ts`, `test/hooks.test.ts` — attachment channel or E8-B freeze.
+- Attachment branch: `src/prompt-notices.ts`, `src/index.ts`, `src/files.ts` (dedicated scratch writer), `test/prompt-notices.test.ts`, `test/hooks.test.ts`, `test/files.test.ts`.
+- E8-B branch: `src/prompt-notices.ts`, `src/index.ts`, `test/prompt-notices.test.ts`, `test/hooks.test.ts`.
 - The same spec/README/ADR/CHANGELOG files with the changed-placement wording.
 
 **Not modified:** `package.json` (no new dependency), `src/config.ts` (no new option), `src/metrics.ts` (no new metric name), line budgets (no evidence to change them).
@@ -247,6 +266,8 @@ const DEFAULT_PACE_MS = 6000;
 Add CLI flags in `parseArgs`/`printHelp`:
 
 ```text
+--variants <list>     Comma-separated variants (default: pre-e8,e8-a)
+--compare <a>:<b>     Pairing to report; repeatable (default: pre-e8:e8-a)
 --pace-ms <ms>       Minimum gap between model calls (default: 6000)
 --max-retries <n>    Retries for a 429/quota error (default: 4)
 ```
@@ -256,7 +277,12 @@ Add CLI flags in `parseArgs`/`printHelp`:
 `runCli` must inject the isolated config roots into the child environment:
 
 ```js
-function runCli(args, options = {}) {
+function runCli(args, options) {
+  if (!options?.out) {
+    throw new Error(
+      "runCli requires options.out for the isolated config roots",
+    );
+  }
   const result = spawnSync("opencode", args, {
     cwd: options.cwd,
     encoding: "utf8",
@@ -268,9 +294,16 @@ function runCli(args, options = {}) {
     timeout: options.timeoutMs ?? 300_000,
     maxBuffer: 64 * 1024 * 1024,
   });
-  // ... unchanged error handling ...
+  if (result.error) throw result.error;
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+  };
 }
 ```
+
+`runCli` must not throw on a non-zero exit: the quota retry needs to inspect the status and the JSON error event first. Thread `out` through **every** call, including `exportSession(projectDir, sessionID, out)` and `session delete`; the draft's `exportSession`/`delete` calls omitted it, which would make `join(undefined, "config", ...)` throw.
 
 `prepareProject` must create `<out>/config/opencode` and `<out>/xdg/opencode` once, before the first project. The project's own `.opencode/opencode.jsonc` remains the source of the plugin and policy config. Do not put a global config file in the isolated directory; an empty config root plus the project config is the controlled baseline.
 
@@ -297,6 +330,24 @@ async function pace(ms) {
 
 function isQuotaError(text) {
   return /quota|rate.?limit|429|free-limit|RESOURCE_EXHAUSTED/i.test(text);
+}
+```
+
+Extract the draft's inline JSONL parser into a helper, then make `runPrompt(projectDir, prompt, sessionID, model, opts)` async:
+
+```js
+function parseJsonLines(text) {
+  const events = [];
+  for (const line of String(text).split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      events.push(JSON.parse(trimmed));
+    } catch {
+      // Ignore non-JSON progress lines.
+    }
+  }
+  return events;
 }
 ```
 
@@ -328,7 +379,7 @@ for (let attempt = 1; attempt <= opts.maxRetries + 1; attempt += 1) {
 }
 ```
 
-Include both stdout and stderr in the failure message: the CLI reports provider errors as JSON events on stdout, and an empty stderr made the draft's earlier failures opaque.
+Every caller must `await runPrompt(...)` and pass the same `opts`/`out`; `exportSession` and `session delete` must also receive `out`. A quota retry reuses the same session; it is not a new measurement.
 
 - [ ] **Step 5: Add the measurement-only load marker**
 
@@ -380,13 +431,14 @@ The active-context fixture already includes `- run salt: ${salt}`. The salt chan
 
 - [ ] **Step 8: Replace the fixed warm-up loop with a standalone readiness check**
 
-With `--standalone`, no provider warm-up is needed. After `prepareProject` and writing the measured salt:
+With `--standalone`, no provider warm-up is needed. Delete the draft's two-warm-up loop, the 2-second watcher delay, and the `session delete` warm-up cleanup. Then:
 
-1. Run prompt 1.
-2. Export the session.
-3. Validate the run (including the load marker and the variant's expected notice).
-4. If the marker is absent, retry the whole run in a **new project directory** (include the attempt in the directory name: `<scenario>-<variant>-r<rep>-a<attempt>`). Do not reuse a project directory across attempts; a stale server/plugin state was the draft's failure mode.
-5. Delete only the warm-up/probe sessions if you add any. The measured session stays until its export is saved.
+1. Move the per-attempt `projectDir` construction **inside** the attempt loop and include the attempt: `<out>/projects/<scenario>-<variant>-r<rep>-a<attempt>`. Never reuse a directory across attempts; a stale server/plugin state was the draft's failure mode.
+2. `prepareProject`, write the measured salt, and hash the brief.
+3. `await runPrompt(...)` for prompt 1.
+4. `exportSession(...)` and `analyzeExport(...)`.
+5. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice.
+6. On a missing marker or any validation error, delete that attempt's project and retry with a new directory. The measured session stays until its export is saved.
 
 No warm-up session is allowed before the measured prompt: it would seed the provider cache and bias the first-call baseline. If a future host version requires a warm-up, run it in a separate disposable project and record the deviation.
 
@@ -430,17 +482,32 @@ const p2FirstIncrementalRead = Math.max(
 );
 ```
 
-Add `prompt1Total.promptTokens`, `prompt2Total.promptTokens`, `sessionTotal.promptTokens`, `noticeLines` (count of lines starting with `[memory]`/`[memory-hint]` in prompt 1's text), and `skillToolParts` (tool parts named `skill`) to the summary. The report must show the raw metrics and the adjusted metrics; do not hide the raw numbers.
+Add `prompt1Total.promptTokens`, `prompt2Total.promptTokens`, `sessionTotal.promptTokens`, `noticeLines` (count of lines starting with `[memory]`/`[memory-hint]` in prompt 1's text), and `skillToolParts` (tool parts named `skill`) to the summary. Add `p1LaterIncrementalRead` to the `prompt1Later` object and `p2FirstIncrementalRead` to the `prompt2First` object (or to a `prompt2` summary) so the pair builder can read them. The report must show the raw metrics and the adjusted metrics; do not hide the raw numbers.
+
+In `pairRuns`, add the adjusted pair deltas used by the report:
+
+```js
+deltaLaterAdjustedRead:
+  e8.prompt1Later.p1LaterIncrementalRead -
+  pre.prompt1Later.p1LaterIncrementalRead,
+deltaPrompt2AdjustedRead:
+  (e8.prompt2First?.p2FirstIncrementalRead ?? 0) -
+  (pre.prompt2First?.p2FirstIncrementalRead ?? 0),
+```
+
+Add a `summarizePooled(pairs)` helper next to `summarizeScenario` and store `pooled` in the report. The pooled row is the gate input; the per-scenario rows are the disagreement check.
 
 - [ ] **Step 11: Extend the report**
+
+Add `--compare <baseline>:<candidate>` (repeatable, default `pre-e8:e8-a`) and make `pairRuns(runs, baseline, candidate)`/`buildReport` use it. The default run compares `pre-e8:e8-a`; the attachment branch adds `e8-a:e8-attach`; the E8-B branch adds `pre-e8:e8-b` and `e8-a:e8-b`. Do not hardcode `pre-e8`/`e8-a` inside `pairRuns` or `summarizeScenario`.
 
 Add columns to the per-run table:
 
 ```text
-| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | brief hash match | marker |
+| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | notice lines | skill parts | brief hash match | marker |
 ```
 
-Add a "Validity" section that prints the failed checks per run. Add a "Brief stability" section with the before/after hashes per run. Add a "Raw usage" section that points to `summary.json` and the per-run export path.
+Add a "Validity" section that prints the failed checks per run. Add a "Brief stability" section with the before/after hashes per run. Add a "Raw usage" section that points to `summary.json` and the per-run export path. For each comparison, print a pooled row (the gate input) and the per-scenario rows. Keep the **default** comparison (`pre-e8:e8-a`) at the top level (`pairs`, `pooled`, `byScenario`) so the Task 4 script works; put any extra comparisons in `comparisons[]`.
 
 - [ ] **Step 12: Extend the self-test**
 
@@ -450,7 +517,9 @@ Add assertions to `selfTest` for:
 - `prompt2First` incremental read;
 - `noticeLines` for the E8-A synthetic prompt;
 - `skillToolParts` detected on a synthetic `skill` tool part;
-- the pre-E8 synthetic export has no marker and no notice lines.
+- the pre-E8 synthetic export has no marker and no notice lines;
+- `pairRuns(..., "pre-e8", "e8-a")` and the pooled summary on a synthetic two-variant pair;
+- `parseJsonLines` handling a non-JSON progress line without throwing.
 
 Run:
 
@@ -643,22 +712,27 @@ Expected: `pairs 6`, `failures 0`. If `pairs < 5`, run the 5-rep protocol (Step 
 
 ```bash
 python3 - <<'EOF'
-import json, statistics
+import json, math, statistics
 s = json.load(open('/tmp/opencode/e8-measurement-2026-10-27/summary.json'))
-pairs = s['pairs']
 def med(xs): return statistics.median(xs) if xs else None
-for scenario in ('hint', 'status'):
-    rows = [p for p in pairs if p['scenario'] == scenario]
-    if not rows: continue
+def stats(rows, label):
     dl = [p['deltaLaterHit'] for p in rows]
     dp = [p['deltaPrompt2Hit'] for p in rows]
-    print(scenario, 'n', len(rows),
-          'Δlater', med(dl), '+', sum(x > 0 for x in dl), '-', sum(x < 0 for x in dl),
-          'Δp2', med(dp), '+', sum(x > 0 for x in dp), '-', sum(x < 0 for x in dp))
+    dlr = [p['deltaLaterAdjustedRead'] for p in rows]
+    dpr = [p['deltaPrompt2AdjustedRead'] for p in rows]
+    n = len(rows)
+    t = math.ceil(2 * n / 3) if n else 0
+    print(label, 'N', n, 'T', t,
+          'DLater', med(dl), '+', sum(x > 0 for x in dl), '-', sum(x < 0 for x in dl),
+          'Dp2', med(dp), '+', sum(x > 0 for x in dp), '-', sum(x < 0 for x in dp),
+          'DLaterRead', med(dlr), 'Dp2Read', med(dpr))
+stats(s['pairs'], 'pooled')
+for scenario in ('hint', 'status'):
+    stats([p for p in s['pairs'] if p['scenario'] == scenario], scenario)
 EOF
 ```
 
-Record the medians and sign counts for `Δlater`, `Δp2`, `ΔlaterRead`, and `Δp2Read` in the measurement doc. Apply the §2.6 rule exactly. Do not change the thresholds after seeing the numbers.
+The pooled row is the gate input; the per-scenario rows are for the disagreement check. Record the medians and sign counts for `Δlater`, `Δp2`, `ΔlaterRead`, and `Δp2Read` in the measurement doc. Apply the §2.6 rule exactly. Do not change the thresholds after seeing the numbers.
 
 - [ ] **Step 4: Check the two scenarios for disagreement**
 
@@ -779,18 +853,18 @@ Do not bury this in the cache section. It is a separate decision input.
 
 - [ ] **Step 7: Record the decision and rationale**
 
-Use the §2.6 rule. Example (choose one, not all):
+Use the §2.6 rule. Include `N`, `T`, the pooled medians/sign counts, the per-scenario rows, and the adjusted reads. Example (choose one, not all):
 
 ```markdown
 ## Decision
 
-**Keep E8-A prompt-tail placement.** Median Δlater = +0.xx (x/6 positive),
-median Δp2 = +0.xx (x/6 positive). The direction is consistent on both
-scenarios and the adjusted reads do not contradict it. No billed-token claim:
-the account is free tier. The UX review accepts the block: it is ≤3 labelled
-data-only lines, the user's text remains first, and the visible HTML marker is
-a raw-transcript artifact that rendered Markdown hides. Transcript visibility
-is accepted explicitly, not implicitly.
+**Keep E8-A prompt-tail placement.** N = 6 valid pairs (T = 4/6). Median
+Δlater = +0.xx (x/N positive), median Δp2 = +0.xx (x/N positive). The
+direction is consistent on both scenarios and the adjusted reads do not
+contradict it. No billed-token claim: the account is free tier. The UX review
+accepts the block: it is ≤3 labelled data-only lines, the user's text remains
+first, and the visible HTML marker is a raw-transcript artifact that rendered
+Markdown hides. Transcript visibility is accepted explicitly, not implicitly.
 ```
 
 or:
@@ -798,9 +872,22 @@ or:
 ```markdown
 ## Decision
 
-**Not measurable.** Only x/6 pairs were valid because <reason>; the quota /
-provider behavior prevented a fair comparison. Issue #22 stays open/blocked
-until a maintainer-keyed run is possible. No savings claim.
+**Change to <attachment | E8-B>.** N = 6 valid pairs (T = 4/6). Median
+Δlater = −0.xx (x/N negative), median Δp2 = +0.xx. The cache verdict is
+<loss/neutral> and the UX gate <rejects/accepts> the prompt-tail block, so
+§2.6 selects <branch>. The re-measurement of the candidate is reported in the
+second table; <it is adopted / it regressed by x and the issue stays open>.
+No billed-token claim.
+```
+
+or:
+
+```markdown
+## Decision
+
+**Not measurable.** Only N valid pairs were available despite the 5-rep rerun;
+the quota / provider behavior prevented a fair comparison. Issue #22 stays
+open/blocked until a maintainer-keyed run is possible. No savings claim.
 ```
 
 - [ ] **Step 8: Update the spike doc**
@@ -813,8 +900,9 @@ Change the status line to:
 Placement is implemented and covered by tests. Measured on 2026-10-27 against
 Google Gemini 3.5 Flash Lite (free tier): see
 [`2026-10-27-e8-measurement.md`](./2026-10-27-e8-measurement.md). Decision:
-<keep/change/not measurable>. No billed-token claim. The line budget remains an
-uncached worst-case guardrail, not a billed-token metric.
+<keep / change to attachment / change to E8-B / not measurable>. No billed-token
+claim. The line budget remains an uncached worst-case guardrail, not a
+billed-token metric.
 ```
 
 Keep the measurement protocol section and the non-claims; add a one-line note that the protocol was executed and where the raw tables live. Do not delete the non-claims.
@@ -954,22 +1042,55 @@ If the wording fix touched `src/`/tests, include those files in the commit and u
 
 ### Task 7: Change branch — attachment-based notice (conditional)
 
-Execute this task only if Task 5 selected **change** and the UX gate rejected user-text visibility while the cache was neutral/positive. Do not execute it together with Task 8.
+Execute this task only if Task 5 selected **change** and the UX gate rejected user-text visibility, regardless of the cache verdict. If the UX gate accepted the prompt-tail and the cache verdict is a loss, execute Task 8 instead. Do not execute this task together with Task 8.
 
 **Files:**
 
-- Modify: `src/prompt-notices.ts`, `src/index.ts`
-- Modify: `test/prompt-notices.test.ts`, `test/hooks.test.ts`
+- Modify: `src/prompt-notices.ts`, `src/index.ts`, `src/files.ts` (dedicated scratch writer)
+- Modify: `test/prompt-notices.test.ts`, `test/hooks.test.ts`, `test/files.test.ts`
 - Modify: `docs/design-spec-v2-production.md` §5.2/§9, `README.md`, `CHANGELOG.md`, ADR-0002/0004/0007
-- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-attach` variant
-- Re-run: Task 4 with `pre-e8`, `e8-a` (at `8a1f2bb`), `e8-attach` (working tree)
+- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-attach` variant and an `e8-a:e8-attach` comparison
+- Commit the implementation and tests **before** the re-measurement: the harness refuses a dirty `src/`.
 
 - [ ] **Step 1: Write the notice file instead of mutating the user text**
 
-In `src/prompt-notices.ts`, add:
+Add a dedicated scratch writer to `src/files.ts`. Do **not** add `prompt-notices.md` to `ALLOWED_ROOT_FILES`: it is plugin-owned scratch data, not a memory file, and must stay out of `INDEX.md`, the brief, and the memory read/search surface.
 
 ```ts
 export const PROMPT_NOTICES_FILE = "prompt-notices.md";
+
+/**
+ * Overwrite the plugin-owned prompt-notices scratch file atomically. Confined
+ * to a constant name under the memory root; not in ALLOWED_ROOT_FILES, not
+ * indexed, not loaded into the brief. Redaction and the 3-line notice cap
+ * apply, matching the prompt-tail budget.
+ */
+export async function writePromptNotices(
+  text: string,
+  opts?: CappedFileOptions,
+): Promise<void> {
+  if (typeof text !== "string") {
+    throw new Error("[memory] writePromptNotices text must be a string");
+  }
+  const redactedText = redact(text);
+  const lines = countLines(redactedText);
+  if (lines > 3) {
+    throw new Error(`[memory] prompt notices have ${lines} lines; cap is 3`);
+  }
+  const root = resolveMemoryRoot(opts?.memoryRoot);
+  await withFileWriteLock(root, async () => {
+    const abs = resolveUnderRoot(root, PROMPT_NOTICES_FILE);
+    await publishAtomic(root, abs, redactedText);
+  });
+}
+```
+
+In `src/prompt-notices.ts`, add the URI helper:
+
+```ts
+import { PROMPT_NOTICES_FILE } from "./files.js";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export function promptNoticesUri(memoryRoot: string): string {
   return pathToFileURL(join(memoryRoot, PROMPT_NOTICES_FILE)).href;
@@ -980,27 +1101,30 @@ In `src/index.ts` prompt hook, replace the `appendPromptNotices` call with:
 
 ```ts
 if (plan.text.length > 0) {
-  await writeNewCapped(PROMPT_NOTICES_FILE, `${plan.text}\n`, {
-    memoryRoot,
-  });
+  await writePromptNotices(`${plan.text}\n`, { memoryRoot });
   const uri = promptNoticesUri(memoryRoot);
+  event.prompt.files ??= [];
   if (!event.prompt.files.some((file) => file?.uri === uri)) {
     event.prompt.files.push({ uri });
   }
 }
 ```
 
-Use the repository's capped/atomic write path; if `writeNewCapped` refuses an existing file, use the existing `writeCapped`/replace path from `src/files.ts` and document which one. The file is plugin-owned scratch data, not a memory file; keep it out of `INDEX.md` and the brief. The marker stays inside the file so a retry overwrites rather than appends.
-
-The user's `event.prompt.text` must remain byte-for-byte unchanged. `hasPromptNotices` now checks the file content, not the user text; add a helper that reads the file and returns the marker state, or overwrite unconditionally (the block is deterministic for the same prompt).
+Overwriting is the idempotency mechanism: the block is deterministic for the same prompt, so a retry replaces it rather than appending a second copy. Do not call `hasPromptNotices` on the user text for this path. The user's `event.prompt.text` must remain byte-for-byte unchanged. Remove any imports that become unused (`appendPromptNotices`/`hasPromptNotices` if no other call site uses them); `npm run typecheck` must stay clean.
 
 - [ ] **Step 2: Add tests**
 
+`test/files.test.ts`:
+
+- `writePromptNotices` creates `.opencode/memory/prompt-notices.md` and overwrites it atomically;
+- the writer rejects more than three lines;
+- `readCapped("prompt-notices.md", ...)` is rejected as non-allowlisted (the file is not a memory file).
+
 `test/prompt-notices.test.ts`:
 
-- file content has the pointer/status/hint order and the marker;
-- no notices → no file is attached;
-- retry overwrites the file with one block, not two;
+- the planned block has the pointer/status/hint order and the marker;
+- the notice URI is a file URL under the memory root;
+- no notices → the prompt hook attaches no notice URI;
 - budget drop still omits the pointer/status as before.
 
 `test/hooks.test.ts`:
@@ -1014,33 +1138,48 @@ The user's `event.prompt.text` must remain byte-for-byte unchanged. `hasPromptNo
 Run:
 
 ```bash
-npx vitest run test/prompt-notices.test.ts test/hooks.test.ts
+npx vitest run test/prompt-notices.test.ts test/hooks.test.ts test/files.test.ts
 ```
 
 Expected: all pass.
 
-- [ ] **Step 3: Update the docs to describe the attachment**
+- [ ] **Step 3: Commit the implementation before re-measuring**
 
-Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
+The harness's `src/` dirty guard is intentional. Commit the code and tests first, then verify the tree is clean:
 
-- [ ] **Step 4: Add the `e8-attach` variant to the harness**
+```bash
+npx vitest run test/prompt-notices.test.ts test/hooks.test.ts test/files.test.ts
+git add src/prompt-notices.ts src/index.ts src/files.ts \
+  test/prompt-notices.test.ts test/hooks.test.ts test/files.test.ts
+git commit -m "feat: attach E8 prompt notices instead of appending user text"
+test -z "$(git status --porcelain -- src)" && echo "src clean"
+```
+
+Expected: tests pass, commit succeeds, `src clean`.
+
+- [ ] **Step 4: Add the `e8-attach` variant and comparison to the harness**
 
 `sourceFor` gains:
 
 ```js
 } else if (variant === "e8-attach") {
-  // working-tree src/ (the attachment implementation)
+  // working tree: the attachment implementation just committed
   for (const name of await readdir(join(REPO_ROOT, "src"))) {
-    if (name.endsWith(".ts")) await cp(join(REPO_ROOT, "src", name), join(dest, name));
+    if (name.endsWith(".ts"))
+      await cp(join(REPO_ROOT, "src", name), join(dest, name));
   }
 } else if (variant === "e8-a") {
   // the measured E8-A source, not the working tree after the attachment change
-  const tar = execFileSync("git", ["-C", REPO_ROOT, "archive", "--format=tar", "8a1f2bb", "src"], { maxBuffer: 64 * 1024 * 1024 });
+  const tar = execFileSync(
+    "git",
+    ["-C", REPO_ROOT, "archive", "--format=tar", "8a1f2bb", "src"],
+    { maxBuffer: 64 * 1024 * 1024 },
+  );
   // ... extract as in the pre-e8 branch ...
 }
 ```
 
-Update `VARIANTS`, the CLI `--variants` parsing, the report tables, and the self-test. The comparison is `e8-attach` vs `e8-a`, with `pre-e8` as the baseline.
+Update `VARIANTS`, the CLI `--variants` parsing, the self-test, and the comparison labels. Run the default comparison `pre-e8:e8-a` plus `e8-a:e8-attach`.
 
 - [ ] **Step 5: Re-run the measurement**
 
@@ -1048,14 +1187,19 @@ Update `VARIANTS`, the CLI `--variants` parsing, the report tables, and the self
 node scripts/e8-cache-measure.mjs --run \
   --model google/gemini-3.5-flash-lite \
   --variants pre-e8,e8-a,e8-attach \
+  --compare pre-e8:e8-a --compare e8-a:e8-attach \
   --reps 3 --scenarios hint,status \
   --pace-ms 6000 --max-retries 4 \
   --out /tmp/opencode/e8-measurement-attach-2026-10-27
 ```
 
-Add the results to the measurement doc as a second table. The decision stands only if the attachment is not worse than E8-A on `Δlater`/`Δp2` by more than 0.05; otherwise record the regression and reconsider keep/E8-B. Do not claim a win from the attachment if the cache regressed.
+Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps), with the `e8-a:e8-attach` comparison plus the original `pre-e8:e8-a` table. Do not reuse the first run's sessions. If fewer than 5 of the 6 `e8-a:e8-attach` pairs are valid, record "not measurable" for the change branch and keep issue #22 open; do not cherry-pick.
 
-- [ ] **Step 6: Run gates and commit**
+- [ ] **Step 6: Update the docs with the second table and the final decision**
+
+Add the `e8-a:e8-attach` results to `docs/2026-10-27-e8-measurement.md` as a second table. Adopt the attachment only if it is not worse than E8-A by more than `0.05` on the pooled `Δlater` and `Δp2`; otherwise record the regression and leave issue #22 open with the evidence. Do not claim a win from the attachment if the cache regressed. Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
+
+- [ ] **Step 7: Run gates and commit the docs/harness**
 
 ```bash
 npm run typecheck
@@ -1063,37 +1207,41 @@ npm test
 node scripts/e8-cache-measure.mjs --self-test
 npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
 git diff --check
-git add src/prompt-notices.ts src/index.ts test/prompt-notices.test.ts test/hooks.test.ts \
-  scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+git add scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
   docs/design-spec-v2-production.md README.md CHANGELOG.md \
   docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
   docs/adr/0007-untrusted-memory-content.md
-git commit -m "feat: attach E8 prompt notices instead of appending user text"
+git commit -m "docs: record attachment-based E8 notices"
 ```
+
+If the docs update changes `src/` or tests, that is a bug in this task: the implementation was committed in Step 3. Revert the stray change and re-run the focused tests.
 
 ---
 
 ### Task 8: Fallback branch — E8-B frozen per-prompt bundle (conditional)
 
-Execute this task only if Task 5 selected **change** and the cache loss is within-turn churn (`Δlater` negative) while the UX gate accepts keeping notices out of the user text (or the attachment branch was rejected). Do not execute it together with Task 7.
+Execute this task only if Task 5 selected **change** and the UX gate accepted the prompt-tail (or accepted with a wording fix) while the cache verdict is a loss. If the UX gate rejected user-text visibility, execute Task 7 instead. Do not execute this task together with Task 7.
 
 **Files:**
 
 - Modify: `src/index.ts` (context hook and prompt hook), `src/prompt-notices.ts` (shared bundle builder)
 - Modify: `test/hooks.test.ts`, `test/prompt-notices.test.ts`
 - Modify: `docs/design-spec-v2-production.md` §5.2/§9, `README.md`, `CHANGELOG.md`, ADR-0002/0004/0007
-- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-b` variant
-- Re-run: Task 4 with `pre-e8`, `e8-b` (and `e8-a` if useful)
+- Modify: `scripts/e8-cache-measure.mjs` to add an `e8-b` variant and comparisons
+- Commit the implementation and tests **before** the re-measurement: the harness refuses a dirty `src/`.
 
 - [ ] **Step 1: Freeze the bundle per prompt in `ctx.storage`**
 
-In the `context` hook, derive the current prompt from the last user message ID:
+In the `context` hook, derive the current prompt from the last user message ID, with a prompt-hash fallback if the installed `Message` type has no `id`:
 
 ```ts
-const promptID =
-  event.messages.findLast?.((message) => message.role === "user")?.id ??
-  event.messages.filter((message) => message.role === "user").at(-1)?.id ??
-  "unknown";
+import { extractLatestUserText, matchIndex, promptHashFor } from "./hints.js";
+
+const lastUserText = extractLatestUserText(event.messages);
+const lastUserMessage = event.messages
+  .filter((message) => message.role === "user")
+  .at(-1) as { id?: string; role: string; content?: unknown } | undefined;
+const promptID = lastUserMessage?.id ?? promptHashFor(lastUserText ?? "");
 const bundleKey = `e8b/${event.sessionID}`;
 const cached = await ctx.storage.get(bundleKey);
 let bundle: string | undefined;
@@ -1128,9 +1276,9 @@ if (
 if (bundle.length > 0) event.system.push({ type: "text", text: bundle });
 ```
 
-Use the actual `event.messages` shape (`role` may be `type` in the installed API; check `src/hints.ts`'s `matchIndex` input and the plugin types, and follow the existing helper). Keep **one** bundle per session, overwritten when the last user message ID changes, so storage does not grow per prompt.
+`src/hints.ts`'s `extractLatestUserText` already accepts the `event.messages` array and reads `role` + `content`; use it rather than inventing a second parser. Keep **one** bundle per session, overwritten when the last user message ID (or hash fallback) changes, so storage does not grow per prompt.
 
-Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX attach and the remember fast path). The status/hint are now computed in the context hook; the hint throttle still uses the session/prompt hash. `statusLine` consumes notices on the first call and the frozen bundle repeats the same text on later calls; the next prompt recomputes and may consume new notices.
+Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX attach and the remember fast path). Remove imports that become unused (`appendPromptNotices`, `planPromptNotices`, `statusLine`, `newestHandoffLine`, etc. only if no other call site uses them); `npm run typecheck` must stay clean. The status/hint are now computed in the context hook; the hint throttle still uses the session/prompt hash. `statusLine` consumes notices on the first call and the frozen bundle repeats the same text on later calls; the next prompt recomputes and may consume new notices.
 
 - [ ] **Step 2: Add tests**
 
@@ -1157,26 +1305,44 @@ npx vitest run test/hooks.test.ts test/prompt-notices.test.ts
 
 Expected: all pass.
 
-- [ ] **Step 3: Update the docs**
+- [ ] **Step 3: Commit the implementation before re-measuring**
 
-Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no within-turn churn) but a new prompt can still invalidate history; the prompt text stays clean. README: same, plus the trade-off. ADR-0002/0004/0007: a new 2026-10-27 revision explaining why E8-A was not kept and what E8-B changes. CHANGELOG: the change.
+The harness's `src/` dirty guard is intentional. Commit the code and tests first, then verify the tree is clean:
+
+```bash
+npx vitest run test/hooks.test.ts test/prompt-notices.test.ts
+git add src/index.ts src/prompt-notices.ts test/hooks.test.ts test/prompt-notices.test.ts
+git commit -m "feat: freeze E8 notices per prompt (E8-B)"
+test -z "$(git status --porcelain -- src)" && echo "src clean"
+```
+
+Expected: tests pass, commit succeeds, `src clean`.
 
 - [ ] **Step 4: Add the `e8-b` variant and re-measure**
 
-`sourceFor` copies the working-tree `src/` for `e8-b` and `8a1f2bb` for `e8-a`. Add `e8-b` to `VARIANTS` and the report. Run:
+`sourceFor` copies the working-tree `src/` for `e8-b` and `8a1f2bb` for `e8-a` (the same pin as Task 7 Step 4). Add `e8-b` to `VARIANTS`, the self-test, and the comparison labels. Run:
 
 ```bash
 node scripts/e8-cache-measure.mjs --run \
   --model google/gemini-3.5-flash-lite \
   --variants pre-e8,e8-a,e8-b \
+  --compare pre-e8:e8-a --compare pre-e8:e8-b --compare e8-a:e8-b \
   --reps 3 --scenarios hint,status \
   --pace-ms 6000 --max-retries 4 \
   --out /tmp/opencode/e8-measurement-e8b-2026-10-27
 ```
 
-Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a`. E8-B is a win only if it improves `Δlater` without making `Δp2` materially worse; record the cross-prompt trade-off explicitly.
+Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps). If fewer than 5 of the 6 `e8-a:e8-b` pairs are valid, record "not measurable" for the change branch and keep issue #22 open; do not cherry-pick.
 
-- [ ] **Step 5: Run gates and commit**
+- [ ] **Step 5: Decide whether E8-B actually wins**
+
+Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. Adopt E8-B only if `Δlater(e8-b − pre-e8) ≥ +0.05` with at least `T` positive pairs and `Δp2(e8-b − e8-a) ≥ −0.05`; otherwise record that E8-B did not win and leave issue #22 open with the evidence. Record the cross-prompt trade-off explicitly. Do not claim a win from E8-B if the cache did not improve.
+
+- [ ] **Step 6: Update the docs**
+
+Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no within-turn churn) but a new prompt can still invalidate history; the prompt text stays clean. README: same, plus the trade-off. ADR-0002/0004/0007: a new 2026-10-27 revision explaining why E8-A was not kept and what E8-B changes. CHANGELOG: the change. Add the E8-B comparison table and the adoption/rejection verdict to `docs/2026-10-27-e8-measurement.md`.
+
+- [ ] **Step 7: Run gates and commit the docs/harness**
 
 ```bash
 npm run typecheck
@@ -1184,13 +1350,14 @@ npm test
 node scripts/e8-cache-measure.mjs --self-test
 npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
 git diff --check
-git add src/index.ts src/prompt-notices.ts test/hooks.test.ts test/prompt-notices.test.ts \
-  scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+git add scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
   docs/design-spec-v2-production.md README.md CHANGELOG.md \
   docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
   docs/adr/0007-untrusted-memory-content.md
-git commit -m "feat: freeze E8 notices per prompt (E8-B)"
+git commit -m "docs: record E8-B frozen-bundle measurement"
 ```
+
+If the docs update changes `src/` or tests, that is a bug in this task: the implementation was committed in Step 3. Revert the stray change and re-run the focused tests.
 
 ---
 
@@ -1280,7 +1447,7 @@ If the result is "not measurable", do not close the issue; comment with the bloc
 | ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | Measured numbers for at least one caching provider, or "not measurable" and stays open/blocked | Tasks 2–5; §2.7                              |
 | No billed-token savings claim without measurement                                              | §2.1, §2.6, Task 5 Step 6; free-tier account |
-| Written keep/change/revert decision with rationale                                             | §2.6; Task 5 Step 7                          |
+| Written keep / attachment / E8-B / not-measurable decision with rationale                      | §2.6; Task 5 Step 7                          |
 | Tests and docs match the chosen placement                                                      | Task 6/7/8 per branch; Task 9 Step 2         |
 | If unchanged, accepting transcript visibility is explicit                                      | Task 5 Step 5; Task 6 Step 1; Task 9 Step 3  |
 | Two prompts, multi-tool turn, stable brief                                                     | §2.2, §2.3; Task 1 Steps 8–9; Task 4         |
