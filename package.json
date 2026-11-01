@@ -37,6 +37,10 @@
   "dependencies": {
     "@opencode/plugin": "2.0.29"
   },
+  "overrides": {
+    "glob": ">=14.0.2",
+    "minimatch": ">=11.0.1"
+  },
   "devDependencies": {
     "@opencode/schema": "2.0.29",
     "@types/node": "^26.6.5",
