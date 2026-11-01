@@ -191,7 +191,14 @@ Pool the valid pairs across both scenarios for the medians and sign counts, and 
 | loss           | reject               | **Change to attachment** (Task 7), then re-measure       |
 | ambiguous      | —                    | **Not measurable** (Task 5 Step 7; issue #22 stays open) |
 
-For a change branch, adopt the candidate only if its re-measurement is not worse than E8-A by more than `0.05` on the metric that drove the decision; otherwise record the regression and leave issue #22 open with the evidence. Do not silently revert to pre-E8: revert is not one of issue #22's three options.
+For a change branch, re-measure the candidate against **both** E8-A and pre-E8, then apply the adoption rule for the case that selected the branch:
+
+- **Cache win/neutral + UX reject → attachment.** Adopt the attachment only if `Δlater(attach − e8-a) ≥ −0.05` and `Δp2(attach − e8-a) ≥ −0.05` (it must not materially regress either metric relative to E8-A).
+- **Cache loss + any UX → E8-B or attachment.** Adopt the candidate only if it recovers the lost metric against pre-E8 by at least `+0.05` with at least `T` pairs positive on that comparison, and does not regress the other metric against E8-A by more than `0.05`:
+  - within-turn loss: `Δlater(candidate − pre-e8) ≥ +0.05` with at least `T` positive pairs, and `Δp2(candidate − e8-a) ≥ −0.05`;
+  - cross-prompt loss: `Δp2(candidate − pre-e8) ≥ +0.05` with at least `T` positive pairs, and `Δlater(candidate − e8-a) ≥ −0.05`.
+
+If the candidate fails any bound, record the regression and leave issue #22 open with the evidence. Do not silently revert to pre-E8: revert is not one of issue #22's three options.
 
 The UX checklist:
 
@@ -239,7 +246,6 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 **Files:**
 
 - Create: `scripts/e8-cache-measure.mjs`
-- Reference: `/tmp/opencode/e8-harness-draft.mjs` (tested draft; not committed)
 
 **Purpose:** Make the measurement reproducible and robust enough that a failed run is a provider/plugin failure, not a harness race.
 
@@ -519,10 +525,11 @@ With `--standalone`, no provider warm-up is needed. Do **not** add the draft's t
 
 1. Move the per-attempt `projectDir` construction **inside** the attempt loop and include the attempt: `<out>/projects/<scenario>-<variant>-r<rep>-a<attempt>`. Never reuse a directory across attempts; a stale server/plugin state was the draft's failure mode.
 2. `prepareProject`, write the measured salt, and hash the brief.
-3. `await runPrompt(...)` for prompt 1.
-4. `exportSession(...)` and `analyzeExport(...)`.
-5. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice. Pass `projectDir` into `validateRun` (or do the marker check in `runOne` immediately before validation); the function needs the path, not just the export summary.
-6. On a missing marker or any validation error, delete that attempt's project and retry with a new directory. The measured session stays until its export is saved.
+3. `await runPrompt(...)` for prompt 1 and keep its `sessionID`.
+4. `await runPrompt(projectDir, PROMPT_TWO, first.sessionID, model, opts)` for prompt 2 in the **same** session.
+5. Export the session once, after prompt 2, and `analyzeExport(...)` both prompts. Do not export between prompts for the measured run.
+6. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice. Pass `projectDir` into `validateRun` (or do the marker check in `runOne` immediately before validation); the function needs the path, not just the export summary.
+7. On a missing marker or any validation error, delete that attempt's project and retry with a new directory. The measured session stays until its export is saved.
 
 No warm-up session is allowed before the measured prompt: it would seed the provider cache and bias the first-call baseline. If a future host version requires a warm-up, run it in a separate disposable project and record the deviation.
 
@@ -1218,7 +1225,8 @@ Overwriting is the idempotency mechanism: the block is deterministic for the sam
 - `event.prompt.files` contains the INDEX URI and the notice URI;
 - the notice URI is not duplicated on a retry;
 - the pre-existing INDEX attachment logic is unchanged;
-- the file is written under `.opencode/memory/prompt-notices.md`.
+- the file is written under `.opencode/memory/prompt-notices.md`;
+- update the existing E8-A assertions (prompt-tail append, context-prefix stability, quoted-marker/budget cases) to the attachment placement; do not leave a test asserting the block is in `event.prompt.text`.
 
 Run:
 
@@ -1282,7 +1290,7 @@ Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps), with the `e8-a:e8
 
 - [ ] **Step 6: Update the docs with the second table and the final decision**
 
-Add the `e8-a:e8-attach` results to `docs/2026-10-27-e8-measurement.md` as a second table. Adopt the attachment only if it is not worse than E8-A by more than `0.05` on the pooled `Δlater` and `Δp2`; otherwise record the regression and leave issue #22 open with the evidence. Do not claim a win from the attachment if the cache regressed. Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
+Add the `e8-a:e8-attach` results to `docs/2026-10-27-e8-measurement.md` as a second table. Apply the §2.6 Step 4 adoption rule for the case that selected this branch (win/neutral + UX reject, or loss + UX reject). Do not restate a different threshold. If the attachment fails the rule, record the regression and leave issue #22 open with the evidence. Do not claim a win from the attachment if the cache regressed. Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
 
 - [ ] **Step 7: Run gates and commit the docs/harness**
 
@@ -1450,7 +1458,8 @@ Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX atta
 - the snapshot writer remains per-call (it may update the brief for the next prompt, but not the frozen bundle);
 - storage has one key per session, overwritten on prompt change;
 - with `injectBudgetLines - indexLines < 3`, a status notice is **not** consumed: it stays queued and can appear on a later prompt; the pointer is dropped first and a hint is retained;
-- repeated context calls for the same prompt do not bump `status.shown`/`hint.shown` twice (the frozen bundle is computed once).
+- repeated context calls for the same prompt do not bump `status.shown`/`hint.shown` twice (the frozen bundle is computed once);
+- update the existing E8-A assertions (prompt-tail append, context-prefix stability, quoted-marker/budget cases) and the `brief.injected`/`brief.lines`/`brief.empty` expectations to the frozen-bundle placement; do not leave a test asserting the prompt-tail block is appended to `event.prompt.text`.
 
 `test/prompt-notices.test.ts`:
 
@@ -1496,7 +1505,7 @@ Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps). If fewer than 5 o
 
 - [ ] **Step 5: Decide whether E8-B actually wins**
 
-Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. This is a **branch-specific adoption rule**, not the §2.6 gate: the `+0.05` bound is E8-B vs pre-E8, while the `−0.05` bound is E8-B vs E8-A. Compute `N`/`T` separately for each comparison; do not pool the two baselines. Adopt E8-B only if `Δlater(e8-b − pre-e8) ≥ +0.05` with at least `T` positive pairs and `Δp2(e8-b − e8-a) ≥ −0.05`; otherwise record that E8-B did not win and leave issue #22 open with the evidence. Record the cross-prompt trade-off explicitly. Do not claim a win from E8-B if the cache did not improve.
+Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. Apply the §2.6 Step 4 **loss-case** adoption rule (the `+0.05` bound is E8-B vs pre-E8; the `−0.05` bound is E8-B vs E8-A). Compute `N`/`T` separately for each comparison; do not pool the two baselines and do not restate a different threshold. If E8-B fails the rule, record that it did not win and leave issue #22 open with the evidence. Record the cross-prompt trade-off explicitly. Do not claim a win from E8-B if the cache did not improve.
 
 - [ ] **Step 6: Update the docs**
 
