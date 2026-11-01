@@ -26,3 +26,20 @@ Placement is implemented and covered by tests: the `context` system prefix carri
 - No claim that 237 session-total lines equals 237 billed tokens.
 - No claim that moving notices eliminated cache misses; only that the stable prefix is now separate from volatile tail bytes.
 - No production cache metric is added (ADR-0008 freezes the 45-name vocabulary).
+
+## Measurement results (2026-10-27 / 2026-11-01)
+
+A two-prompt, multi-tool measurement was run against `google/gemini-3.5-flash-lite` (Google AI Studio Free Tier) using the harness at `scripts/e8-cache-measure.mjs`. The measurement could not be completed: the Free Tier daily quota (500 requests/day) was exhausted after 6 valid runs / 2 valid pairs. Retry is possible after the quota resets (~17.5 hours).
+
+### Partial results (2 valid pairs, hint scenario only)
+
+| Metric | Median Δ | Positive/Negative |
+|--------|----------|-------------------|
+| Within-turn cache hit rate (Δlater) | +0.365 | 2/0 |
+| Cross-prompt cache hit rate (Δp2) | -0.006 | 0/2 |
+| Baseline-adjusted later read | +2016 tokens | — |
+| Baseline-adjusted p2 read | +1 token | — |
+
+All 6 valid runs: brief hashes match before/after. No billed-token claim is made (Free Tier).
+
+**Decision:** NOT MEASURABLE — free-tier daily quota prevented 5 valid pairs. Issue #22 stays open. See `docs/2026-10-27-e8-measurement.md` for full details.
