@@ -142,8 +142,7 @@ export function extractLatestUserText(input: unknown): string | undefined {
                 typeof part === "object" &&
                 part !== null &&
                 (part as Record<string, unknown>)["type"] === "text" &&
-                typeof (part as Record<string, unknown>)["text"] ===
-                  "string"
+                typeof (part as Record<string, unknown>)["text"] === "string"
                   ? [(part as Record<string, unknown>)["text"] as string]
                   : [],
               )
@@ -298,7 +297,7 @@ export async function matchIndex(
     ) {
       return undefined;
     }
-    return `[memory-hint] Past decisions mention \`${hit.term}\`. Call memory_recall("${hit.file}") for the why.`;
+    return `[memory-hint] Past decisions mention \`${hit.term}\`. The why is in \`${hit.file}\`.`;
   } catch {
     return undefined;
   }
