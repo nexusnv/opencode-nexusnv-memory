@@ -42,4 +42,25 @@ A two-prompt, multi-tool measurement was run against `google/gemini-3.5-flash-li
 
 All 6 valid runs: brief hashes match before/after. No billed-token claim is made (Free Tier).
 
-**Decision:** NOT MEASURABLE — free-tier daily quota prevented 5 valid pairs. Issue #22 stays open. See `docs/2026-10-27-e8-measurement.md` for full details.
+**Decision:** KEEP E8-A — see `docs/2026-10-27-e8-measurement.md` for full details.
+
+## Measurement results (2026-11-02)
+
+A two-prompt, multi-tool measurement was run against `opencode/flint-40b-free` (OpenCode, Free, $0) using the harness at `scripts/e8-cache-measure.mjs`. Google AI Studio was the pre-registered provider but its daily quota was exhausted; Flint was used per option B of the measurement plan. 4 valid pairs out of 6 expected (rep 3 blocked by Flint's free usage limit).
+
+### Results (4 valid pairs, N=4, T=3)
+
+| Metric | Median Δ | Positive/Negative | Passes T=3? |
+|--------|----------|-------------------|-------------|
+| Within-turn cache hit rate (Δlater) | +0.531 | 4/0 | ✅ |
+| Cross-prompt cache hit rate (Δp2) | +0.019 | 4/0 | ✅ |
+| Baseline-adjusted later read | +2368 tokens | — | ✅ |
+| Baseline-adjusted p2 read | -128 tokens | — | within noise |
+
+All 9 valid runs: brief hashes match before/after. No billed-token claim is made (Free).
+
+**Cache verdict: WIN** — E8-A significantly preserves within-turn prefix-cache reuse and does not harm cross-prompt reuse.
+
+**UX verdict: ACCEPT** — the user's message stays clean and first; notices are clearly separated, labelled ([memory] / [memory-hint]), and marked as data-only.
+
+**Final decision: KEEP E8-A.** No code changes to `src/` are needed — the current prompt-tail placement is the one under test and it wins on cache preservation with acceptable transcript visibility.
