@@ -67,14 +67,24 @@ This section is fixed **before** the full run. Do not change the metrics, scenar
 
 | Field              | Value                                                                                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider           | Google AI Studio / Gemini API (`google`)                                                                                                                      |
-| Model              | `google/gemini-3.5-flash-lite`                                                                                                                                |
+| Provider           | Google AI Studio / Gemini API (`google`) (pre-registered)                                                                                                     |
+| Model              | `google/gemini-3.5-flash-lite` (pre-registered)                                                                                                               |
 | Account tier       | **Free Tier** (evidence: 429 `generate_content_free_tier_requests`, limit 15 requests/minute)                                                                 |
-| OpenCode           | 2.1.4                                                                                                                                                         |
+| OpenCode           | 2.2.5                                                                                                                                                         |
 | Credential         | `GEMINI_API_KEY` in the environment; never write it to the repo or the measurement doc                                                                        |
-| Secondary provider | `opencode/deepseek-v4.1-flash-free` is rate-limited until roughly 2026-10-28; do not block the primary run on it. Record it as a follow-up, not a substitute. |
 
-One provider is enough for the issue. Do not generalize the result to OpenAI/Anthropic/DeepSeek; record them as unmeasured.
+**Provider deviation (2026-11-02):** The Google Free Tier daily quota (500 requests/day) was exhausted during the full run (6 valid runs / 2 pairs, then blocked ~17h). Per option B, the run was completed using **`opencode/flint-40b-free`** instead, which is a genuinely free ($0) prompt-caching provider. Flint was preflight-confirmed: turn 1 `cache.read: 256`, turn 2 `cache.read: 11,008` (cross-prompt reuse works), `cost: 0`, export format compatible (`info.tokens.cache.read/write`, per-message tokens, `outcome: "succeeded"`). Results below are Flint-specific, not Google-specific; this is recorded as a deviation from the pre-registered provider. Do not generalize to Google or other providers.
+
+| Field              | Value (actual run)                                                                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Provider           | OpenCode / Flint (`opencode`)                                                                                                                                 |
+| Model              | `opencode/flint-40b-free`                                                                                                                                     |
+| Account tier       | Free ($0; no billed-cost claim)                                                                                                                                 |
+| OpenCode           | 2.2.5                                                                                                                                                         |
+
+Secondary provider: `opencode/deepseek-v4.1-flash-free` is rate-limited until roughly 2026-10-28; do not block the primary run on it. Record it as a follow-up, not a substitute.
+
+One provider is enough for the issue. Do not generalize the result to OpenAI/Anthropic/DeepSeek/Google; record them as unmeasured.
 
 **Run date:** the plan was authored 2026-10-27. Use the actual date of the full run. If it differs, name the measurement doc `docs/<YYYY-MM-DD>-e8-measurement.md` and substitute that path throughout this plan; record the actual date in the doc, the spike update, and the PR.
 
@@ -241,13 +251,17 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 
 ## 4. Tasks
 
-**Status summary (2026-11-01):**
+**Status summary (2026-11-02):**
 - Task 1 (harness): COMPLETE — `scripts/e8-cache-measure.mjs` committed at `6f91295`
-- Task 2 (preflight): COMPLETE — model confirmed, `cache.read > 0` on second turn, free tier confirmed
+- Task 2 (preflight): COMPLETE — Flint confirmed: turn 1 `cache.read: 256`, turn 2 `cache.read: 11,008`, cost $0
 - Task 3 (smoke): COMPLETE — 1 valid pair, hint scenario, Δlater hit +0.365
-- Task 4 (full run): BLOCKED — free-tier daily quota (500 req/day) exhausted after 6 valid runs / 2 pairs; retry in ~17.5h
-- Task 5 (measurement doc): COMPLETE — `docs/2026-10-27-e8-measurement.md` written, decision: **not measurable**
-- Tasks 6-9: BLOCKED — awaiting quota reset and/or decision on measurement outcome
+- Task 4 (full run): COMPLETE — 4 valid pairs (2 hint + 2 status), Flint free usage limit blocked rep 3
+- Task 5 (measurement doc): COMPLETE — `docs/2026-10-27-e8-measurement.md` written
+- Task 6 (keep branch): SELECTED — cache verdict WIN (+0.531 Δlater, +0.019 Δp2), UX verdict ACCEPT → KEEP E8-A
+- Tasks 7/8 (change/E8-B): NOT NEEDED — KEEP selected
+- Task 9 (verification, changelog, PR): PENDING
+
+**Decision: KEEP E8-A** (see `docs/2026-10-27-e8-measurement.md`)
 
 ---
 
