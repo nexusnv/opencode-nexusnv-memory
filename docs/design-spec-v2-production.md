@@ -461,7 +461,7 @@ registrations.push(
     therefore depends on the model relaying it, as the `AGENTS.md` block instructs. This is
     best-effort, not a guaranteed user-visible notice.
 - `matchIndex(event)` = exact symbol/file/area match against INDEX only; returns ≤1 line
-  ``[memory-hint] Past decisions mention `X`. Call memory_recall("decisions.md") for the why.`` or
+  ``[memory-hint] Past decisions mention `X`. The why is in `decisions.md`.`` or
   `undefined`. Never fuzzy/semantic (ADR-0005, §5.10). **Input:** the latest user-authored text parsed
   from `event.prompt.text` in the `prompt` hook (`sessionID` is also on the event for throttle
   scoping); it is **throttled to once per prompt/session** via the ledger key

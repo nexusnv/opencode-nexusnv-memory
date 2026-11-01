@@ -781,7 +781,7 @@ describe("matchIndex", () => {
     expect(hint).toMatch(
       /^\[memory-hint\] Past decisions mention `auth-service`/,
     );
-    expect(hint).toContain('Call memory_recall("decisions.md")');
+    expect(hint).toContain("The why is in `decisions.md`");
     expect(hint!.split("\n")).toHaveLength(1);
   });
 
@@ -798,7 +798,7 @@ describe("matchIndex", () => {
         indexContent: index,
       },
     );
-    expect(hint).toContain('Call memory_recall("architecture.md")');
+    expect(hint).toContain("The why is in `architecture.md`");
   });
 
   it("defaults to decisions.md for lines without a structural stem", async () => {
@@ -811,7 +811,7 @@ describe("matchIndex", () => {
         indexContent: INDEX, // existing fixture: no structural stems
       },
     );
-    expect(hint).toContain('Call memory_recall("decisions.md")');
+    expect(hint).toContain("The why is in `decisions.md`");
   });
 
   it("throttles to once per prompt", async () => {
