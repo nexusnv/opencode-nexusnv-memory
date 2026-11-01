@@ -241,6 +241,16 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 
 ## 4. Tasks
 
+**Status summary (2026-11-01):**
+- Task 1 (harness): COMPLETE — `scripts/e8-cache-measure.mjs` committed at `6f91295`
+- Task 2 (preflight): COMPLETE — model confirmed, `cache.read > 0` on second turn, free tier confirmed
+- Task 3 (smoke): COMPLETE — 1 valid pair, hint scenario, Δlater hit +0.365
+- Task 4 (full run): BLOCKED — free-tier daily quota (500 req/day) exhausted after 6 valid runs / 2 pairs; retry in ~17.5h
+- Task 5 (measurement doc): COMPLETE — `docs/2026-10-27-e8-measurement.md` written, decision: **not measurable**
+- Tasks 6-9: BLOCKED — awaiting quota reset and/or decision on measurement outcome
+
+---
+
 ### Task 1: Promote the tested draft into `scripts/e8-cache-measure.mjs`
 
 **Files:**
