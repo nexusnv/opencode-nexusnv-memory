@@ -293,20 +293,27 @@ function assertCleanSrc() {
 }
 ```
 
-`git(args)` runs `git -C REPO_ROOT ...`; `sourceFor(variant, dest)` must produce exactly one variant's `src/*.ts` **directly under `dest`** (the archive contains a `src/` prefix; strip it with `--strip-components=1` or move the files):
+`git(args)` runs `git -C REPO_ROOT ...`; `sourceFor(variant, dest)` must produce exactly one variant's plugin sources:
 
 - `pre-e8`: `git archive --format=tar 7629611^ src`, extract into `dest`.
 - `e8-a`: `git archive --format=tar 8a1f2bb src`, extract into `dest`.
 - `e8-attach` / `e8-b`: copy the current working-tree `src/*.ts` into `dest` (only after `assertCleanSrc`).
 
-Patch both copied variants:
+OpenCode's server cannot load TypeScript plugins via its esbuild path
+("Unterminated string literal" build error), so `sourceFor` compiles the
+extracted `.ts` sources to plain JavaScript (into a `js/` subdirectory under
+`dest`) using the project's local `tsc`, then patches the compiled `.js`
+files. `prepareProject` copies the compiled `.js` files (not `.ts`) into
+`.opencode/plugins/memory/`.
 
-- `capture.ts`: insert `if (true) return false; // E8 measurement: disable handoff writer` immediately after the opening brace of `snapshotIfDue`.
-- `index.ts`: insert `await mkdir(join(projectRootOf(ctx), LOAD_MARKER), { recursive: true }).catch(() => {});` at the start of the prompt hook.
+Patch both compiled variants:
+
+- `capture.js`: insert `if (true) return false; // E8 measurement: disable handoff writer` immediately after the opening brace of `snapshotIfDue`.
+- `index.js`: insert `await mkdir(join(projectRootOf(ctx), LOAD_MARKER), { recursive: true }).catch(() => {});` at the start of the prompt hook.
 
 `prepareProject(projectDir, variantDir, scenario, salt)` must create:
 
-- `.opencode/plugins/memory/` with the variant's `.ts` files;
+- `.opencode/plugins/memory/` with the variant's compiled `.js` files;
 - `.opencode/opencode.jsonc` (Step 6);
 - `AGENTS.md` with `# E8 measurement fixture ${salt}` (Step 7);
 - `.opencode/memory/activeContext.md` with `- run salt: ${salt}`;
