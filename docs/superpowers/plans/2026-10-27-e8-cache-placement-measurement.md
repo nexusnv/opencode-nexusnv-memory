@@ -6,7 +6,7 @@
 
 **Architecture:** A dev-only Node harness creates two isolated OpenCode projects from the current `src/` and the pre-E8 source at `7629611^`, disables the handoff snapshot writer, denies skills/MCP so the model cannot wander, runs a two-prompt multi-tool session with `opencode run --standalone`, exports per-message token usage from `opencode session export`, and computes paired raw and baseline-adjusted cache metrics. The results go to a dated measurement doc; a pre-registered gate selects keep, attachment, or E8-B, and only the selected branch changes code/docs.
 
-**Tech Stack:** Node.js 20+, OpenCode CLI 2.1.4, `opencode session export` JSON, Google Gemini 3.5 Flash Lite via `GEMINI_API_KEY` (Google AI Studio **free tier**, observed 15 requests/minute), Vitest 5, TypeScript 5.9, Prettier. No new runtime dependency.
+**Tech Stack:** Node.js 20+, OpenCode CLI 2.2.5, `opencode session export` JSON, Google Gemini 3.5 Flash Lite via `GEMINI_API_KEY` (Google AI Studio **free tier**, observed 15 requests/minute), Vitest 5, TypeScript 5.9, Prettier. No new runtime dependency.
 
 **Branch:** `issue-22-e8-cache-placement` (already created from `origin/main` at `8a1f2bb`). `src/` is clean; no code or docs have been changed yet.
 
@@ -229,7 +229,7 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 **Create**
 
 - `scripts/e8-cache-measure.mjs` — dev-only measurement harness (Node, no deps). Not included in the npm package (`files` excludes `scripts/`; it stays a repo tool).
-- `docs/2026-10-27-e8-measurement.md` — dated protocol, raw usage tables, paired deltas, limitations, UX verdict, decision, follow-ups.
+- `docs/2026-11-02-e8-measurement.md` — dated protocol, raw usage tables, paired deltas, limitations, UX verdict, decision, follow-ups.
 
 **Modify (keep branch)**
 
@@ -256,13 +256,13 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 - Task 1 (harness): COMPLETE — `scripts/e8-cache-measure.mjs` committed at `6f91295`
 - Task 2 (preflight): COMPLETE — Flint confirmed: turn 1 `cache.read: 256`, turn 2 `cache.read: 11,008`, cost $0
 - Task 3 (smoke): COMPLETE — 1 valid pair, hint scenario, Δlater hit +0.365
-- Task 4 (full run): COMPLETE — 4 valid pairs (2 hint + 2 status), Flint free usage limit blocked rep 3
-- Task 5 (measurement doc): COMPLETE — `docs/2026-10-27-e8-measurement.md` written
-- Task 6 (keep branch): SELECTED — cache verdict WIN (+0.531 Δlater, +0.019 Δp2), UX verdict ACCEPT → KEEP E8-A
-- Tasks 7/8 (change/E8-B): NOT NEEDED — KEEP selected
-- Task 9 (verification, changelog, PR): PENDING
+- Task 4 (full run): PARTIAL — 4 valid pairs (2 hint + 2 status), Flint free usage limit blocked rep 3; below the §2.5 5-pair minimum
+- Task 5 (measurement doc): COMPLETE — `docs/2026-11-02-e8-measurement.md` written; result: not measurable (N=4 < 5)
+- Task 6 (keep branch): NOT SELECTED — §2.6 Step 1 stops at not measurable. Interim product decision: keep E8-A pending a complete ≥5-pair run; issue #22 stays open.
+- Tasks 7/8 (change/E8-B): NOT NEEDED — no branch selected
+- Task 9 (verification, changelog, PR): COMPLETE — typecheck, tests, audit, pack verified; changelog/README/ADRs updated; PR #27 carries the corrected record
 
-**Decision: KEEP E8-A** (see `docs/2026-10-27-e8-measurement.md`)
+**Measurement result: NOT MEASURABLE** (N=4 < 5). Interim product decision: KEEP E8-A. Issue #22 stays open. See `docs/2026-11-02-e8-measurement.md`
 
 ---
 
@@ -649,12 +649,15 @@ In `analyzeExport`, compute:
 
 ```js
 const laterCalls = prompt1Calls.slice(1);
-const laterCallCount = laterCalls.length;
-const laterCacheRead = sum(laterCalls, "cacheRead");
 const firstCacheRead = prompt1First?.cacheRead ?? 0;
-const p1LaterIncrementalRead = Math.max(
+const rawP1LaterIncrementalRead =
+  sum(laterCalls, "cacheRead") - firstCacheRead * laterCalls.length;
+// Floor each later call's cache-read difference at zero before summing, so
+// calls below the baseline do not offset calls above it. Keep the raw
+// aggregate subtraction separately as the raw result.
+const p1LaterIncrementalRead = laterCalls.reduce(
+  (total, call) => total + Math.max(0, call.cacheRead - firstCacheRead),
   0,
-  laterCacheRead - firstCacheRead * laterCallCount,
 );
 const p2FirstIncrementalRead = Math.max(
   0,
@@ -979,11 +982,11 @@ Do not commit the `/tmp` directory. If the doc needs a full raw table, paste the
 
 ---
 
-### Task 5: Write `docs/2026-10-27-e8-measurement.md` and apply the decision gate
+### Task 5: Write `docs/2026-11-02-e8-measurement.md` and apply the decision gate
 
 **Files:**
 
-- Create: `docs/2026-10-27-e8-measurement.md`
+- Create: `docs/2026-11-02-e8-measurement.md`
 - Modify: `docs/2026-10-20-e8-cache-placement-spike.md`
 
 - [ ] **Step 1: Write the header and method**
@@ -1004,7 +1007,7 @@ No billed-token savings claim is made; the account is free tier.
 - Provider: Google AI Studio / Gemini API (`google`)
 - Model: `google/gemini-3.5-flash-lite`
 - Account tier: Free Tier (15 requests/minute; 429 evidence recorded)
-- OpenCode: 2.1.4
+- OpenCode: 2.2.5
 - Repo HEAD: `<sha>`
 - Pre-E8 ref: `7629611^`
 - Harness: `scripts/e8-cache-measure.mjs` (`<sha256>`)
@@ -1112,7 +1115,7 @@ Change the status line to:
 
 Placement is implemented and covered by tests. Measured on 2026-10-27 against
 Google Gemini 3.5 Flash Lite (free tier): see
-[`2026-10-27-e8-measurement.md`](./2026-10-27-e8-measurement.md). Decision:
+[`2026-11-02-e8-measurement.md`](./2026-11-02-e8-measurement.md). Decision:
 <keep / change to attachment / change to E8-B / not measurable>. No billed-token
 claim. The line budget remains an uncached worst-case guardrail, not a
 billed-token metric.
@@ -1123,7 +1126,7 @@ Keep the measurement protocol section and the non-claims; add a one-line note th
 - [ ] **Step 9: Commit the measurement + spike doc**
 
 ```bash
-git add docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
+git add docs/2026-11-02-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
 git commit -m "docs: record E8 cache-placement measurement"
 ```
 
@@ -1152,7 +1155,7 @@ Replace the bullet that currently says the block is model-facing "not the user d
   transcript as part of that message. The server-plugin API exposes no separate
   UI/notification primitive, so delivery as a distinct alert still depends on
   the model relaying it; that remains best-effort. The placement was measured
-  on 2026-10-27 (`docs/2026-10-27-e8-measurement.md`) and kept: the block is
+  on 2026-10-27 (`docs/2026-11-02-e8-measurement.md`) and kept: the block is
   labelled data-only, capped at three lines, and keeps the stable system prefix
   free of volatile notices. The raw export shows the marker; rendered Markdown
   may hide the HTML comment. This visibility is an explicit, accepted trade-off,
@@ -1166,7 +1169,7 @@ If the UX verdict was "accept with a wording fix", describe the final marker/lab
 In the budget/eval section, after the 237-line sentence, add:
 
 ```markdown
-The 2026-10-27 measurement (`docs/2026-10-27-e8-measurement.md`) compared
+The 2026-10-27 measurement (`docs/2026-11-02-e8-measurement.md`) compared
 pre-E8 system placement with E8-A prompt-tail placement on Gemini 3.5 Flash
 Lite (free tier). It records token/cache fields and the UX verdict; it does not
 convert line counts into billed tokens. The account was free tier, so no
@@ -1181,7 +1184,7 @@ After the "It costs some context" bullet in the context/cost section, add:
 - The volatile `[memory]` notice block (newest-handoff pointer, status, hint) is
   appended to the user prompt itself, so it is visible in the transcript. It is
   capped at three labelled data-only lines. The 2026-10-27 measurement and the
-  visibility decision are recorded in `docs/2026-10-27-e8-measurement.md`.
+  visibility decision are recorded in `docs/2026-11-02-e8-measurement.md`.
 ```
 
 - [ ] **Step 4: Add the ADR measurement notes**
@@ -1190,7 +1193,7 @@ At the end of the E8 revision in each ADR, add one sentence:
 
 ```markdown
 Measurement (2026-10-27): compared with pre-E8 on Gemini 3.5 Flash Lite (free
-tier); see `docs/2026-10-27-e8-measurement.md`. The placement was kept and the
+tier); see `docs/2026-11-02-e8-measurement.md`. The placement was kept and the
 transcript visibility was accepted explicitly (or: changed to <option>).
 ```
 
@@ -1234,7 +1237,7 @@ Expected: all pass. Then re-run the smoke measurement (Task 3) to confirm the no
 ```bash
 npm run typecheck
 npm test
-npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md docs/adr/0007-untrusted-memory-content.md
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-11-02-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md docs/adr/0007-untrusted-memory-content.md
 git diff --check
 ```
 
@@ -1245,7 +1248,7 @@ Expected: typecheck clean, all tests pass, Prettier reports all files formatted,
 ```bash
 git add README.md CHANGELOG.md docs/design-spec-v2-production.md \
   docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
-  docs/adr/0007-untrusted-memory-content.md docs/2026-10-27-e8-measurement.md
+  docs/adr/0007-untrusted-memory-content.md docs/2026-11-02-e8-measurement.md
 git commit -m "docs: keep E8 prompt-tail placement after measurement"
 ```
 
@@ -1411,7 +1414,7 @@ Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps), with the `e8-a:e8
 
 - [ ] **Step 6: Update the docs with the second table and the final decision**
 
-Add the `e8-a:e8-attach` results to `docs/2026-10-27-e8-measurement.md` as a second table. Apply the §2.6 Step 4 adoption rule for the case that selected this branch (win/neutral + UX reject, or loss + UX reject). Do not restate a different threshold. If the attachment fails the rule, record the regression and leave issue #22 open with the evidence. Do not claim a win from the attachment if the cache regressed. Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
+Add the `e8-a:e8-attach` results to `docs/2026-11-02-e8-measurement.md` as a second table. Apply the §2.6 Step 4 adoption rule for the case that selected this branch (win/neutral + UX reject, or loss + UX reject). Do not restate a different threshold. If the attachment fails the rule, record the regression and leave issue #22 open with the evidence. Do not claim a win from the attachment if the cache regressed. Spec §5.2: the volatile block is an attached `prompt-notices.md` file, not user text; the user's message stays clean; the attachment is visible in the UI as a file. README: same. ADR-0002/0004/0007: add a new revision "2026-10-27 — attachment-based notices" with the reason (UX rejection of user-text visibility) and the cache result. CHANGELOG: the change.
 
 - [ ] **Step 7: Run gates and commit the docs/harness**
 
@@ -1419,9 +1422,9 @@ Add the `e8-a:e8-attach` results to `docs/2026-10-27-e8-measurement.md` as a sec
 npm run typecheck
 npm test
 node scripts/e8-cache-measure.mjs --self-test
-npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-11-02-e8-measurement.md
 git diff --check
-git add scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+git add scripts/e8-cache-measure.mjs docs/2026-11-02-e8-measurement.md \
   docs/design-spec-v2-production.md README.md CHANGELOG.md \
   docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
   docs/adr/0007-untrusted-memory-content.md
@@ -1630,7 +1633,7 @@ Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. Apply
 
 - [ ] **Step 6: Update the docs**
 
-Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no within-turn churn) but a new prompt can still invalidate history; the prompt text stays clean. README: same, plus the trade-off. ADR-0002/0004/0007: a new 2026-10-27 revision explaining why E8-A was not kept and what E8-B changes. CHANGELOG: the change. Add the E8-B comparison table and the adoption/rejection verdict to `docs/2026-10-27-e8-measurement.md`.
+Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no within-turn churn) but a new prompt can still invalidate history; the prompt text stays clean. README: same, plus the trade-off. ADR-0002/0004/0007: a new 2026-10-27 revision explaining why E8-A was not kept and what E8-B changes. CHANGELOG: the change. Add the E8-B comparison table and the adoption/rejection verdict to `docs/2026-11-02-e8-measurement.md`.
 
 - [ ] **Step 7: Run gates and commit the docs/harness**
 
@@ -1638,9 +1641,9 @@ Spec §5.2: E8-B is the fallback; the system prefix is frozen per prompt (no wit
 npm run typecheck
 npm test
 node scripts/e8-cache-measure.mjs --self-test
-npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-11-02-e8-measurement.md
 git diff --check
-git add scripts/e8-cache-measure.mjs docs/2026-10-27-e8-measurement.md \
+git add scripts/e8-cache-measure.mjs docs/2026-11-02-e8-measurement.md \
   docs/design-spec-v2-production.md README.md CHANGELOG.md \
   docs/adr/0002-agents-md-injection.md docs/adr/0004-ledger-and-promotion.md \
   docs/adr/0007-untrusted-memory-content.md
@@ -1662,7 +1665,7 @@ npm run typecheck
 npm test
 npm run test:coverage
 node scripts/e8-cache-measure.mjs --self-test
-npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
+npx prettier --check README.md CHANGELOG.md docs/design-spec-v2-production.md docs/2026-11-02-e8-measurement.md docs/2026-10-20-e8-cache-placement-spike.md
 git diff --check
 ```
 
@@ -1684,7 +1687,7 @@ Check each of these against the actual code:
 Search for the word "visible" in the spec/README/measurement doc:
 
 ```bash
-grep -n "transcript\|visible\|visibility" README.md docs/design-spec-v2-production.md docs/2026-10-27-e8-measurement.md
+grep -n "transcript\|visible\|visibility" README.md docs/design-spec-v2-production.md docs/2026-11-02-e8-measurement.md
 ```
 
 Expected: a clear sentence in each surface that the prompt-tail block is visible (keep), the user text is clean (attachment), or the system bundle is repeated (E8-B). No "model-facing only" wording that implies the user cannot see it.
@@ -1693,7 +1696,7 @@ Expected: a clear sentence in each surface that the prompt-tail block is visible
 
 ```bash
 grep -RniE "api[_-]?key|authorization|bearer|GEMINI_API_KEY=[^<]" \
-  docs/2026-10-27-e8-measurement.md scripts/e8-cache-measure.mjs || true
+  docs/2026-11-02-e8-measurement.md scripts/e8-cache-measure.mjs || true
 ```
 
 Expected: no key values. The word `GEMINI_API_KEY` in a command is fine only when it is an env reference, not a value. The raw exports contain only fixture text and token fields; do not commit them.
