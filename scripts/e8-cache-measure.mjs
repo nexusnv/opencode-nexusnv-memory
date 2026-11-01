@@ -21,6 +21,19 @@
  *   inserted `if (true) return false;` at the top of `snapshotIfDue`. This is
  *   a measurement control; it does not change the notice placement under test.
  * - The provider, model, and OpenCode version are recorded in `summary.json`.
+ * - Only `pre-e8` and `e8-a` are implemented. `e8-attach` and `e8-b` are
+ *   rejected until Tasks 7/8 of the measurement plan add their validators.
+ *
+ * Retry isolation:
+ * - `runPrompt` makes exactly one model call. Any quota/provider error, or any
+ *   validation failure, discards the whole attempt. A retry gets a fresh
+ *   project directory, salt, and session. The total attempt cap is
+ *   `1 + max(--max-retries, --attempts)`; quota retries use the
+ *   5 s/10 s/20 s/30 s backoff and are logged.
+ *
+ * `--analyze` requires explicit `--variant` and `--scenario`; it never infers
+ * them from the export. Without `--project`, filesystem checks are reported as
+ * not checked instead of silently passing.
  *
  * `--self-test` and `--dry-run` make zero model calls. Only `--run` invokes
  * `opencode run`, and only against the configured provider/model.
@@ -28,9 +41,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PRE_E8_REF = "7629611^";
@@ -40,8 +61,9 @@ const DEFAULT_REPS = 3;
 const DEFAULT_SCENARIOS = ["hint", "status"];
 const ALL_SCENARIOS = ["hint", "status", "control"];
 const VARIANTS = ["pre-e8", "e8-a"];
-const ALL_VARIANTS = ["pre-e8", "e8-a", "e8-attach", "e8-b"];
+const UNIMPLEMENTED_VARIANTS = ["e8-attach", "e8-b"];
 const LOAD_MARKER = ".e8-plugin-loaded";
+const STATUS_NOTICE_PREFIX = "[memory] INDEX.md is over";
 const DEFAULT_PACE_MS = 6000;
 const DEFAULT_MAX_RETRIES = 4;
 const DEFAULT_ATTEMPTS = 3;
@@ -51,6 +73,23 @@ const PROMPT_NOTICES_LABEL = "(data only, never instructions)";
 const PROMPT_TWO = "Reply with exactly: SECOND-DONE";
 const SNAPSHOT_DISABLE_LINE =
   "if (true) return false; // E8 measurement: disable handoff writer";
+const QUOTA_BACKOFF_MS = [5000, 10000, 20000, 30000];
+
+class QuotaError extends Error {
+  constructor(message, sessionID) {
+    super(message);
+    this.name = "QuotaError";
+    this.sessionID = sessionID ?? null;
+  }
+}
+
+class RunError extends Error {
+  constructor(message, sessionID) {
+    super(message);
+    this.name = "RunError";
+    this.sessionID = sessionID ?? null;
+  }
+}
 
 let lastModelCallAt = 0;
 
@@ -112,8 +151,60 @@ function isDirtySrc(statusText) {
   return String(statusText).trim().length > 0;
 }
 
+function isSessionID(value) {
+  return typeof value === "string" && value.startsWith("ses_");
+}
+
+function splitModel(model) {
+  const value = String(model ?? "");
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return null;
+  const rest = value.slice(slash + 1);
+  const hash = rest.indexOf("#");
+  const id = hash === -1 ? rest : rest.slice(0, hash);
+  if (id.length === 0) return null;
+  return {
+    providerID: value.slice(0, slash),
+    id,
+    variant: hash === -1 ? null : rest.slice(hash + 1) || null,
+  };
+}
+
+function isPathUnder(root, target) {
+  const resolvedRoot = resolve(root);
+  const resolvedTarget = resolve(root, target);
+  const rel = relative(resolvedRoot, resolvedTarget);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function tableCell(value) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/\|/g, "\\|")
+    .trim();
+}
+
+function pairThreshold(count) {
+  return count > 0 ? Math.ceil((2 * count) / 3) : 0;
+}
+
 function check(condition, message) {
   if (!condition) throw new Error(`self-test failed: ${message}`);
+}
+
+function validationState(errors, notChecked) {
+  if ((errors?.length ?? 0) > 0) return "invalid";
+  if ((notChecked?.length ?? 0) > 0) return "not-checked";
+  return "valid";
+}
+
+function isValidRun(run) {
+  if (!run) return false;
+  if (run.validationStatus) return run.validationStatus === "valid";
+  return (
+    (run.validationErrors?.length ?? 0) === 0 &&
+    (run.validationNotChecked?.length ?? 0) === 0
+  );
 }
 
 function git(args) {
@@ -203,7 +294,7 @@ function exportSession(
 }
 
 function deleteSession(sessionID, out, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  if (!sessionID) return;
+  if (!isSessionID(sessionID)) return;
   try {
     runCli(["session", "delete", sessionID], {
       cwd: REPO_ROOT,
@@ -237,9 +328,7 @@ function makeSalt(seed) {
 }
 
 function providerFromModel(model) {
-  const value = String(model ?? "");
-  const slash = value.indexOf("/");
-  return slash > 0 ? value.slice(0, slash) : null;
+  return splitModel(model)?.providerID ?? null;
 }
 
 async function ensureIsolatedRoots(out) {
@@ -318,17 +407,8 @@ async function sourceFor(variant, dest) {
         `tar extraction failed (${extracted.status}): ${String(extracted.stderr ?? "")}`,
       );
     }
-  } else if (variant === "e8-attach" || variant === "e8-b") {
-    assertCleanSrc();
-    const sourceDir = join(REPO_ROOT, "src");
-    const names = (await readdir(sourceDir))
-      .filter((name) => name.endsWith(".ts"))
-      .sort();
-    for (const name of names) {
-      await cp(join(sourceDir, name), join(dest, name));
-    }
   } else {
-    throw new Error(`unknown variant: ${variant}`);
+    throw new Error(`variant ${variant} is not implemented until Task 7/8`);
   }
 
   if (!existsSync(join(dest, "index.ts"))) {
@@ -372,6 +452,93 @@ function promptOne(scenario, projectDir) {
   );
 }
 
+function parsePromptCore(text, scenario) {
+  const value = String(text ?? "");
+  const prefix =
+    scenario === "hint" ? "Context: auth-service login. " : "Context: ";
+  if (!value.startsWith(prefix)) return null;
+  const rest = value.slice(prefix.length);
+  const match =
+    /^Use the read tool to read (.+?)\/alpha\.txt, then use the read tool to read (.+?)\/beta\.txt\. Then answer in one sentence\./.exec(
+      rest,
+    );
+  if (!match || match[1] !== match[2]) return null;
+  return {
+    projectDir: match[1],
+    core: `${prefix}${match[0]}`,
+    suffix: rest.slice(match[0].length),
+  };
+}
+
+function hasNumericTokens(tokens) {
+  if (!tokens || typeof tokens !== "object") return false;
+  for (const key of ["input", "output"]) {
+    if (typeof tokens[key] !== "number" || !Number.isFinite(tokens[key])) {
+      return false;
+    }
+    if (tokens[key] < 0) return false;
+  }
+  if (!tokens.cache || typeof tokens.cache !== "object") return false;
+  for (const key of ["read", "write"]) {
+    if (
+      typeof tokens.cache[key] !== "number" ||
+      !Number.isFinite(tokens.cache[key])
+    ) {
+      return false;
+    }
+    if (tokens.cache[key] < 0) return false;
+  }
+  return true;
+}
+
+function fileURIs(message) {
+  const files = Array.isArray(message?.files) ? message.files : [];
+  const uris = [];
+  for (const file of files) {
+    if (typeof file === "string") {
+      uris.push(file);
+      continue;
+    }
+    // `opencode session export` stores attachments as
+    // `{ source: { type: "uri", uri } }`; the plugin prompt event uses
+    // `{ uri }`. Accept both so the check is against the export shape.
+    const uri = file?.source?.uri ?? file?.uri;
+    if (typeof uri === "string" && uri.length > 0) uris.push(uri);
+  }
+  return uris;
+}
+
+async function briefFilesFor(projectDir) {
+  const memoryDir = join(projectDir, ".opencode", "memory");
+  return [
+    join(memoryDir, "activeContext.md"),
+    join(memoryDir, "INDEX.md"),
+    ...(await readdir(join(memoryDir, "handoffs")))
+      .filter((name) => name.endsWith(".md"))
+      .sort()
+      .map((name) => join(memoryDir, "handoffs", name)),
+  ];
+}
+
+async function readBriefTextsFor(projectDir) {
+  const files = await briefFilesFor(projectDir);
+  return Promise.all(
+    files.map(async (file) => (await readFile(file)).toString("utf8")),
+  );
+}
+
+function hashTexts(texts) {
+  return createHash("sha256").update(texts.join("\n")).digest("hex");
+}
+
+async function briefSnapshot(projectDir) {
+  const texts = await readBriefTextsFor(projectDir);
+  return {
+    hash: hashTexts(texts),
+    lineCount: texts.join("\n").split("\n").length,
+  };
+}
+
 async function prepareProject(projectDir, variantDir, scenario, salt) {
   const out = dirname(dirname(projectDir));
   await ensureIsolatedRoots(out);
@@ -399,6 +566,8 @@ async function prepareProject(projectDir, variantDir, scenario, salt) {
       { action: "shell", resource: "*", effect: "deny" },
       { action: "edit", resource: "*", effect: "deny" },
       { action: "write", resource: "*", effect: "deny" },
+      { action: "webfetch", resource: "*", effect: "deny" },
+      { action: "websearch", resource: "*", effect: "deny" },
     ],
     policies: [
       { action: "integration.use", resource: "skill:*", effect: "deny" },
@@ -445,6 +614,7 @@ async function prepareProject(projectDir, variantDir, scenario, salt) {
 }
 
 async function runPrompt(projectDir, prompt, sessionID, model, opts) {
+  await pace(opts.paceMs);
   const args = [
     "run",
     "--standalone",
@@ -457,133 +627,219 @@ async function runPrompt(projectDir, prompt, sessionID, model, opts) {
   if (sessionID) args.push("--session", sessionID);
   args.push(prompt);
 
-  for (let attempt = 1; attempt <= opts.maxRetries + 1; attempt += 1) {
-    await pace(opts.paceMs);
-    const result = runCli(args, {
-      cwd: projectDir,
-      out: opts.out,
-      timeoutMs: opts.timeoutMs,
-    });
-    const events = parseJsonLines(result.stdout);
-    const error = events.find((event) => event?.type === "error");
-    const combined = `${result.stdout}\n${result.stderr}`;
-    if ((error || result.status !== 0) && isQuotaError(combined)) {
-      if (attempt > opts.maxRetries) {
-        throw new Error(
-          `quota retries exhausted: ${error?.error?.message ?? String(result.stderr).slice(-2000)}`,
-        );
-      }
-      const wait = [5000, 10000, 20000, 30000][attempt - 1] ?? 30000;
-      console.warn(`[pace] quota error; retrying in ${wait} ms`);
-      await new Promise((resolveWait) => setTimeout(resolveWait, wait));
-      continue;
-    }
-    if (result.status !== 0) {
-      throw new Error(
-        `opencode run failed (${result.status}): ${String(result.stderr).slice(-2000)}\n${String(result.stdout).slice(-4000)}`,
-      );
-    }
-    const session = sessionID ?? sessionIDFromEvents(events);
-    if (!session) throw new Error("opencode run produced no sessionID");
-    return { sessionID: session, stdout: result.stdout, stderr: result.stderr };
+  const result = runCli(args, {
+    cwd: projectDir,
+    out: opts.out,
+    timeoutMs: opts.timeoutMs,
+  });
+  const events = parseJsonLines(result.stdout);
+  const error = events.find((event) => event?.type === "error");
+  const session = sessionID ?? sessionIDFromEvents(events);
+  const combined = `${result.stdout}\n${result.stderr}`;
+  if (error) {
+    const message =
+      error.error?.message ?? error.message ?? "opencode run error event";
+    throw isQuotaError(combined)
+      ? new QuotaError(message, session)
+      : new RunError(message, session);
   }
-  throw new Error("opencode run exhausted retries without a result");
+  if (result.status !== 0) {
+    throw new RunError(
+      `opencode run failed (${result.status}): ${String(result.stderr).slice(-2000)}\n${String(result.stdout).slice(-4000)}`,
+      session,
+    );
+  }
+  if (!session) {
+    throw new RunError("opencode run produced no sessionID", null);
+  }
+  return { sessionID: session, stdout: result.stdout, stderr: result.stderr };
 }
 
-async function runOne({
-  scenario,
-  rep,
-  variant,
-  attempt,
-  variantDir,
-  model,
-  opts,
-}) {
+async function runOne({ scenario, rep, variant, variantDir, model, opts }) {
   const out = resolve(opts.out);
-  const projectDir = join(
-    out,
-    "projects",
-    `${scenario}-${variant}-r${rep}-a${attempt}`,
-  );
-  const salt = makeSalt(
-    `${scenario}:${variant}:${rep}:${attempt}:${projectDir}`,
-  );
-  await prepareProject(projectDir, variantDir, scenario, salt);
+  const maxAttempts = 1 + Math.max(opts.maxRetries, opts.attempts);
+  const attempts = [];
+  let quotaRetries = 0;
+  let otherRetries = 0;
+  let validRun = null;
 
-  const memoryDir = join(projectDir, ".opencode", "memory");
-  const briefFiles = [
-    join(memoryDir, "activeContext.md"),
-    join(memoryDir, "INDEX.md"),
-    ...(await readdir(join(memoryDir, "handoffs")))
-      .filter((name) => name.endsWith(".md"))
-      .sort()
-      .map((name) => join(memoryDir, "handoffs", name)),
-  ];
-  const readBriefTexts = async () =>
-    Promise.all(
-      briefFiles.map(async (file) => (await readFile(file)).toString("utf8")),
-    );
-  const hashTexts = (texts) =>
-    createHash("sha256").update(texts.join("\n")).digest("hex");
-
-  const briefTextsBefore = await readBriefTexts();
-  const briefLineCount = briefTextsBefore.join("\n").split("\n").length;
-  const briefHashBefore = hashTexts(briefTextsBefore);
-  let sessionID = null;
-  try {
-    const first = await runPrompt(
-      projectDir,
-      promptOne(scenario, projectDir),
-      undefined,
-      model,
-      opts,
-    );
-    sessionID = first.sessionID;
-    await runPrompt(projectDir, PROMPT_TWO, sessionID, model, opts);
-    const exportData = exportSession(
-      projectDir,
-      sessionID,
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const projectDir = join(
       out,
-      opts.timeoutMs,
+      "projects",
+      `${scenario}-${variant}-r${rep}-a${attempt}`,
     );
-    const briefHashAfter = hashTexts(await readBriefTexts());
-    const rawPath = join(out, "raw", `${scenario}-${variant}-r${rep}.json`);
-    const run = analyzeExport(exportData, {
-      scenario,
-      rep,
-      variant,
-      attempt,
-      sessionID,
-      projectDir,
-      salt,
-      model,
-      briefHashBefore,
-      briefHashAfter,
-      briefLineCount,
-      rawPath,
-    });
-    run.validationErrors = validateRun(
-      run,
-      exportData,
-      projectDir,
-      variant,
-      scenario,
+    const salt = makeSalt(
+      `${scenario}:${variant}:${rep}:${attempt}:${projectDir}`,
     );
-    const savePath =
-      run.validationErrors.length === 0
+    let sessionID = null;
+    let attemptRecord = null;
+    let retryKind = null;
+    let run = null;
+
+    try {
+      await prepareProject(projectDir, variantDir, scenario, salt);
+      const before = await briefSnapshot(projectDir);
+      const first = await runPrompt(
+        projectDir,
+        promptOne(scenario, projectDir),
+        undefined,
+        model,
+        opts,
+      );
+      sessionID = first.sessionID;
+      await runPrompt(projectDir, PROMPT_TWO, sessionID, model, opts);
+      const exportData = exportSession(
+        projectDir,
+        sessionID,
+        out,
+        opts.timeoutMs,
+      );
+      const after = await briefSnapshot(projectDir);
+      const rawPath = join(out, "raw", `${scenario}-${variant}-r${rep}.json`);
+      run = analyzeExport(exportData, {
+        scenario,
+        rep,
+        variant,
+        attempt,
+        sessionID,
+        projectDir,
+        salt,
+        model,
+        requestedModel: model,
+        briefHashBefore: before.hash,
+        briefHashAfter: after.hash,
+        briefLineCount: before.lineCount,
+        rawPath,
+      });
+      const validation = validateRun(
+        run,
+        exportData,
+        projectDir,
+        variant,
+        scenario,
+      );
+      run.validationErrors = validation.errors;
+      run.validationNotChecked = validation.notChecked;
+      run.validationStatus = validationState(
+        validation.errors,
+        validation.notChecked,
+      );
+      run.validationComplete = run.validationStatus === "valid";
+      const savePath = run.validationComplete
         ? rawPath
         : join(
             out,
             "raw",
             `invalid-${scenario}-${variant}-r${rep}-a${attempt}.json`,
           );
-    run.rawPath = savePath;
-    await writeFile(savePath, `${JSON.stringify(exportData, null, 2)}\n`);
-    return { run, errors: run.validationErrors, projectDir };
-  } catch (error) {
-    if (sessionID) error.sessionID = sessionID;
-    throw error;
+      run.rawPath = savePath;
+      await writeFile(savePath, `${JSON.stringify(exportData, null, 2)}\n`);
+
+      if (run.validationComplete) {
+        attempts.push({
+          scenario,
+          rep,
+          variant,
+          attempt,
+          projectDir,
+          sessionID,
+          status: "valid",
+          errors: [],
+          rawPath: savePath,
+        });
+        if (!opts.keepProjects) {
+          await rm(projectDir, { recursive: true, force: true }).catch(
+            (error) => {
+              console.warn(
+                `[cleanup] could not remove ${projectDir}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            },
+          );
+        }
+        // Break, not return: the run is only promoted after cleanup so a
+        // cleanup failure cannot cause a duplicate measurement.
+        validRun = run;
+        break;
+      }
+
+      attemptRecord = {
+        scenario,
+        rep,
+        variant,
+        attempt,
+        projectDir,
+        sessionID,
+        status: "invalid",
+        errors: [
+          ...validation.errors,
+          ...validation.notChecked.map((item) => `not checked: ${item}`),
+        ],
+        rawPath: savePath,
+      };
+      retryKind = "validation";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const errorSession =
+        error instanceof QuotaError || error instanceof RunError
+          ? error.sessionID
+          : null;
+      const attemptSession = errorSession ?? sessionID;
+      attemptRecord = {
+        scenario,
+        rep,
+        variant,
+        attempt,
+        projectDir,
+        sessionID: attemptSession,
+        status: "error",
+        errors: [message],
+      };
+      retryKind = error instanceof QuotaError ? "quota" : "other";
+    }
+
+    attempts.push(attemptRecord);
+    if (attemptRecord.sessionID) {
+      deleteSession(attemptRecord.sessionID, out, opts.timeoutMs);
+    }
+    if (!opts.keepProjects) {
+      await rm(projectDir, { recursive: true, force: true }).catch((error) => {
+        console.warn(
+          `[cleanup] could not remove ${projectDir}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+
+    if (attemptRecord.status === "invalid") {
+      console.warn(
+        `[invalid] ${scenario}/${variant} rep ${rep} attempt ${attempt}: ${attemptRecord.errors.join("; ")}`,
+      );
+    } else {
+      console.warn(
+        `[failed] ${scenario}/${variant} rep ${rep} attempt ${attempt}: ${attemptRecord.errors.join("; ")}`,
+      );
+    }
+
+    if (attempt >= maxAttempts) break;
+    if (retryKind === "quota") {
+      if (quotaRetries >= opts.maxRetries) break;
+      quotaRetries += 1;
+      const wait = QUOTA_BACKOFF_MS[quotaRetries - 1] ?? 30000;
+      console.warn(
+        `[pace] quota error; retrying in ${wait} ms (attempt ${attempt + 1}/${maxAttempts})`,
+      );
+      await new Promise((resolveWait) => setTimeout(resolveWait, wait));
+    } else {
+      if (otherRetries >= opts.attempts) break;
+      otherRetries += 1;
+    }
   }
+
+  return {
+    run: validRun,
+    attempts,
+    failure: validRun ? null : (attempts[attempts.length - 1] ?? null),
+  };
 }
 
 async function runMeasurement(opts) {
@@ -594,11 +850,15 @@ async function runMeasurement(opts) {
   await mkdir(join(out, "raw"), { recursive: true });
   await mkdir(join(out, "projects"), { recursive: true });
 
+  const now = new Date().toISOString();
+  const provider = providerFromModel(opts.model);
   const meta = {
-    generatedAt: new Date().toISOString(),
-    provider: providerFromModel(opts.model),
+    generatedAt: now,
+    date: now,
+    provider,
     model: opts.model,
-    accountTier: "Google AI Studio Free Tier",
+    accountTier:
+      provider === "google" ? "Google AI Studio Free Tier" : "unknown",
     opencodeVersion: opencodeVersion(out),
     repoHead: git(["rev-parse", "HEAD"]),
     preE8Ref: PRE_E8_REF,
@@ -625,91 +885,35 @@ async function runMeasurement(opts) {
 
   const runs = [];
   const failures = [];
+  const attempts = [];
 
   for (let rep = 1; rep <= opts.reps; rep += 1) {
     for (const scenario of opts.scenarios) {
       for (const variant of opts.variants) {
-        const attemptFailures = [];
-        let succeeded = false;
-
-        for (let attempt = 1; attempt <= opts.attempts; attempt += 1) {
-          const projectDir = join(
-            out,
-            "projects",
-            `${scenario}-${variant}-r${rep}-a${attempt}`,
-          );
-          try {
-            const result = await runOne({
-              scenario,
-              rep,
-              variant,
-              attempt,
-              variantDir: variantDirs.get(variant),
-              model: opts.model,
-              opts,
-            });
-            if (result.errors.length === 0) {
-              runs.push(result.run);
-              succeeded = true;
-              if (!opts.keepProjects) {
-                await rm(projectDir, { recursive: true, force: true });
-              }
-              break;
-            }
-            const error = result.errors.join("; ");
-            attemptFailures.push({
-              attempt,
-              error,
-              validationErrors: result.errors,
-              sessionID: result.run.sessionID,
-              projectDir,
-              rawPath: result.run.rawPath,
-            });
-            console.warn(
-              `[invalid] ${scenario}/${variant} rep ${rep} attempt ${attempt}: ${error}`,
-            );
-            deleteSession(result.run.sessionID, out, opts.timeoutMs);
-            if (!opts.keepProjects) {
-              await rm(projectDir, { recursive: true, force: true });
-            }
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            attemptFailures.push({
-              attempt,
-              error: message,
-              validationErrors: [],
-              sessionID: error?.sessionID ?? null,
-              projectDir,
-              rawPath: null,
-            });
-            console.warn(
-              `[failed] ${scenario}/${variant} rep ${rep} attempt ${attempt}: ${message}`,
-            );
-            if (error?.sessionID) {
-              deleteSession(error.sessionID, out, opts.timeoutMs);
-            }
-            if (!opts.keepProjects) {
-              await rm(projectDir, { recursive: true, force: true });
-            }
-          }
-        }
-
-        if (!succeeded) {
-          const last = attemptFailures[attemptFailures.length - 1];
+        const result = await runOne({
+          scenario,
+          rep,
+          variant,
+          variantDir: variantDirs.get(variant),
+          model: opts.model,
+          opts,
+        });
+        attempts.push(...result.attempts);
+        if (result.run) {
+          runs.push(result.run);
+        } else if (result.failure) {
+          const last = result.failure;
           failures.push({
             scenario,
             rep,
             variant,
-            attempt: last?.attempt ?? null,
-            error: attemptFailures
-              .map((failure) => `attempt ${failure.attempt}: ${failure.error}`)
-              .join(" | "),
-            validationErrors: last?.validationErrors ?? [],
-            sessionID: last?.sessionID ?? null,
-            projectDir: last?.projectDir ?? null,
-            rawPath: last?.rawPath ?? null,
-            attempts: attemptFailures,
+            attempt: last.attempt ?? null,
+            error: (last.errors ?? []).join("; "),
+            validationErrors: last.errors ?? [],
+            sessionID: last.sessionID ?? null,
+            projectDir: last.projectDir ?? null,
+            rawPath: last.rawPath ?? null,
+            attempts: result.attempts,
           });
         }
       }
@@ -719,6 +923,7 @@ async function runMeasurement(opts) {
   const report = buildReport({
     runs,
     failures,
+    attempts,
     comparisons: opts.comparisons,
     meta,
     scenarios: opts.scenarios,
@@ -729,10 +934,17 @@ async function runMeasurement(opts) {
   await writeFile(reportPath, renderReport(report));
 
   console.log(
-    `measurement complete: ${runs.length} valid runs, ${failures.length} failures, ${report.pairs.length} pairs`,
+    `measurement complete: ${runs.length} valid runs, ${failures.length} exhausted scenarios, ${attempts.length} attempts, ${report.pairs.length} pairs`,
   );
   console.log(`summary: ${summaryPath}`);
   console.log(`report: ${reportPath}`);
+
+  if (report.comparisonErrors.length > 0) {
+    for (const error of report.comparisonErrors) {
+      console.error(`comparison error: ${error}`);
+    }
+    process.exitCode = 1;
+  }
 }
 
 function noticeInfo(text) {
@@ -741,15 +953,22 @@ function noticeInfo(text) {
   const noticeLines = lines.filter(
     (line) => line.startsWith("[memory]") || line.startsWith("[memory-hint]"),
   );
+  const handoffLines = lines.filter((line) =>
+    line.startsWith("[memory] handoff:"),
+  );
+  const hintLines = lines.filter((line) => line.startsWith("[memory-hint]"));
+  const statusLines = lines.filter((line) =>
+    line.startsWith(STATUS_NOTICE_PREFIX),
+  );
   return {
     marker: value.includes(PROMPT_NOTICES_MARKER),
     label: value.includes(PROMPT_NOTICES_LABEL),
-    hint: lines.some((line) => line.startsWith("[memory-hint]")),
-    status: lines.some(
-      (line) =>
-        line.startsWith("[memory]") && !line.startsWith("[memory] handoff:"),
-    ),
-    handoff: lines.some((line) => line.startsWith("[memory] handoff:")),
+    hint: hintLines.length > 0,
+    status: statusLines.length > 0,
+    handoff: handoffLines.length > 0,
+    hintCount: hintLines.length,
+    statusCount: statusLines.length,
+    handoffCount: handoffLines.length,
     markerCount: value.split(PROMPT_NOTICES_MARKER).length - 1,
     lineCount: noticeLines.length,
   };
@@ -757,13 +976,13 @@ function noticeInfo(text) {
 
 function tokensOf(message) {
   const tokens = message?.tokens;
-  if (!tokens || typeof tokens !== "object") return null;
+  if (!hasNumericTokens(tokens)) return null;
   return {
     input: num(tokens.input),
     output: num(tokens.output),
     reasoning: num(tokens.reasoning),
-    cacheRead: num(tokens.cache?.read),
-    cacheWrite: num(tokens.cache?.write),
+    cacheRead: num(tokens.cache.read),
+    cacheWrite: num(tokens.cache.write),
   };
 }
 
@@ -781,6 +1000,8 @@ function toolPartsOf(message) {
           : typeof part.tool === "string"
             ? part.tool
             : "",
+      status: part?.state?.status ?? part?.status ?? null,
+      input: input ?? null,
       path: typeof path === "string" ? path : null,
     });
   }
@@ -845,6 +1066,7 @@ function totalOf(calls) {
   const promptTokens = sum(calls, "promptTokens");
   const cacheRead = sum(calls, "cacheRead");
   return {
+    computed: true,
     calls: calls.length,
     input: sum(calls, "input"),
     output: sum(calls, "output"),
@@ -859,24 +1081,30 @@ function totalOf(calls) {
 
 function analyzeExport(data, meta = {}) {
   const messages = Array.isArray(data?.messages) ? data.messages : [];
-  const prompt1Messages = [];
-  const prompt2Messages = [];
+  const buckets = [[], [], []];
   const userMessages = [];
-  let bucket = null;
 
   for (const message of messages) {
     if (message?.type === "user") {
       userMessages.push(message);
-      bucket =
-        userMessages.length === 1
-          ? prompt1Messages
-          : userMessages.length === 2
-            ? prompt2Messages
-            : null;
       continue;
     }
-    if (bucket && message?.type === "assistant") bucket.push(message);
+    if (message?.type === "assistant" && userMessages.length >= 1) {
+      const bucket = buckets[Math.min(userMessages.length, 3) - 1];
+      if (bucket) bucket.push(message);
+    }
   }
+
+  const [prompt1Messages, prompt2Messages, extraMessages] = buckets;
+  const allAssistantMessages = messages.filter(
+    (message) => message?.type === "assistant",
+  );
+  const tokenlessAssistantMessages = allAssistantMessages.filter(
+    (message) => !hasNumericTokens(message?.tokens),
+  );
+  const assistantErrorMessages = allAssistantMessages.filter(
+    (message) => message?.error !== undefined || message?.finish === "error",
+  );
 
   const prompt1Text =
     typeof userMessages[0]?.text === "string" ? userMessages[0].text : "";
@@ -885,15 +1113,14 @@ function analyzeExport(data, meta = {}) {
 
   const prompt1Calls = callsFromMessages(prompt1Messages, 1);
   const prompt2Calls = callsFromMessages(prompt2Messages, 2);
+  const extraCalls = callsFromMessages(extraMessages, 3);
   const calls = [...prompt1Calls, ...prompt2Calls];
   calls.forEach((call, index) => {
     call.index = index;
   });
 
   const prompt1ToolParts = prompt1Messages.flatMap(toolPartsOf);
-  const allToolParts = messages
-    .filter((message) => message?.type === "assistant")
-    .flatMap(toolPartsOf);
+  const allToolParts = allAssistantMessages.flatMap(toolPartsOf);
   const skillToolParts = allToolParts.filter(
     (part) => part.name === "skill",
   ).length;
@@ -917,9 +1144,12 @@ function analyzeExport(data, meta = {}) {
   const p2FirstIncrementalRead = Math.max(0, rawP2FirstIncrementalRead);
 
   const notice = noticeInfo(prompt1Text);
+  const prompt2Notice = noticeInfo(prompt2Text);
   const briefHashBefore = meta.briefHashBefore ?? null;
   const briefHashAfter = meta.briefHashAfter ?? null;
   const briefLineCount = meta.briefLineCount ?? null;
+  const sessionTotal = totalOf(calls);
+  const exportInfoTokens = data?.info?.tokens ?? null;
 
   return {
     scenario: meta.scenario ?? null,
@@ -934,17 +1164,36 @@ function analyzeExport(data, meta = {}) {
       (data?.info?.model
         ? `${data.info.model.providerID}/${data.info.model.id}`
         : null),
+    requestedModel: meta.requestedModel ?? null,
     exportModel: data?.info?.model ?? null,
     providerID: data?.info?.model?.providerID ?? null,
-    prompts: [
-      { prompt: 1, text: prompt1Text },
-      { prompt: 2, text: prompt2Text },
-    ],
+    exportOutcome: data?.info?.outcome ?? null,
+    exportInfoTokens,
+    prompts: userMessages.map((message, index) => ({
+      prompt: index + 1,
+      text: typeof message?.text === "string" ? message.text : "",
+      files: fileURIs(message),
+    })),
+    prompt1Text,
+    prompt2Text,
+    prompt1Files: fileURIs(userMessages[0]),
+    prompt2Files: fileURIs(userMessages[1]),
+    extraUserTurns: Math.max(0, userMessages.length - 2),
+    assistantMessageCount: allAssistantMessages.length,
+    tokenlessAssistantCount: tokenlessAssistantMessages.length,
+    assistantErrorCount: assistantErrorMessages.length,
+    assistantErrors: assistantErrorMessages.map((message) => ({
+      messageID: message?.id ?? null,
+      error: message?.error ?? null,
+      finish: message?.finish ?? null,
+    })),
     calls,
+    extraCalls,
     prompt1Calls,
     prompt2Calls,
     prompt1ToolParts: prompt1ToolParts.map((part) => part.name),
     prompt1ToolPartDetails: prompt1ToolParts,
+    allToolParts,
     prompt1ToolPartCount: prompt1ToolParts.length,
     prompt1First,
     prompt1Later: {
@@ -967,9 +1216,11 @@ function analyzeExport(data, meta = {}) {
       : null,
     prompt1Total: totalOf(prompt1Calls),
     prompt2Total: totalOf(prompt2Calls),
-    sessionTotal: totalOf(calls),
+    sessionTotal,
     notice,
+    prompt2Notice,
     noticeLines: notice.lineCount,
+    prompt2NoticeLines: prompt2Notice.lineCount,
     skillToolParts,
     shellToolParts,
     briefHashBefore,
@@ -980,20 +1231,65 @@ function analyzeExport(data, meta = {}) {
         ? briefHashBefore === briefHashAfter
         : null,
     validationErrors: [],
+    validationNotChecked: [],
+    validationStatus: "unchecked",
+    validationComplete: false,
     rawPath: meta.rawPath ?? null,
   };
 }
 
-function validateRun(run, data, projectDir, variant, scenario) {
+function hasIndexURI(uris) {
+  return (uris ?? []).some((uri) => {
+    let decoded = String(uri);
+    try {
+      decoded = decodeURIComponent(decoded);
+    } catch {
+      // Keep the raw URI when it is not valid percent-encoding.
+    }
+    return decoded.includes("/.opencode/memory/INDEX.md");
+  });
+}
+
+function validateRun(run, data, projectDir, variant, scenario, options = {}) {
   const errors = [];
+  const notChecked = [];
+  const requireBriefHashes = options.requireBriefHashes !== false;
 
   if (!Array.isArray(data?.messages) || data.messages.length === 0) {
     errors.push("export has no messages");
   }
-  if (projectDir) {
-    if (!existsSync(join(projectDir, LOAD_MARKER))) {
-      errors.push(`load marker missing: ${LOAD_MARKER}`);
-    }
+
+  if (run.exportOutcome !== "succeeded") {
+    errors.push(
+      `export outcome is ${JSON.stringify(run.exportOutcome)}, expected "succeeded"`,
+    );
+  }
+
+  if ((run.extraUserTurns ?? 0) > 0) {
+    errors.push(
+      `export has ${run.extraUserTurns} extra user message(s); expected exactly 2`,
+    );
+  }
+  if ((run.prompts?.length ?? 0) !== 2) {
+    errors.push(
+      `export has ${run.prompts?.length ?? 0} user messages; expected exactly 2`,
+    );
+  }
+  if (!run.prompt1Text) errors.push("prompt 1 text is empty");
+  if (!run.prompt2Text) errors.push("prompt 2 text is empty");
+
+  if ((run.assistantMessageCount ?? 0) < 2) {
+    errors.push("session has fewer than 2 assistant messages");
+  }
+  if ((run.tokenlessAssistantCount ?? 0) > 0) {
+    errors.push(
+      `${run.tokenlessAssistantCount} assistant message(s) missing numeric tokens.input/tokens.output/tokens.cache.read/tokens.cache.write`,
+    );
+  }
+  if ((run.assistantErrorCount ?? 0) > 0) {
+    errors.push(
+      `${run.assistantErrorCount} assistant message(s) have an error or finish="error"`,
+    );
   }
 
   if (run.prompt1Calls.length < 2) {
@@ -1004,51 +1300,166 @@ function validateRun(run, data, projectDir, variant, scenario) {
   }
   if (!run.prompt1First) {
     errors.push("prompt 1 has no assistant call with token usage");
+  } else if (!(run.prompt1First.promptTokens > 0)) {
+    errors.push("prompt 1 first call has zero prompt tokens");
   }
   if (!run.prompt2First) {
     errors.push("prompt 2 has no assistant call with token usage");
+  } else if (!(run.prompt2First.promptTokens > 0)) {
+    errors.push("prompt 2 first call has zero prompt tokens");
   }
 
-  const readParts = (run.prompt1ToolPartDetails ?? []).filter(
-    (part) => part.name === "read",
-  );
-  if (readParts.length < 2) {
-    errors.push("prompt 1 has fewer than 2 read tool parts");
-  }
-  if (projectDir) {
-    for (const name of ["alpha.txt", "beta.txt"]) {
-      const target = resolve(projectDir, name);
-      const found = readParts.some(
-        (part) => part.path && resolve(projectDir, part.path) === target,
+  if (!hasNumericTokens(run.exportInfoTokens)) {
+    errors.push(
+      "export info.tokens is missing numeric input/output/cache.read/cache.write",
+    );
+  } else {
+    const expected =
+      num(run.exportInfoTokens.input) +
+      num(run.exportInfoTokens.cache.read) +
+      num(run.exportInfoTokens.cache.write);
+    const computed = num(run.sessionTotal?.promptTokens);
+    if (expected !== computed) {
+      errors.push(
+        `computed session prompt total ${computed} does not match export info tokens ${expected}`,
       );
-      if (!found) errors.push(`prompt 1 did not read ${name}`);
     }
   }
 
-  if ((run.skillToolParts ?? 0) > 0) errors.push("skill tool part appeared");
-  if ((run.shellToolParts ?? 0) > 0) errors.push("shell tool part appeared");
+  if (run.requestedModel) {
+    const requested = splitModel(run.requestedModel);
+    const exported = run.exportModel;
+    if (!requested) {
+      errors.push(`requested model is malformed: ${run.requestedModel}`);
+    } else if (
+      !exported ||
+      exported.providerID !== requested.providerID ||
+      exported.id !== requested.id
+    ) {
+      const actual = exported
+        ? `${exported.providerID}/${exported.id}`
+        : "none";
+      errors.push(
+        `exported model ${actual} does not match requested model ${run.requestedModel}`,
+      );
+    }
+  }
 
-  if (run.briefHashBefore !== null || run.briefHashAfter !== null) {
+  if (projectDir) {
+    if (!existsSync(join(projectDir, LOAD_MARKER))) {
+      errors.push(`load marker missing: ${LOAD_MARKER}`);
+    }
     if (run.briefHashBefore === null || run.briefHashAfter === null) {
-      errors.push("brief hash missing");
+      if (requireBriefHashes) {
+        errors.push("brief hash missing");
+      } else {
+        notChecked.push("brief hash: not checked (no before/after snapshot)");
+      }
     } else if (run.briefHashBefore !== run.briefHashAfter) {
       errors.push("brief hashes differ");
     }
-  } else if (projectDir) {
-    errors.push("brief hash missing");
+  } else {
+    notChecked.push("load marker: not checked (no projectDir)");
+    notChecked.push("brief hash: not checked (no projectDir)");
+  }
+
+  const allToolParts = run.allToolParts ?? [];
+  const disallowed = allToolParts.filter(
+    (part) => part.name !== "read" || part.status !== "completed",
+  );
+  if (disallowed.length > 0) {
+    const labels = [
+      ...new Set(
+        disallowed.map((part) => {
+          const name = part.name || "<unnamed>";
+          return part.status && part.status !== "completed"
+            ? `${name} (${part.status})`
+            : name;
+        }),
+      ),
+    ];
+    errors.push(
+      `disallowed tool parts: ${labels.join(", ")}; only completed read is allowed`,
+    );
+  }
+
+  const readParts = (run.prompt1ToolPartDetails ?? []).filter(
+    (part) => part.name === "read" && part.status === "completed",
+  );
+  if (readParts.length < 2) {
+    errors.push("prompt 1 has fewer than 2 completed read tool parts");
+  }
+  const prompt1ReadPaths = readParts.map((part) => part.path);
+  const readPaths = allToolParts
+    .filter((part) => part.name === "read")
+    .map((part) => part.path);
+  if (projectDir) {
+    for (const path of readPaths) {
+      if (!path) {
+        errors.push("read tool part has no path");
+      } else if (!isPathUnder(projectDir, path)) {
+        errors.push(`read path is outside projectDir: ${path}`);
+      }
+    }
+    for (const name of ["alpha.txt", "beta.txt"]) {
+      const target = resolve(projectDir, name);
+      const found = prompt1ReadPaths.some(
+        (path) => path && resolve(projectDir, path) === target,
+      );
+      if (!found) errors.push(`prompt 1 did not read ${name}`);
+    }
+  } else {
+    notChecked.push("read path containment: not checked (no projectDir)");
+    notChecked.push("alpha.txt/beta.txt read: not checked (no projectDir)");
+  }
+
+  const parsedPrompt1 = parsePromptCore(run.prompt1Text, scenario);
+  const expectedCore = projectDir
+    ? promptOne(scenario, projectDir)
+    : (parsedPrompt1?.core ?? null);
+  if (!expectedCore) {
+    errors.push("prompt 1 does not match the expected user prompt");
+  } else {
+    if (
+      parsedPrompt1 &&
+      projectDir &&
+      resolve(parsedPrompt1.projectDir) !== resolve(projectDir)
+    ) {
+      errors.push("prompt 1 project path does not match projectDir");
+    }
+    if (variant === "e8-a" && scenario !== "control") {
+      if (!run.prompt1Text.startsWith(expectedCore)) {
+        errors.push("prompt 1 does not start with the exact user prompt");
+      }
+    } else if (run.prompt1Text !== expectedCore) {
+      errors.push("prompt 1 is not exactly the user prompt");
+    }
+  }
+
+  if (variant === "e8-a" && scenario !== "control") {
+    if (!run.prompt2Text.startsWith(PROMPT_TWO)) {
+      errors.push("prompt 2 does not start with the exact second prompt");
+    }
+  } else if (run.prompt2Text !== PROMPT_TWO) {
+    errors.push("prompt 2 is not exactly the second prompt");
   }
 
   const notice = run.notice ?? {};
+  const prompt2Notice = run.prompt2Notice ?? {};
   if (variant === "pre-e8") {
-    if (notice.marker) errors.push("pre-E8 prompt has a notice marker");
-    if ((run.noticeLines ?? 0) > 0) {
-      errors.push("pre-E8 prompt has notice lines");
+    if (notice.marker || (notice.lineCount ?? 0) > 0) {
+      errors.push("pre-E8 prompt has a notice marker or notice lines");
+    }
+    if (prompt2Notice.marker || (prompt2Notice.lineCount ?? 0) > 0) {
+      errors.push("pre-E8 prompt 2 has a notice marker or notice lines");
     }
   } else if (variant === "e8-a") {
     if (scenario === "control") {
-      if (notice.marker) errors.push("control prompt has a notice marker");
-      if ((run.noticeLines ?? 0) > 0) {
-        errors.push("control prompt has notice lines");
+      if (notice.marker || (notice.lineCount ?? 0) > 0) {
+        errors.push("control prompt has a notice marker or notice lines");
+      }
+      if (prompt2Notice.marker || (prompt2Notice.lineCount ?? 0) > 0) {
+        errors.push("control prompt 2 has a notice marker or notice lines");
       }
     } else {
       if (!notice.marker) errors.push("E8-A prompt has no notice marker");
@@ -1058,35 +1469,103 @@ function validateRun(run, data, projectDir, variant, scenario) {
           `E8-A prompt marker count is ${notice.markerCount ?? 0}, expected 1`,
         );
       }
-      if (!notice.handoff) {
-        errors.push("E8-A prompt has no [memory] handoff notice");
+      if ((notice.handoffCount ?? 0) !== 1) {
+        errors.push(
+          `E8-A prompt handoff count is ${notice.handoffCount ?? 0}, expected 1`,
+        );
       }
-      if (scenario === "hint" && !notice.hint) {
-        errors.push("hint scenario has no [memory-hint] notice");
+      const expectedHint = scenario === "hint" ? 1 : 0;
+      const expectedStatus = scenario === "status" ? 1 : 0;
+      if ((notice.hintCount ?? 0) !== expectedHint) {
+        errors.push(
+          `${scenario} prompt hint count is ${notice.hintCount ?? 0}, expected ${expectedHint}`,
+        );
       }
-      if (scenario === "status" && !notice.status) {
-        errors.push("status scenario has no [memory] status notice");
+      if ((notice.statusCount ?? 0) !== expectedStatus) {
+        errors.push(
+          `${scenario} prompt status count is ${notice.statusCount ?? 0}, expected ${expectedStatus}`,
+        );
       }
-    }
-  } else if (scenario === "control") {
-    if (notice.marker) errors.push("control prompt has a notice marker");
-    if ((run.noticeLines ?? 0) > 0) {
-      errors.push("control prompt has notice lines");
+      const expectedLines = 1 + expectedHint + expectedStatus;
+      if ((notice.lineCount ?? 0) !== expectedLines) {
+        errors.push(
+          `${scenario} prompt notice line count is ${notice.lineCount ?? 0}, expected ${expectedLines}`,
+        );
+      }
+
+      if (!prompt2Notice.marker) {
+        errors.push("E8-A prompt 2 has no notice marker");
+      }
+      if (!prompt2Notice.label) {
+        errors.push("E8-A prompt 2 has no data-only label");
+      }
+      if ((prompt2Notice.markerCount ?? 0) !== 1) {
+        errors.push(
+          `E8-A prompt 2 marker count is ${prompt2Notice.markerCount ?? 0}, expected 1`,
+        );
+      }
+      if ((prompt2Notice.handoffCount ?? 0) !== 1) {
+        errors.push(
+          `E8-A prompt 2 handoff count is ${prompt2Notice.handoffCount ?? 0}, expected 1`,
+        );
+      }
+      if ((prompt2Notice.hintCount ?? 0) !== 0) {
+        errors.push("E8-A prompt 2 has a [memory-hint] line");
+      }
+      if ((prompt2Notice.statusCount ?? 0) !== 0) {
+        errors.push("E8-A prompt 2 has an INDEX over-cap status line");
+      }
+      if ((prompt2Notice.lineCount ?? 0) !== 1) {
+        errors.push(
+          `E8-A prompt 2 notice line count is ${prompt2Notice.lineCount ?? 0}, expected 1`,
+        );
+      }
     }
   }
 
-  return errors;
+  const indexAttached1 = hasIndexURI(run.prompt1Files);
+  const indexAttached2 = hasIndexURI(run.prompt2Files);
+  if (scenario === "status") {
+    if (indexAttached1) {
+      errors.push(
+        "status prompt 1 attached INDEX.md even though it is over cap",
+      );
+    }
+    if (indexAttached2) {
+      errors.push(
+        "status prompt 2 attached INDEX.md even though it is over cap",
+      );
+    }
+  } else {
+    if (!indexAttached1) {
+      errors.push("prompt 1 did not attach the INDEX.md file");
+    }
+    if (!indexAttached2) {
+      errors.push("prompt 2 did not attach the INDEX.md file");
+    }
+  }
+
+  return { errors, notChecked };
 }
 
 function pairRuns(runs, baseline, candidate) {
-  const validRuns = (runs ?? []).filter(
-    (run) => (run?.validationErrors?.length ?? 0) === 0,
-  );
+  const allRuns = runs ?? [];
+  const seen = new Set();
+  for (const run of allRuns) {
+    const key = `${run.scenario}\u0000${run.rep}\u0000${run.variant}`;
+    if (seen.has(key)) {
+      throw new Error(
+        `duplicate run for ${run.scenario} rep ${run.rep} variant ${run.variant}`,
+      );
+    }
+    seen.add(key);
+  }
+  const validRuns = allRuns.filter(isValidRun);
   const groups = new Map();
   for (const run of validRuns) {
-    const key = `${run.scenario}\u0000${run.rep}`;
-    if (!groups.has(key)) groups.set(key, {});
-    groups.get(key)[run.variant] = run;
+    const groupKey = `${run.scenario}\u0000${run.rep}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, {});
+    groups.get(groupKey)[run.variant] = run;
   }
 
   const pairs = [];
@@ -1160,17 +1639,28 @@ function summarizePooled(pairs) {
   return summarizeScenario(pairs);
 }
 
-function buildReport({ runs, failures, comparisons, meta, scenarios }) {
-  const validRuns = (runs ?? []).filter(
-    (run) => (run?.validationErrors?.length ?? 0) === 0,
-  );
+function buildReport({
+  runs,
+  failures,
+  attempts,
+  comparisons,
+  meta,
+  scenarios,
+}) {
+  const validRuns = (runs ?? []).filter(isValidRun);
   const comparisonConfigs =
     comparisons && comparisons.length > 0
       ? comparisons
       : [{ baseline: "pre-e8", candidate: "e8-a" }];
+  const comparisonErrors = [];
 
   const results = comparisonConfigs.map((config, index) => {
     const pairs = pairRuns(validRuns, config.baseline, config.candidate);
+    if (pairs.length === 0 && validRuns.length > 0) {
+      comparisonErrors.push(
+        `comparison ${config.baseline}:${config.candidate} yielded 0 pairs from ${validRuns.length} valid run(s)`,
+      );
+    }
     return {
       baseline: config.baseline,
       candidate: config.candidate,
@@ -1197,6 +1687,8 @@ function buildReport({ runs, failures, comparisons, meta, scenarios }) {
     accountTier: meta?.accountTier ?? null,
     runs: validRuns,
     failures: failures ?? [],
+    attempts: attempts ?? [],
+    comparisonErrors,
     pairs: primary.pairs,
     pooled: primary.pooled,
     byScenario: primary.byScenario,
@@ -1214,6 +1706,12 @@ function hashLabel(run) {
     : run.briefHashMatch === false
       ? "no"
       : "n/a";
+}
+
+function exportPromptTokens(run) {
+  const tokens = run.exportInfoTokens;
+  if (!tokens) return null;
+  return num(tokens.input) + num(tokens.cache?.read) + num(tokens.cache?.write);
 }
 
 function comparisonRow(label, summary) {
@@ -1240,9 +1738,12 @@ function renderReport(report) {
   lines.push("");
   lines.push(`- Provider: ${report.provider ?? "n/a"}`);
   lines.push(`- Model: ${report.model ?? "n/a"}`);
-  lines.push(
-    `- Account tier: ${report.accountTier ?? "n/a"} (free tier; no billed-cost claim)`,
-  );
+  const tierNote =
+    report.accountTier === "Google AI Studio Free Tier"
+      ? " (free tier; no billed-cost claim)"
+      : "";
+  lines.push(`- Account tier: ${report.accountTier ?? "n/a"}${tierNote}`);
+  lines.push(`- Date: ${report.meta?.date ?? "n/a"}`);
   lines.push(`- OpenCode: ${report.opencodeVersion ?? "n/a"}`);
   lines.push(`- Repo HEAD: ${report.repoHead ?? "n/a"}`);
   lines.push(`- Pre-E8 ref: ${report.meta?.preE8Ref ?? "n/a"}`);
@@ -1264,22 +1765,53 @@ function renderReport(report) {
   lines.push("## Validity");
   lines.push("");
   lines.push(`- Valid runs: ${report.runs.length}`);
-  lines.push(`- Failures: ${report.failures.length}`);
+  lines.push(`- Exhausted scenarios: ${report.failures.length}`);
+  lines.push(`- Attempts recorded: ${report.attempts.length}`);
   lines.push(`- Valid pairs (default comparison): ${report.pairs.length}`);
+  if ((report.comparisonErrors ?? []).length > 0) {
+    for (const error of report.comparisonErrors) {
+      lines.push(`- Comparison error: ${error}`);
+    }
+  }
   lines.push("");
+  if (report.attempts.length > 0) {
+    lines.push("### Attempt history");
+    lines.push("");
+    lines.push(
+      "| scenario | rep | variant | attempt | status | session | project | errors |",
+    );
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const attempt of report.attempts) {
+      lines.push(
+        `| ${tableCell(attempt.scenario)} | ${tableCell(attempt.rep)} | ` +
+          `${tableCell(attempt.variant)} | ${tableCell(attempt.attempt)} | ` +
+          `${tableCell(attempt.status)} | ${tableCell(attempt.sessionID ?? "n/a")} | ` +
+          `${tableCell(attempt.projectDir ?? "n/a")} | ` +
+          `${tableCell((attempt.errors ?? []).join("; "))} |`,
+      );
+    }
+    lines.push("");
+  }
   if (report.failures.length > 0) {
+    lines.push("### Exhausted scenarios");
+    lines.push("");
     lines.push("| scenario | rep | variant | attempt | error |");
     lines.push("| --- | --- | --- | --- | --- |");
     for (const failure of report.failures) {
       lines.push(
-        `| ${failure.scenario ?? "n/a"} | ${failure.rep ?? "n/a"} | ` +
-          `${failure.variant ?? "n/a"} | ${failure.attempt ?? "n/a"} | ` +
-          `${String(failure.error ?? "").replace(/\|/g, "\\|")} |`,
+        `| ${tableCell(failure.scenario ?? "n/a")} | ${tableCell(failure.rep ?? "n/a")} | ` +
+          `${tableCell(failure.variant ?? "n/a")} | ${tableCell(failure.attempt ?? "n/a")} | ` +
+          `${tableCell(failure.error)} |`,
       );
     }
     lines.push("");
-  } else {
+  } else if (report.attempts.every((attempt) => attempt.status === "valid")) {
     lines.push("No failed runs.");
+    lines.push("");
+  } else {
+    lines.push(
+      "No exhausted scenarios; discarded attempts are listed in the attempt history.",
+    );
     lines.push("");
   }
 
@@ -1330,10 +1862,10 @@ function renderReport(report) {
     lines.push("");
   } else {
     lines.push(
-      "| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | notice lines | skill parts | brief hash match | marker |",
+      "| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | notice lines | skill parts | brief hash match | marker | export outcome | export prompt tokens |",
     );
     lines.push(
-      "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     );
     for (const run of report.runs) {
       lines.push(
@@ -1349,7 +1881,9 @@ function renderReport(report) {
           `${fmt(run.prompt1Total?.promptTokens, 0)} | ` +
           `${fmt(run.prompt2Total?.promptTokens, 0)} | ` +
           `${run.noticeLines ?? 0} | ${run.skillToolParts ?? 0} | ` +
-          `${hashLabel(run)} | ${markerLabel(run)} |`,
+          `${hashLabel(run)} | ${markerLabel(run)} | ` +
+          `${run.exportOutcome ?? "n/a"} | ` +
+          `${fmt(exportPromptTokens(run), 0)} |`,
       );
     }
     lines.push("");
@@ -1360,6 +1894,9 @@ function renderReport(report) {
   lines.push(
     "- `summary.json` contains every per-call token row (`input`, `output`, `reasoning`, `cache.read`, `cache.write`, `promptTokens`, `cacheHitRate`, `uncachedTokens`).",
   );
+  lines.push(
+    "- `prompt1Total`, `prompt2Total`, and `sessionTotal` are computed from those per-call rows (`computed: true`), not copied from the export's `info.tokens`.",
+  );
   lines.push("- Per-run raw session exports are under `raw/`:");
   for (const run of report.runs) {
     lines.push(`  - \`${run.rawPath ?? "n/a"}\``);
@@ -1368,155 +1905,883 @@ function renderReport(report) {
   return lines.join("\n");
 }
 
-function selfTest() {
-  const readPart = (path) => ({
-    type: "tool",
-    name: "read",
-    state: { input: { path } },
-  });
-  const skillPart = () => ({
-    type: "tool",
-    name: "skill",
-    state: { input: {} },
-  });
-  let messageNumber = 0;
-  const assistant = (tokens, content = []) => ({
-    type: "assistant",
-    id: `msg_test_${(messageNumber += 1)}`,
-    tokens,
-    content,
-  });
-  const usage = (input, cacheRead, cacheWrite = 0) => ({
-    input,
-    output: 10,
-    reasoning: 1,
-    cache: { read: cacheRead, write: cacheWrite },
-  });
+async function selfTest() {
+  const tempRoot = await mkdtemp(join("/tmp/opencode", "e8-selftest-"));
+  const projectDir = join(tempRoot, "project");
+  const missingMarkerDir = join(tempRoot, "no-marker");
+  const indexPath = join(projectDir, ".opencode", "memory", "INDEX.md");
+  const indexURI = pathToFileURL(indexPath).href;
+  const handoffLine =
+    `[memory] handoff: handoffs/2026-10-26-120000-abcdef.md (latest) ` +
+    `${PROMPT_NOTICES_MARKER} (${PROMPT_NOTICES_LABEL})`;
+  const statusLine =
+    "[memory] INDEX.md is over the 30-line injection cap or too large to inspect; " +
+    "not attached — trim it to restore auto-injection";
+  const hintLine =
+    '[memory-hint] Past decisions mention `auth-service`. Call memory_recall("decisions.md") for the why.';
 
-  const e8Prompt1 = [
-    "Context: auth-service login. Use the read tool to read /tmp/e8/alpha.txt, then use the read tool to read /tmp/e8/beta.txt. Then answer in one sentence.",
-    "",
-    `[memory] handoff: handoffs/2026-10-26-120000-abcdef.md (latest) ${PROMPT_NOTICES_MARKER} ${PROMPT_NOTICES_LABEL}`,
-    '[memory-hint] Past decisions mention `auth-service`. Call memory_recall("decisions.md") for the why.',
-  ].join("\n");
+  try {
+    await mkdir(join(projectDir, ".opencode", "memory", "handoffs"), {
+      recursive: true,
+    });
+    await mkdir(missingMarkerDir, { recursive: true });
+    await writeFile(join(projectDir, LOAD_MARKER), "");
+    await writeFile(join(projectDir, "alpha.txt"), "alpha fixture\n");
+    await writeFile(join(projectDir, "beta.txt"), "beta fixture\n");
+    await writeFile(indexPath, "# Memory index\n- auth-service: src/auth.ts\n");
+    await writeFile(
+      join(projectDir, ".opencode", "memory", "activeContext.md"),
+      "# Active context\n",
+    );
+    await writeFile(
+      join(
+        projectDir,
+        ".opencode",
+        "memory",
+        "handoffs",
+        "2026-10-26-120000-abcdef.md",
+      ),
+      "# Handoff\n",
+    );
 
-  const e8Export = {
-    info: {
-      id: "ses_e8_test",
-      model: {
-        id: "gemini-3.5-flash-lite",
-        providerID: "google",
-        variant: "default",
+    let messageNumber = 0;
+    const assistant = (tokens, content = [], extra = {}) => ({
+      type: "assistant",
+      id: `msg_test_${(messageNumber += 1)}`,
+      tokens,
+      finish: "tool-calls",
+      content,
+      ...extra,
+    });
+    const user = (text, files = []) => ({ type: "user", text, files });
+    // Real `opencode session export` attachments are `{ source: { uri } }`,
+    // not the plugin prompt-event `{ uri }` shape.
+    const attachment = (uri) => ({
+      data: "",
+      mime: "text/markdown",
+      source: { type: "uri", uri },
+    });
+    const usage = (input, cacheRead, cacheWrite = 0) => ({
+      input,
+      output: 10,
+      reasoning: 1,
+      cache: { read: cacheRead, write: cacheWrite },
+    });
+    const readPart = (path, status = "completed") => ({
+      type: "tool",
+      name: "read",
+      state: { status, input: { path } },
+    });
+    const toolPart = (name, status = "completed", input = {}) => ({
+      type: "tool",
+      name,
+      state: { status, input },
+    });
+
+    const infoTokensFor = (messages) => {
+      const totals = {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      };
+      for (const message of messages) {
+        if (message?.type !== "assistant" || !message.tokens) continue;
+        const tokens = message.tokens;
+        totals.input += num(tokens.input);
+        totals.output += num(tokens.output);
+        totals.reasoning += num(tokens.reasoning);
+        totals.cache.read += num(tokens.cache?.read);
+        totals.cache.write += num(tokens.cache?.write);
+      }
+      return totals;
+    };
+
+    const prompt1For = (scenario, variant) => {
+      const core = promptOne(scenario, projectDir);
+      if (variant !== "e8-a" || scenario === "control") return core;
+      const lines =
+        scenario === "hint"
+          ? [handoffLine, hintLine]
+          : scenario === "status"
+            ? [handoffLine, statusLine]
+            : [handoffLine];
+      return `${core}\n\n${lines.join("\n")}`;
+    };
+    const prompt2For = (scenario, variant) => {
+      if (variant !== "e8-a" || scenario === "control") return PROMPT_TWO;
+      return `${PROMPT_TWO}\n\n${handoffLine}`;
+    };
+
+    const makeExport = ({
+      scenario = "hint",
+      variant = "e8-a",
+      mutate = null,
+      after = null,
+    } = {}) => {
+      const files = scenario === "status" ? [] : [attachment(indexURI)];
+      const data = {
+        info: {
+          id: "ses_e8_selftest",
+          model: {
+            id: "gemini-3.5-flash-lite",
+            providerID: "google",
+            variant: "default",
+          },
+          outcome: "succeeded",
+          tokens: {},
+        },
+        messages: [
+          user(prompt1For(scenario, variant), files),
+          assistant(usage(100, 1000, 10), [
+            readPart(join(projectDir, "alpha.txt")),
+          ]),
+          assistant(usage(50, 1500), [readPart(join(projectDir, "beta.txt"))]),
+          assistant(usage(20, 2000), [{ type: "text", text: "done" }]),
+          user(prompt2For(scenario, variant), files),
+          assistant(usage(10, 2500), [{ type: "text", text: "SECOND-DONE" }]),
+        ],
+      };
+      if (mutate) mutate(data);
+      data.info.tokens = infoTokensFor(data.messages);
+      if (after) after(data);
+      return data;
+    };
+
+    const metaFor = (data, scenario, variant, project = projectDir) => ({
+      scenario,
+      rep: 1,
+      variant,
+      attempt: 1,
+      sessionID: data.info.id,
+      projectDir: project,
+      salt: "salt",
+      model: DEFAULT_MODEL,
+      requestedModel: DEFAULT_MODEL,
+      briefHashBefore: "a",
+      briefHashAfter: "a",
+      briefLineCount: 7,
+      rawPath: "/tmp/e8/raw.json",
+    });
+
+    const validate = (data, scenario, variant, project = projectDir) => {
+      const run = analyzeExport(
+        data,
+        metaFor(data, scenario, variant, project),
+      );
+      const result = validateRun(run, data, project, variant, scenario);
+      run.validationErrors = result.errors;
+      run.validationNotChecked = result.notChecked;
+      run.validationStatus = validationState(result.errors, result.notChecked);
+      run.validationComplete = run.validationStatus === "valid";
+      return { run, ...result };
+    };
+
+    const expectValid = (name, data, scenario, variant) => {
+      const result = validate(data, scenario, variant);
+      check(
+        result.errors.length === 0 && result.notChecked.length === 0,
+        `${name}: ${[...result.errors, ...result.notChecked].join("; ")}`,
+      );
+      check(result.run.validationComplete === true, `${name}: not complete`);
+      return result.run;
+    };
+
+    const expectInvalid = (
+      name,
+      {
+        scenario = "hint",
+        variant = "e8-a",
+        mutate,
+        after,
+        project,
+        expected,
+        mutateRun,
       },
-      tokens: {},
-    },
-    messages: [
-      { type: "user", text: e8Prompt1, files: [] },
-      assistant(usage(100, 1000, 10), [readPart("/tmp/e8/alpha.txt")]),
-      assistant(usage(50, 1500), [readPart("/tmp/e8/beta.txt")]),
-      assistant(usage(20, 2000), [{ type: "text", text: "done" }]),
-      { type: "user", text: PROMPT_TWO, files: [] },
-      assistant(usage(10, 2500), [{ type: "text", text: "SECOND-DONE" }]),
-    ],
-  };
+    ) => {
+      const data = makeExport({ scenario, variant, mutate, after });
+      const result = validate(data, scenario, variant, project ?? projectDir);
+      let errors = result.errors;
+      if (mutateRun) {
+        mutateRun(result.run);
+        errors = validateRun(
+          result.run,
+          data,
+          project ?? projectDir,
+          variant,
+          scenario,
+        ).errors;
+      }
+      check(
+        errors.some((error) =>
+          error.toLowerCase().includes(expected.toLowerCase()),
+        ),
+        `invalid case ${name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(errors)}`,
+      );
+    };
 
-  const meta = {
-    scenario: "hint",
-    rep: 1,
-    variant: "e8-a",
-    attempt: 1,
-    sessionID: "ses_e8_test",
-    projectDir: "/tmp/e8/project",
-    salt: "salt",
-    model: DEFAULT_MODEL,
-    briefHashBefore: "a",
-    briefHashAfter: "a",
-    briefLineCount: 7,
-    rawPath: "/tmp/e8/raw.json",
-  };
-  const run = analyzeExport(e8Export, meta);
-  check(run.prompt1Calls.length === 3, "prompt 1 call count");
-  check(
-    Math.abs(run.prompt1Later.laterCacheHitRate - 3500 / 3570) < 1e-9,
-    "later cache hit rate",
-  );
-  check(
-    run.prompt1Later.p1LaterIncrementalRead === 1500,
-    "later adjusted read",
-  );
-  check(
-    run.prompt1Later.rawP1LaterIncrementalRead === 1500,
-    "later raw adjusted read",
-  );
-  check(
-    run.prompt2First?.p2FirstIncrementalRead === 1500,
-    "prompt 2 adjusted read",
-  );
-  check(
-    Math.abs(run.prompt2First.cacheHitRate - 2500 / 2510) < 1e-9,
-    "prompt 2 hit rate",
-  );
-  check(run.noticeLines === 2, "E8-A notice lines");
-  check(
-    run.notice.marker && run.notice.hint && run.notice.handoff,
-    "E8-A notice classification",
-  );
-  check(run.skillToolParts === 0, "no skill parts in baseline export");
-  check(run.briefHashMatch === true, "brief hash match");
-  check(run.briefLineCount === 7, "brief line count");
-  check(run.calls[0].tokens?.cache?.read === 1000, "raw token row");
+    const run = expectValid(
+      "valid e8-a hint",
+      makeExport({ scenario: "hint", variant: "e8-a" }),
+      "hint",
+      "e8-a",
+    );
+    expectValid(
+      "valid e8-a status",
+      makeExport({ scenario: "status", variant: "e8-a" }),
+      "status",
+      "e8-a",
+    );
+    expectValid(
+      "valid e8-a control",
+      makeExport({ scenario: "control", variant: "e8-a" }),
+      "control",
+      "e8-a",
+    );
+    expectValid(
+      "valid pre-e8 hint",
+      makeExport({ scenario: "hint", variant: "pre-e8" }),
+      "hint",
+      "pre-e8",
+    );
 
-  const skillExport = structuredClone(e8Export);
-  skillExport.messages[1].content.push(skillPart());
-  const skillRun = analyzeExport(skillExport, { ...meta, variant: "e8-a" });
-  check(skillRun.skillToolParts === 1, "skill tool part detected");
+    check(run.prompt1Calls.length === 3, "prompt 1 call count");
+    check(
+      Math.abs(run.prompt1Later.laterCacheHitRate - 3500 / 3570) < 1e-9,
+      "later cache hit rate",
+    );
+    check(
+      run.prompt1Later.p1LaterIncrementalRead === 1500,
+      "later adjusted read",
+    );
+    check(
+      run.prompt1Later.rawP1LaterIncrementalRead === 1500,
+      "later raw adjusted read",
+    );
+    check(
+      run.prompt2First?.p2FirstIncrementalRead === 1500,
+      "prompt 2 adjusted read",
+    );
+    check(
+      Math.abs(run.prompt2First.cacheHitRate - 2500 / 2510) < 1e-9,
+      "prompt 2 hit rate",
+    );
+    check(run.noticeLines === 2, "E8-A notice lines");
+    check(
+      run.notice.marker && run.notice.hint && run.notice.handoff,
+      "E8-A notice classification",
+    );
+    check(run.skillToolParts === 0, "no skill parts in baseline export");
+    check(run.briefHashMatch === true, "brief hash match");
+    check(run.briefLineCount === 7, "brief line count");
+    check(run.calls[0].tokens?.cache?.read === 1000, "raw token row");
+    check(run.sessionTotal.computed === true, "computed total label");
+    check(run.exportInfoTokens.cache.read === 7000, "export info token record");
 
-  const preExport = structuredClone(e8Export);
-  preExport.messages[0].text =
-    "Context: auth-service login. Use the read tool to read /tmp/e8/alpha.txt, then use the read tool to read /tmp/e8/beta.txt. Then answer in one sentence.";
-  preExport.messages[2].tokens.cache.read = 1200;
-  preExport.messages[3].tokens.cache.read = 1300;
-  preExport.messages[5].tokens.cache.read = 2200;
-  const preRun = analyzeExport(preExport, { ...meta, variant: "pre-e8" });
-  check(!preRun.notice.marker, "pre-E8 has no marker");
-  check(preRun.noticeLines === 0, "pre-E8 has no notice lines");
+    const skillExport = makeExport({ scenario: "hint", variant: "e8-a" });
+    skillExport.messages[1].content.push(toolPart("skill"));
+    skillExport.info.tokens = infoTokensFor(skillExport.messages);
+    const skillRun = analyzeExport(
+      skillExport,
+      metaFor(skillExport, "hint", "e8-a"),
+    );
+    check(skillRun.skillToolParts === 1, "skill tool part detected");
 
-  preRun.validationErrors = [];
-  run.validationErrors = [];
-  const pairs = pairRuns([preRun, run], "pre-e8", "e8-a");
-  check(pairs.length === 1, "pair count");
-  const pair = pairs[0];
-  check(
-    Math.abs(
-      pair.deltaLaterHit -
-        (run.prompt1Later.laterCacheHitRate -
-          preRun.prompt1Later.laterCacheHitRate),
-    ) < 1e-9,
-    "pair later delta",
-  );
-  check(pair.deltaLaterCacheRead === 1000, "pair raw later cache read delta");
-  check(pair.deltaLaterAdjustedRead === 1000, "pair adjusted later delta");
-  check(
-    pair.deltaPrompt2CacheRead === 300,
-    "pair raw prompt 2 cache read delta",
-  );
-  check(pair.deltaPrompt2AdjustedRead === 300, "pair adjusted prompt 2 delta");
+    const preExport = makeExport({
+      scenario: "hint",
+      variant: "pre-e8",
+      mutate: (data) => {
+        data.messages[2].tokens.cache.read = 1200;
+        data.messages[3].tokens.cache.read = 1300;
+        data.messages[5].tokens.cache.read = 2200;
+      },
+    });
+    const preRun = expectValid(
+      "valid pre-e8 hint for pairing",
+      preExport,
+      "hint",
+      "pre-e8",
+    );
+    check(!preRun.notice.marker, "pre-E8 has no marker");
+    check(preRun.noticeLines === 0, "pre-E8 has no notice lines");
 
-  const pooled = summarizePooled(pairs);
-  check(pooled.pairs === 1, "pooled pair count");
-  check(pooled.threshold === 1, "pooled threshold");
-  check(pooled.deltaLaterAdjustedRead.median === 1000, "pooled adjusted later");
-  check(pooled.deltaPrompt2AdjustedRead.median === 300, "pooled adjusted p2");
-  check(pooled.deltaLaterHit.positive === 1, "pooled positive later");
+    const pairs = pairRuns([preRun, run], "pre-e8", "e8-a");
+    check(pairs.length === 1, "pair count");
+    const pair = pairs[0];
+    check(
+      Math.abs(
+        pair.deltaLaterHit -
+          (run.prompt1Later.laterCacheHitRate -
+            preRun.prompt1Later.laterCacheHitRate),
+      ) < 1e-9,
+      "pair later delta",
+    );
+    check(pair.deltaLaterCacheRead === 1000, "pair raw later cache read delta");
+    check(pair.deltaLaterAdjustedRead === 1000, "pair adjusted later delta");
+    check(
+      pair.deltaPrompt2CacheRead === 300,
+      "pair raw prompt 2 cache read delta",
+    );
+    check(
+      pair.deltaPrompt2AdjustedRead === 300,
+      "pair adjusted prompt 2 delta",
+    );
 
-  const parsed = parseJsonLines(
-    'progress: working\n{"type":"text","text":"ok"}\nnot json\n',
-  );
-  check(parsed.length === 1 && parsed[0].type === "text", "parseJsonLines");
-  check(isDirtySrc("") === false, "clean src");
-  check(isDirtySrc(" M src/index.ts") === true, "dirty src");
+    const pooled = summarizePooled(pairs);
+    check(pooled.pairs === 1, "pooled pair count");
+    check(pooled.threshold === 1, "pooled threshold");
+    check(
+      pooled.deltaLaterAdjustedRead.median === 1000,
+      "pooled adjusted later",
+    );
+    check(pooled.deltaPrompt2AdjustedRead.median === 300, "pooled adjusted p2");
+    check(pooled.deltaLaterHit.positive === 1, "pooled positive later");
 
-  console.log("self-test ok");
+    const invalidCases = [
+      {
+        name: "pre-e8 prompt 1 marker",
+        scenario: "hint",
+        variant: "pre-e8",
+        mutate: (data) => {
+          data.messages[0].text = `${promptOne("hint", projectDir)}\n\n${handoffLine}`;
+        },
+        expected: "pre-E8 prompt has a notice",
+      },
+      {
+        name: "pre-e8 prompt 2 marker",
+        scenario: "hint",
+        variant: "pre-e8",
+        mutate: (data) => {
+          data.messages[4].text = `${PROMPT_TWO}\n\n${handoffLine}`;
+        },
+        expected: "pre-E8 prompt 2 has a notice",
+      },
+      {
+        name: "e8-a hint missing marker",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].text = data.messages[0].text.replace(
+            PROMPT_NOTICES_MARKER,
+            "",
+          );
+        },
+        expected: "no notice marker",
+      },
+      {
+        name: "e8-a status missing exact status line",
+        scenario: "status",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].text = data.messages[0].text.replace(statusLine, "");
+        },
+        expected: "status count",
+      },
+      {
+        name: "e8-a control prompt 1 marker",
+        scenario: "control",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].text = `${promptOne("control", projectDir)}\n\n${handoffLine}`;
+        },
+        expected: "control prompt has a notice",
+      },
+      {
+        name: "e8-a control prompt 2 marker",
+        scenario: "control",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[4].text = `${PROMPT_TWO}\n\n${handoffLine}`;
+        },
+        expected: "control prompt 2 has a notice",
+      },
+      {
+        name: "e8-a prompt 2 hint line",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[4].text = `${prompt2For("hint", "e8-a")}\n${hintLine}`;
+        },
+        expected: "[memory-hint] line",
+      },
+      {
+        name: "e8-a prompt 2 status line",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[4].text = `${prompt2For("hint", "e8-a")}\n${statusLine}`;
+        },
+        expected: "INDEX over-cap status line",
+      },
+      {
+        name: "e8-a prompt 2 two handoffs",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[4].text = `${prompt2For("hint", "e8-a")}\n${handoffLine}`;
+        },
+        expected: "prompt 2 handoff count",
+      },
+      {
+        name: "wrong prompt 2",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[4].text = "wrong second prompt";
+        },
+        expected: "prompt 2",
+      },
+      {
+        name: "missing prompt 2",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages.splice(4, 2);
+        },
+        expected: "expected exactly 2",
+      },
+      {
+        name: "three user messages",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages.push(user("third prompt", []));
+          data.messages.push(assistant(usage(1, 1), []));
+        },
+        expected: "extra user message",
+      },
+      {
+        name: "outcome failed",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.info.outcome = "failed";
+        },
+        expected: "outcome",
+      },
+      {
+        name: "assistant finish error",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[1].finish = "error";
+        },
+        expected: "finish",
+      },
+      {
+        name: "assistant error field",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[1].error = "boom";
+        },
+        expected: "have an error",
+      },
+      {
+        name: "all-zero tokens",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          for (const message of data.messages) {
+            if (message.type === "assistant") {
+              message.tokens = {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+              };
+            }
+          }
+          data.info.tokens = {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          };
+        },
+        expected: "zero prompt tokens",
+      },
+      {
+        name: "missing tokens.cache",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          delete data.messages[1].tokens.cache;
+        },
+        expected: "missing numeric tokens",
+      },
+      {
+        name: "export info token mismatch",
+        scenario: "hint",
+        variant: "e8-a",
+        after: (data) => {
+          data.info.tokens = {
+            ...data.info.tokens,
+            input: data.info.tokens.input + 1,
+          };
+        },
+        expected: "does not match export info tokens",
+      },
+      {
+        name: "failed read part",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[1].content[0].state.status = "running";
+        },
+        expected: "disallowed tool parts",
+      },
+      {
+        name: "edit tool part",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[2].content.push(
+            toolPart("edit", "completed", { path: "x" }),
+          );
+        },
+        expected: "disallowed tool parts",
+      },
+      {
+        name: "webfetch tool part",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[2].content.push(toolPart("webfetch", "completed", {}));
+        },
+        expected: "disallowed tool parts",
+      },
+      {
+        name: "read outside projectDir",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[1].content[0].state.input.path =
+            "/tmp/e8-outside-alpha.txt";
+        },
+        expected: "outside projectDir",
+      },
+      {
+        name: "read part without a path",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[1].content[0].state.input = {};
+        },
+        expected: "read tool part has no path",
+      },
+      {
+        name: "status attached INDEX",
+        scenario: "status",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].files = [attachment(indexURI)];
+          data.messages[4].files = [attachment(indexURI)];
+        },
+        expected: "status prompt 1 attached INDEX.md",
+      },
+      {
+        name: "hint missing INDEX",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].files = [];
+          data.messages[4].files = [];
+        },
+        expected: "did not attach the INDEX.md",
+      },
+      {
+        name: "missing load marker",
+        scenario: "hint",
+        variant: "e8-a",
+        project: missingMarkerDir,
+        expected: "load marker missing",
+      },
+      {
+        name: "brief hash mismatch",
+        scenario: "hint",
+        variant: "e8-a",
+        mutateRun: (invalidRun) => {
+          invalidRun.briefHashAfter = "b";
+        },
+        expected: "brief hashes differ",
+      },
+      {
+        name: "wrong project path",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.messages[0].text = promptOne("hint", "/tmp/e8-other-project");
+        },
+        expected: "project path does not match",
+      },
+      {
+        name: "model mismatch",
+        scenario: "hint",
+        variant: "e8-a",
+        mutate: (data) => {
+          data.info.model.id = "other-model";
+        },
+        expected: "does not match requested model",
+      },
+    ];
+    for (const invalidCase of invalidCases) {
+      expectInvalid(invalidCase.name, invalidCase);
+    }
+
+    {
+      const noProject = validate(
+        makeExport({ scenario: "hint", variant: "e8-a" }),
+        "hint",
+        "e8-a",
+        null,
+      );
+      check(noProject.errors.length === 0, "no-projectDir validation errors");
+      check(
+        noProject.notChecked.length === 4 &&
+          noProject.notChecked.every((item) =>
+            item.includes("not checked (no projectDir)"),
+          ),
+        "no-projectDir not-checked labels",
+      );
+      check(
+        noProject.run.validationStatus === "not-checked" &&
+          isValidRun(noProject.run) === false,
+        "not-checked run is not valid",
+      );
+    }
+
+    {
+      const data = makeExport({ scenario: "hint", variant: "e8-a" });
+      const analyzeRun = analyzeExport(data, {
+        scenario: "hint",
+        rep: 1,
+        variant: "e8-a",
+        projectDir,
+        model: DEFAULT_MODEL,
+        requestedModel: DEFAULT_MODEL,
+      });
+      const result = validateRun(analyzeRun, data, projectDir, "e8-a", "hint", {
+        requireBriefHashes: false,
+      });
+      check(result.errors.length === 0, "analyze brief not-checked errors");
+      check(
+        result.notChecked.length === 1 &&
+          result.notChecked[0].includes("brief hash: not checked"),
+        "analyze brief not-checked label",
+      );
+      check(
+        validationState(result.errors, result.notChecked) === "not-checked",
+        "analyze brief not-checked state",
+      );
+    }
+
+    {
+      const duplicate = expectValid(
+        "valid duplicate fixture",
+        makeExport({ scenario: "hint", variant: "e8-a" }),
+        "hint",
+        "e8-a",
+      );
+      let threw = false;
+      try {
+        pairRuns([run, duplicate], "pre-e8", "e8-a");
+      } catch (error) {
+        threw = /duplicate run/.test(String(error?.message ?? ""));
+      }
+      check(threw, "duplicate pair throws");
+    }
+
+    {
+      let threw = false;
+      try {
+        parseArgs(["--variants", "e8-attach"]);
+      } catch (error) {
+        threw = /not implemented until Task 7\/8/.test(
+          String(error?.message ?? ""),
+        );
+      }
+      check(threw, "parseArgs rejects e8-attach");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--compare", "pre-e8:pre-e8"]);
+      } catch (error) {
+        threw = /must differ/.test(String(error?.message ?? ""));
+      }
+      check(threw, "parseArgs rejects baseline === candidate");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--variants", "pre-e8", "--compare", "pre-e8:e8-a"]);
+      } catch (error) {
+        threw = /not in --variants/.test(String(error?.message ?? ""));
+      }
+      check(threw, "parseArgs rejects unselected comparison endpoint");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--variants", "pre-e8,pre-e8"]);
+      } catch (error) {
+        threw = /duplicate/.test(String(error?.message ?? ""));
+      }
+      check(threw, "parseArgs rejects duplicate variants");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--scenarios", "hint,hint"]);
+      } catch (error) {
+        threw = /duplicate/.test(String(error?.message ?? ""));
+      }
+      check(threw, "parseArgs rejects duplicate scenarios");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--compare", "pre-e8:e8-a", "--compare", "pre-e8:e8-a"]);
+      } catch (error) {
+        threw = /duplicate comparison/.test(String(error?.message ?? ""));
+      }
+      check(threw, "parseArgs rejects duplicate comparisons");
+    }
+    {
+      let threw = false;
+      try {
+        parseArgs(["--analyze", "/tmp/e8/export.json"]);
+      } catch (error) {
+        threw = /requires explicit --variant and --scenario/.test(
+          String(error?.message ?? ""),
+        );
+      }
+      check(threw, "parseArgs requires analyze variant/scenario");
+    }
+
+    check(median([1, 2]) === 1.5, "median N=2");
+    check(median([3, 1, 2]) === 2, "median N=3");
+    check(pairThreshold(2) === 2, "threshold N=2");
+    check(pairThreshold(3) === 2, "threshold N=3");
+
+    {
+      const zeroReport = buildReport({
+        runs: [run],
+        failures: [],
+        attempts: [],
+        comparisons: [{ baseline: "pre-e8", candidate: "e8-a" }],
+        meta: {},
+        scenarios: ["hint"],
+      });
+      check(
+        zeroReport.comparisonErrors.length === 1 &&
+          /0 pairs/.test(zeroReport.comparisonErrors[0]),
+        "zero-pair comparison error",
+      );
+    }
+
+    {
+      const attemptReport = buildReport({
+        runs: [run],
+        failures: [],
+        attempts: [
+          {
+            scenario: "hint",
+            rep: 1,
+            variant: "e8-a",
+            attempt: 1,
+            status: "invalid",
+            sessionID: "ses_attempt",
+            projectDir: "/tmp/e8/project",
+            errors: ["bad | value\nsecond line"],
+          },
+          {
+            scenario: "hint",
+            rep: 1,
+            variant: "e8-a",
+            attempt: 2,
+            status: "valid",
+            sessionID: "ses_valid",
+            projectDir: "/tmp/e8/project-2",
+            errors: [],
+          },
+        ],
+        comparisons: [{ baseline: "pre-e8", candidate: "e8-a" }],
+        meta: { preE8Ref: PRE_E8_REF, e8ARef: E8_A_REF },
+        scenarios: ["hint"],
+      });
+      const rendered = renderReport(attemptReport);
+      check(
+        rendered.includes("### Attempt history") &&
+          rendered.includes("bad \\| value second line") &&
+          rendered.includes("discarded attempts are listed"),
+        "attempt history rendering",
+      );
+      check(!rendered.includes("No failed runs."), "no false clean claim");
+      check(
+        rendered.includes(`- Pre-E8 ref: ${PRE_E8_REF}`) &&
+          rendered.includes(`- E8-A ref: ${E8_A_REF}`),
+        "report metadata refs",
+      );
+      check(
+        rendered.includes("computed from those per-call rows"),
+        "computed total label",
+      );
+    }
+
+    {
+      const cleanReport = buildReport({
+        runs: [run],
+        failures: [],
+        attempts: [
+          {
+            scenario: "hint",
+            rep: 1,
+            variant: "e8-a",
+            attempt: 1,
+            status: "valid",
+            errors: [],
+          },
+        ],
+        comparisons: [{ baseline: "pre-e8", candidate: "e8-a" }],
+        meta: {},
+        scenarios: ["hint"],
+      });
+      check(
+        renderReport(cleanReport).includes("No failed runs."),
+        "clean attempt history claim",
+      );
+    }
+
+    const parsed = parseJsonLines(
+      'progress: working\n{"type":"text","text":"ok"}\nnot json\n',
+    );
+    check(parsed.length === 1 && parsed[0].type === "text", "parseJsonLines");
+    check(isDirtySrc("") === false, "clean src");
+    check(isDirtySrc(" M src/index.ts") === true, "dirty src");
+    check(isSessionID("ses_abc") === true, "session id accepted");
+    check(isSessionID("abc") === false, "session id prefix required");
+    check(isSessionID(null) === false, "session id null rejected");
+    check(
+      tableCell("a | b\nc") === "a \\| b c",
+      "table cell escapes pipes and newlines",
+    );
+    check(
+      fileURIs({
+        files: [
+          { source: { type: "uri", uri: "file:///export.md" } },
+          { uri: "file:///plugin.md" },
+          "file:///string.md",
+        ],
+      }).join(",") === "file:///export.md,file:///plugin.md,file:///string.md",
+      "fileURIs accepts export and plugin attachment shapes",
+    );
+
+    console.log("self-test ok");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function dryRun(opts) {
@@ -1548,34 +2813,55 @@ async function dryRun(opts) {
   }
 }
 
+const ANALYZE_USAGE =
+  "Usage: node scripts/e8-cache-measure.mjs --analyze <export.json> --variant <pre-e8|e8-a> --scenario <hint|status|control> [--project <dir>]";
+
 async function analyzeMode(opts) {
+  if (!opts.variant || !opts.scenario) {
+    throw new Error(
+      `--analyze requires explicit --variant and --scenario\n${ANALYZE_USAGE}`,
+    );
+  }
   const text = await readFile(resolve(opts.analyze), "utf8");
   const data = parseJsonObject(text);
-  const messages = Array.isArray(data?.messages) ? data.messages : [];
-  const prompt1Text =
-    messages.find((message) => message?.type === "user")?.text ?? "";
-  const notice = noticeInfo(prompt1Text);
-  const variant = notice.marker ? "e8-a" : "pre-e8";
-  const scenario = /auth-service/i.test(String(prompt1Text))
-    ? "hint"
-    : "status";
+  const projectDir = opts.project ? resolve(opts.project) : null;
   const run = analyzeExport(data, {
-    scenario,
+    scenario: opts.scenario,
     rep: 0,
-    variant,
+    variant: opts.variant,
     attempt: 1,
     sessionID: data?.info?.id ?? null,
-    projectDir: null,
+    projectDir,
     salt: null,
     model: data?.info?.model
       ? `${data.info.model.providerID}/${data.info.model.id}`
       : null,
+    requestedModel: opts.modelProvided ? opts.model : null,
     briefHashBefore: null,
     briefHashAfter: null,
     briefLineCount: null,
     rawPath: resolve(opts.analyze),
   });
-  run.validationErrors = validateRun(run, data, null, variant, scenario);
+  const validation = validateRun(
+    run,
+    data,
+    projectDir,
+    opts.variant,
+    opts.scenario,
+    { requireBriefHashes: false },
+  );
+  run.validationErrors = validation.errors;
+  run.validationNotChecked = validation.notChecked;
+  run.validationStatus = validationState(
+    validation.errors,
+    validation.notChecked,
+  );
+  run.validationComplete = run.validationStatus === "valid";
+  if (run.validationStatus === "not-checked") {
+    console.error(`validation incomplete: ${validation.notChecked.join("; ")}`);
+  } else if (run.validationStatus === "invalid") {
+    console.error(`validation failed: ${validation.errors.join("; ")}`);
+  }
   console.log(JSON.stringify(run, null, 2));
 }
 
@@ -1603,7 +2889,14 @@ function parseList(value, flag) {
   if (items.length === 0) {
     throw new Error(`${flag} requires a non-empty comma-separated list`);
   }
-  return [...new Set(items)];
+  const seen = new Set();
+  for (const item of items) {
+    if (seen.has(item)) {
+      throw new Error(`${flag} contains a duplicate: ${item}`);
+    }
+    seen.add(item);
+  }
+  return items;
 }
 
 function parseCompare(value) {
@@ -1627,9 +2920,13 @@ function parseArgs(argv) {
       `e8-cache-${new Date().toISOString().replace(/[:.]/g, "-")}`,
     ),
     model: DEFAULT_MODEL,
+    modelProvided: false,
     reps: DEFAULT_REPS,
     scenarios: [...DEFAULT_SCENARIOS],
     variants: [...VARIANTS],
+    variant: null,
+    scenario: null,
+    project: null,
     comparisons: [{ baseline: "pre-e8", candidate: "e8-a" }],
     paceMs: DEFAULT_PACE_MS,
     maxRetries: DEFAULT_MAX_RETRIES,
@@ -1648,6 +2945,8 @@ function parseArgs(argv) {
   };
 
   let compareSeen = false;
+  let variantsProvided = false;
+  let scenariosProvided = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
@@ -1668,6 +2967,9 @@ function parseArgs(argv) {
         opts.keepProjects = true;
         break;
       case "--analyze":
+        if (opts.analyze !== null) {
+          throw new Error("--analyze may be specified only once");
+        }
         opts.analyze = resolve(readValue(index, arg));
         index += 1;
         break;
@@ -1677,6 +2979,7 @@ function parseArgs(argv) {
         break;
       case "--model":
         opts.model = readValue(index, arg);
+        opts.modelProvided = true;
         index += 1;
         break;
       case "--reps":
@@ -1685,10 +2988,33 @@ function parseArgs(argv) {
         break;
       case "--scenarios":
         opts.scenarios = parseList(readValue(index, arg), arg);
+        scenariosProvided = true;
         index += 1;
         break;
       case "--variants":
         opts.variants = parseList(readValue(index, arg), arg);
+        variantsProvided = true;
+        index += 1;
+        break;
+      case "--scenario":
+        if (opts.scenario !== null) {
+          throw new Error("--scenario may be specified only once");
+        }
+        opts.scenario = readValue(index, arg);
+        index += 1;
+        break;
+      case "--variant":
+        if (opts.variant !== null) {
+          throw new Error("--variant may be specified only once");
+        }
+        opts.variant = readValue(index, arg);
+        index += 1;
+        break;
+      case "--project":
+        if (opts.project !== null) {
+          throw new Error("--project may be specified only once");
+        }
+        opts.project = resolve(readValue(index, arg));
         index += 1;
         break;
       case "--compare":
@@ -1708,7 +3034,7 @@ function parseArgs(argv) {
         index += 1;
         break;
       case "--attempts":
-        opts.attempts = positiveInt(readValue(index, arg), arg);
+        opts.attempts = nonNegativeInt(readValue(index, arg), arg);
         index += 1;
         break;
       case "--timeout-ms":
@@ -1722,23 +3048,73 @@ function parseArgs(argv) {
 
   if (opts.help) return opts;
 
-  for (const scenario of opts.scenarios) {
+  const validateVariant = (variant, flag) => {
+    if (UNIMPLEMENTED_VARIANTS.includes(variant)) {
+      throw new Error(`${flag} ${variant} is not implemented until Task 7/8`);
+    }
+    if (!VARIANTS.includes(variant)) {
+      throw new Error(`unknown variant: ${variant}`);
+    }
+  };
+  const validateScenario = (scenario, flag) => {
     if (!ALL_SCENARIOS.includes(scenario)) {
       throw new Error(`unknown scenario: ${scenario}`);
     }
-  }
-  for (const variant of opts.variants) {
-    if (!ALL_VARIANTS.includes(variant)) {
-      throw new Error(`unknown variant: ${variant}`);
+  };
+
+  for (const scenario of opts.scenarios) validateScenario(scenario, "scenario");
+  for (const variant of opts.variants) validateVariant(variant, "variant");
+
+  if (opts.analyze) {
+    if (variantsProvided) {
+      throw new Error(
+        "--variants is not valid with --analyze; use --variant <name>",
+      );
+    }
+    if (scenariosProvided) {
+      throw new Error(
+        "--scenarios is not valid with --analyze; use --scenario <name>",
+      );
+    }
+    if (!opts.variant || !opts.scenario) {
+      throw new Error(
+        `--analyze requires explicit --variant and --scenario\n${ANALYZE_USAGE}`,
+      );
+    }
+    validateVariant(opts.variant, "--variant");
+    validateScenario(opts.scenario, "--scenario");
+  } else {
+    if (opts.variant) {
+      throw new Error("--variant is only valid with --analyze");
+    }
+    if (opts.scenario) {
+      throw new Error("--scenario is only valid with --analyze");
+    }
+    if (opts.project) {
+      throw new Error("--project is only valid with --analyze");
     }
   }
+
+  const comparisonKeys = new Set();
   for (const comparison of opts.comparisons) {
-    if (!ALL_VARIANTS.includes(comparison.baseline)) {
-      throw new Error(`unknown comparison baseline: ${comparison.baseline}`);
+    if (comparison.baseline === comparison.candidate) {
+      throw new Error(
+        `comparison baseline and candidate must differ: ${comparison.baseline}`,
+      );
     }
-    if (!ALL_VARIANTS.includes(comparison.candidate)) {
-      throw new Error(`unknown comparison candidate: ${comparison.candidate}`);
+    for (const endpoint of [comparison.baseline, comparison.candidate]) {
+      validateVariant(endpoint, "comparison endpoint");
+      if (!opts.variants.includes(endpoint)) {
+        throw new Error(
+          `comparison endpoint ${endpoint} is not in --variants (${opts.variants.join(",")})`,
+        );
+      }
     }
+    const key = `${comparison.baseline}:${comparison.candidate}`;
+    if (comparisonKeys.has(key)) {
+      throw new Error(`duplicate comparison: ${key}`);
+    }
+    comparisonKeys.add(key);
   }
 
   const modes = [
@@ -1759,26 +3135,43 @@ function printHelp() {
 Usage:
   node scripts/e8-cache-measure.mjs --self-test
   node scripts/e8-cache-measure.mjs --dry-run [options]
-  node scripts/e8-cache-measure.mjs --analyze <export.json>
+  node scripts/e8-cache-measure.mjs --analyze <export.json> --variant <name> --scenario <name> [--project <dir>]
   node scripts/e8-cache-measure.mjs --run [options]
 
 Options:
   --self-test          Offline analyzer/self-test (no model calls)
   --dry-run            Prepare variants and fixtures (no model calls)
-  --analyze <export>   Summarize a saved opencode session export
+  --analyze <export>   Summarize and validate a saved opencode session export
+  --variant <name>     Analyze variant: pre-e8 or e8-a (required with --analyze)
+  --scenario <name>    Analyze scenario: hint, status, or control (required with --analyze)
+  --project <dir>      Project directory for --analyze filesystem checks
   --run                Run the measured protocol
   --out <dir>          Output directory (default: /tmp/opencode/e8-cache-<timestamp>)
-  --model <id>         Provider/model (default: ${DEFAULT_MODEL})
+  --model <id>         Provider/model (default: ${DEFAULT_MODEL}); with --analyze,
+                       checks the export model only when explicitly provided
   --reps <n>           Repetitions per scenario (default: ${DEFAULT_REPS})
   --scenarios <list>   Comma-separated scenarios (default: ${DEFAULT_SCENARIOS.join(",")})
-  --variants <list>    Comma-separated variants (default: ${VARIANTS.join(",")})
+  --variants <list>    Comma-separated variants (default: ${VARIANTS.join(",")}); only pre-e8 and e8-a are implemented
   --compare <a>:<b>    Pairing to report; repeatable (default: pre-e8:e8-a)
   --pace-ms <ms>       Minimum gap between model calls (default: ${DEFAULT_PACE_MS})
-  --max-retries <n>    Retries for a 429/quota error (default: ${DEFAULT_MAX_RETRIES})
-  --attempts <n>       Attempts per run after validation failure (default: ${DEFAULT_ATTEMPTS})
+  --max-retries <n>    Extra whole-run attempts after a quota error (default: ${DEFAULT_MAX_RETRIES})
+  --attempts <n>       Extra whole-run attempts after a validation failure (default: ${DEFAULT_ATTEMPTS})
   --timeout-ms <ms>    Per-CLI-call timeout (default: ${DEFAULT_TIMEOUT_MS})
   --keep-projects      Keep prepared project directories
   --help               Show this help
+
+Retry isolation:
+  runPrompt makes exactly one model call. A quota/provider error or a validation
+  failure discards the whole attempt; a retry gets a fresh project, salt, and
+  session. Total attempts per run: 1 + max(--max-retries, --attempts). Quota
+  retries back off 5 s, 10 s, 20 s, then 30 s (capped at 30 s).
+
+--analyze requires explicit --variant and --scenario and runs the full
+validation gate. Without --project, the filesystem checks (load marker, brief
+hash, read containment, alpha/beta reads) are reported as "not checked (no
+projectDir)" and validationStatus is "not-checked", never "valid". With
+--project but no before/after snapshots, the brief-hash check is also reported
+as not checked.
 
 The harness never makes a model call in --self-test or --dry-run.
 `);
@@ -1791,7 +3184,7 @@ async function main() {
     return;
   }
   if (opts.selfTest) {
-    selfTest();
+    await selfTest();
     return;
   }
   if (opts.analyze) {

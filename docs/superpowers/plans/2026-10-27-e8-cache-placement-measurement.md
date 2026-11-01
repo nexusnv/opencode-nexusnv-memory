@@ -109,7 +109,7 @@ The measured session is new for each variant/rep. Do not reuse a session across 
 - [ ] The project config denies skills and MCP: `policies: [{action:"integration.use",resource:"skill:*",effect:"deny"}, {action:"integration.use",resource:"mcp:*",effect:"deny"}]`. The model must use `read`.
 - [ ] The project config denies `shell` and `edit`/`write` so the model cannot read files another way or mutate the fixture. Keep `read` allowed. The memory plugin's own write paths are not model tools.
 - [ ] Every CLI call uses `opencode run --standalone`, `-m google/gemini-3.5-flash-lite`, `--format json`, `--auto`. The harness sets `OPENCODE_CONFIG_DIR=<out>/config/opencode` and `XDG_CONFIG_HOME=<out>/xdg` for the whole process, and creates both empty directories before the first call.
-- [ ] Model calls are paced at least 6 seconds apart (global pacer across runs) to stay under the 15 RPM free-tier limit. On a 429/quota error, retry with backoff (5 s, 10 s, 20 s, 30 s; max 4 retries) and log the retry. Do not count a retried call as a new measurement.
+- [ ] Model calls are paced at least 6 seconds apart (global pacer across runs) to stay under the 15 RPM free-tier limit. On a 429/quota error, discard the attempt and retry the whole run with a fresh project and session (5 s/10 s/20 s/30 s backoff, max 4 retries), logging the retry; a discarded attempt is not a measurement.
 - [ ] The harness rejects a run when the E8-A prompt has no notice marker (hint/status), the pre-E8 prompt has a marker, fewer than 2 assistant calls or fewer than 2 `read` tool parts occur, `alpha.txt`/`beta.txt` were not both read, a `skill`/`shell` tool part appears, the marker file is absent, or the brief hashes differ.
 - [ ] The harness records the exact user prompt text for both prompts, the notice line count, the brief line count, and the raw per-call token rows.
 
@@ -323,19 +323,35 @@ Patch both copied variants:
 The analyzer's `summary.json` contract (Task 4 reads it) is:
 
 ```text
-runs[], failures[], pairs[], pooled, byScenario, comparisons[]
+runs[], failures[], attempts[], pairs[], pooled, byScenario, comparisons[],
+comparisonErrors[], generatedAt, provider, model, opencodeVersion, repoHead,
+accountTier, meta{generatedAt,date,provider,model,accountTier,opencodeVersion,
+  repoHead,preE8Ref,e8ARef,variants,scenarios,reps,maxRetries,attempts,paceMs}
 run: scenario, rep, variant, attempt, sessionID, projectDir, salt, model,
-     prompts[], calls[], prompt1Calls, prompt2Calls, prompt1ToolParts,
+     requestedModel, exportModel, exportOutcome, exportInfoTokens, prompts[],
+     prompt1Text, prompt2Text, prompt1Files, prompt2Files, calls[], prompt1Calls,
+     prompt2Calls, prompt1ToolParts, prompt1ToolPartDetails, allToolParts,
+     assistantMessageCount, tokenlessAssistantCount, assistantErrorCount,
      prompt1First, prompt1Later{calls,cacheRead,promptTokens,cacheHitRate,p1LaterIncrementalRead},
-     prompt2First{p2FirstIncrementalRead}, prompt1Total, prompt2Total, sessionTotal,
-     notice{marker,label,hint,status,handoff,markerCount}, noticeLines, skillToolParts,
-     briefHashBefore, briefHashAfter, briefHashMatch, validationErrors, rawPath
+     prompt2First{p2FirstIncrementalRead}, prompt1Total, prompt2Total,
+     sessionTotal{...,computed:true},
+     notice{marker,label,hint,status,handoff,markerCount,hintCount,statusCount,handoffCount},
+     noticeLines, prompt2Notice, prompt2NoticeLines, skillToolParts,
+     briefHashBefore, briefHashAfter, briefHashMatch, validationErrors,
+     validationNotChecked, validationStatus, validationComplete, rawPath
+attempt: scenario, rep, variant, attempt, status(valid|invalid|error),
+         sessionID, projectDir, errors[], rawPath?
 pair: scenario, rep, pre, e8, deltaLaterHit, deltaLaterCacheRead,
       deltaLaterAdjustedRead, deltaPrompt2Hit, deltaPrompt2CacheRead,
       deltaPrompt2AdjustedRead
 ```
 
-`runMeasurement` writes `summary.json` and `summary.md` under `--out`, plus one raw export per run under `raw/`. `dryRun` prepares both variants and all projects without calling the model, and prints `dry-run ok: <scenario>/<variant>` for each.
+`summary.md` must render the full attempt history (including discarded
+attempts) and must not print "No failed runs." when any attempt was discarded.
+`runMeasurement` writes `summary.json` and `summary.md` under `--out`, plus one
+raw export per run under `raw/`. `dryRun` prepares both variants and all
+projects without calling the model, and prints `dry-run ok:
+<scenario>/<variant>` for each.
 
 Expected: `node scripts/e8-cache-measure.mjs --self-test` prints `self-test ok` after Step 12.
 
@@ -359,8 +375,15 @@ Add CLI flags in `parseArgs`/`printHelp`:
 --variants <list>     Comma-separated variants (default: pre-e8,e8-a)
 --compare <a>:<b>     Pairing to report; repeatable (default: pre-e8:e8-a)
 --pace-ms <ms>       Minimum gap between model calls (default: 6000)
---max-retries <n>    Retries for a 429/quota error (default: 4)
+--max-retries <n>    Extra whole-run attempts after a quota error (default: 4)
+--attempts <n>       Extra whole-run attempts after a validation failure (default: 3)
 ```
+
+`--analyze <export>` must also require explicit `--variant <name>` and
+`--scenario <name>`; `--project <dir>` is optional and only enables the
+filesystem checks. Reject `e8-attach`/`e8-b`, duplicate variants/scenarios/
+comparisons, `baseline === candidate`, and any comparison endpoint absent from
+`--variants`.
 
 - [ ] **Step 3: Run every CLI call through a private, isolated server**
 
@@ -441,35 +464,67 @@ function parseJsonLines(text) {
 }
 ```
 
-`runPrompt` loop:
+`runPrompt` makes exactly one CLI call and throws a typed error that carries the session ID:
 
 ```js
-for (let attempt = 1; attempt <= opts.maxRetries + 1; attempt += 1) {
+class QuotaError extends Error {
+  constructor(message, sessionID) {
+    super(message);
+    this.name = "QuotaError";
+    this.sessionID = sessionID ?? null;
+  }
+}
+
+class RunError extends Error {
+  constructor(message, sessionID) {
+    super(message);
+    this.name = "RunError";
+    this.sessionID = sessionID ?? null;
+  }
+}
+
+async function runPrompt(projectDir, prompt, sessionID, model, opts) {
   await pace(opts.paceMs);
-  const result = runCli(args, { cwd: projectDir, out: opts.out, timeoutMs });
+  const args = [
+    "run",
+    "--standalone",
+    "-m",
+    model,
+    "--format",
+    "json",
+    "--auto",
+  ];
+  if (sessionID) args.push("--session", sessionID);
+  args.push(prompt);
+
+  const result = runCli(args, {
+    cwd: projectDir,
+    out: opts.out,
+    timeoutMs: opts.timeoutMs,
+  });
   const events = parseJsonLines(result.stdout);
   const error = events.find((event) => event?.type === "error");
-  if (error && isQuotaError(`${result.stdout}\n${result.stderr}`)) {
-    if (attempt > opts.maxRetries)
-      throw new Error(`quota retries exhausted: ${error.error?.message ?? ""}`);
-    const wait = [5000, 10000, 20000, 30000][attempt - 1];
-    console.warn(`[pace] quota error; retrying in ${wait} ms`);
-    await new Promise((r) => setTimeout(r, wait));
-    continue;
+  const session = sessionID ?? sessionIDFromEvents(events);
+  const combined = `${result.stdout}\n${result.stderr}`;
+  if (error) {
+    const message =
+      error.error?.message ?? error.message ?? "opencode run error event";
+    throw isQuotaError(combined)
+      ? new QuotaError(message, session)
+      : new RunError(message, session);
   }
   if (result.status !== 0) {
-    throw new Error(
-      `opencode run failed (${result.status}): ${String(result.stderr).slice(-2000)}\n${String(result.stdout).slice(-4000)}`,
+    throw new RunError(
+      `opencode run failed (${result.status}): ${String(result.stderr).slice(-2000)}`,
+      session,
     );
   }
-  const session =
-    sessionID ?? events.find((event) => event?.sessionID)?.sessionID;
-  if (!session) throw new Error("opencode run produced no sessionID");
+  if (!session) throw new RunError("opencode run produced no sessionID", null);
   return { sessionID: session, stdout: result.stdout, stderr: result.stderr };
 }
 ```
 
-Every caller must `await runPrompt(...)` and pass the same `opts`/`out`; `exportSession` and `session delete` must also receive `out`. A quota retry reuses the same session; it is not a new measurement.
+`runOne` owns retries at the whole-attempt level. A quota error, provider error, or validation failure discards the attempt: record it, delete the session if known, remove the project unless `--keep-projects`, and start a new attempt with a fresh project directory, salt, and session. `--max-retries` is the number of extra whole-run attempts allowed after a quota error; `--attempts` is the number allowed after a validation failure. The total cap is `1 + Math.max(opts.maxRetries, opts.attempts)`. Quota retries back off 5 s/10 s/20 s/30 s (capped at 30 s) and log each retry. A retry is a new attempt, not a measurement of the failed session.
 
 - [ ] **Step 5: Add the measurement-only load marker**
 
@@ -495,7 +550,9 @@ Both the E8-A and pre-E8 `index.ts` already import `mkdir`, `join`, and define `
     { "action": "memory_write", "resource": "*", "effect": "ask" },
     { "action": "shell", "resource": "*", "effect": "deny" },
     { "action": "edit", "resource": "*", "effect": "deny" },
-    { "action": "write", "resource": "*", "effect": "deny" }
+    { "action": "write", "resource": "*", "effect": "deny" },
+    { "action": "webfetch", "resource": "*", "effect": "deny" },
+    { "action": "websearch", "resource": "*", "effect": "deny" }
   ],
   "policies": [
     { "action": "integration.use", "resource": "skill:*", "effect": "deny" },
@@ -504,7 +561,7 @@ Both the E8-A and pre-E8 `index.ts` already import `mkdir`, `join`, and define `
 }
 ```
 
-The exact `edit`/`write` action names must match the host's permission actions; if the host rejects one, use the names in `src/templates.ts` / the permissions docs and record the change. The purpose is to force `read` and prevent fixture mutation, not to test permissions.
+The exact `edit`/`write`/`webfetch`/`websearch` action names must match the host's permission actions; if the host rejects one, use the names in `src/templates.ts` / the permissions docs and record the change. The purpose is to force `read` and prevent fixture mutation or network escape, not to test permissions. `validateRun` must reject any tool part that is not a completed `read`, and any read path outside `projectDir`.
 
 - [ ] **Step 7: Add the unique salt to `AGENTS.md` and the brief**
 
@@ -529,7 +586,7 @@ With `--standalone`, no provider warm-up is needed. Do **not** add the draft's t
 4. `await runPrompt(projectDir, PROMPT_TWO, first.sessionID, model, opts)` for prompt 2 in the **same** session.
 5. Export the session once, after prompt 2, and `analyzeExport(...)` both prompts. Do not export between prompts for the measured run.
 6. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice. Pass `projectDir` into `validateRun` (or do the marker check in `runOne` immediately before validation); the function needs the path, not just the export summary.
-7. On a missing marker or any validation error, delete that attempt's project and retry with a new directory. The measured session stays until its export is saved.
+7. On a missing marker, any validation error, or a quota/provider error, delete that attempt's session and project and retry with a fresh project directory, salt, and session. The measured session stays until its export is saved or the attempt is discarded.
 
 No warm-up session is allowed before the measured prompt: it would seed the provider cache and bias the first-call baseline. If a future host version requires a warm-up, run it in a separate disposable project and record the deviation.
 
@@ -595,10 +652,21 @@ Add `--compare <baseline>:<candidate>` (repeatable, default `pre-e8:e8-a`) and m
 Add columns to the per-run table:
 
 ```text
-| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | notice lines | skill parts | brief hash match | marker |
+| scenario | rep | variant | p1 calls | p1 first hit | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted | p1 total tokens | p2 total tokens | notice lines | skill parts | brief hash match | marker | export outcome | export prompt tokens |
 ```
 
-Add a "Validity" section that prints the failed checks per run. Add a "Brief stability" section with the before/after hashes per run. Add a "Raw usage" section that points to `summary.json` and the per-run export path. For each comparison, print a pooled row (the gate input) and the per-scenario rows. Keep the **default** comparison (`pre-e8:e8-a`) at the top level (`pairs`, `pooled`, `byScenario`) so the Task 4 script works; put any extra comparisons in `comparisons[]`.
+Add a "Validity" section that prints the valid/exhausted/attempt counts and
+the failed checks per attempt. Add an "Attempt history" table with one row per attempt
+(`scenario`, `rep`, `variant`, `attempt`, `status`, `session`, `project`,
+`errors`), including discarded attempts. Print "No failed runs." only when
+every recorded attempt is valid; otherwise say that discarded attempts are
+listed in the history. Add a "Brief stability" section with the before/after
+hashes per run. Add a "Raw usage" section that points to `summary.json` and the
+per-run export path, and label session totals as computed from per-call rows.
+For each comparison, print a pooled row (the gate input) and the per-scenario
+rows. Keep the **default** comparison (`pre-e8:e8-a`) at the top level
+(`pairs`, `pooled`, `byScenario`) so the Task 4 script works; put any extra
+comparisons in `comparisons[]`.
 
 - [ ] **Step 12: Extend the self-test**
 
@@ -606,10 +674,31 @@ The `selfTest` must assert:
 
 - `prompt1Later.laterCacheHitRate` and the adjusted metrics on the synthetic export;
 - `prompt2First` incremental read;
-- `noticeLines` for the E8-A synthetic prompt;
+- `noticeLines` for the E8-A synthetic prompt and its prompt-2 notice;
 - `skillToolParts` detected on a synthetic `skill` tool part;
-- the pre-E8 synthetic export has no marker and no notice lines;
+- the pre-E8 synthetic export has no marker and no notice lines in either prompt;
 - `pairRuns(..., "pre-e8", "e8-a")` and the pooled summary on a synthetic two-variant pair;
+- a table-driven `validateRun` suite where the valid fixture passes and each
+  mutation fails for the intended reason: wrong prompt 1/2 text; missing or
+  extra user turns; prompt-2 hint/status/extra-handoff lines; pre-E8 and
+  control notice markers; non-succeeded outcome; assistant `error` or
+  `finish="error"`; missing or zero tokens; export `info.tokens` total
+  mismatch; model mismatch; wrong project path; missing load marker; brief
+  hash mismatch; non-completed or non-`read` tool parts; read paths outside
+  `projectDir` or missing a path; INDEX attached in `status` or absent in
+  `hint`;
+- `validateRun` without `projectDir` returns the four
+  `not checked (no projectDir)` labels and `validationStatus: "not-checked"`,
+  and `isValidRun` rejects it;
+- `pairRuns` throws on duplicate `(scenario, rep, variant)` keys, and
+  `buildReport` reports a zero-pair comparison instead of silently passing;
+- `parseArgs` rejects `e8-attach`, duplicate variants/scenarios/comparisons,
+  `baseline === candidate`, comparison endpoints absent from `--variants`, and
+  `--analyze` without explicit `--variant`/`--scenario`;
+- attempt-history rendering includes discarded attempts and escapes table
+  cells; "No failed runs." appears only for an all-valid history;
+- `fileURIs` accepts both export (`source.uri`) and plugin (`uri`) attachment
+  shapes; `isSessionID` requires the `ses_` prefix;
 - `parseJsonLines` handling a non-JSON progress line without throwing;
 - `isDirtySrc("") === false` and `isDirtySrc(" M src/index.ts") === true`.
 
