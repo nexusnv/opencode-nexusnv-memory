@@ -83,17 +83,12 @@ as "injection detected".
 
 The stable active-context brief remains in the per-model-call system prefix with the fixed untrusted-data label. Volatile status, hint, and newest-handoff pointer are appended once per prompt to the canonical user input, not pushed into system, and not re-emitted on every tool continuation. The handoff pointer is a path + "(latest)" only, never content. The block is labelled data-only. Status/hint are plugin-generated; the pointer is memory-derived. No directive from memory moves into the prompt; the existing `AGENTS.md` protocol remains the only instruction channel. A retry marker prevents duplicate/lost notices.
 
-## Revision 2026-11-02 — measurement decision: KEEP E8-A (issue #22)
+## Revision 2026-11-02 — measurement result: not measurable; interim keep of E8-A (issue #22)
 
-Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota before completing 5 valid pairs; results below are Flint-specific.
+Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota after 6 valid runs / 2 pairs; Flint was used per option B and the results below are Flint-specific.
 
-4 valid pairs of 6 expected (rep 3 blocked by Flint's free usage limit). Pooled results (N=4, T=ceil(2N/3)=3):
+Only 4 valid pairs were produced, below the 5-of-6 minimum in §2.5 (rep 3 blocked by Flint's free usage limit). Per §2.6 Step 1, N < 5 means the measurement is **not measurable**; no decision branch is selected and issue #22 stays open. The partial data are directionally favorable to E8-A: within-turn cache hit rate Δ +0.531 (4/0 positive), cross-prompt Δ +0.019 (4/0 positive), baseline-adjusted later read +2368 tokens, p2 adjusted −128 tokens (within noise), and brief hashes match before/after on all 9 valid runs. These are not statistically conclusive.
 
-- Within-turn cache hit rate: Δ +0.531 (4/0 positive pairs ≥ T) — WIN
-- Cross-prompt cache hit rate: Δ +0.019 (4/0 positive pairs ≥ T) — no regression
-- Baseline-adjusted later read: +2368 tokens; p2 adjusted: −128 tokens (within noise)
-- Brief hashes match before/after on all 9 valid runs.
+UX gate: ACCEPT WITH WORDING FIX — user text stays first and unmodified; notices separated by a blank line, visibly labelled, ≤3 lines, marker/suffix on the first notice line. The measured hint contained an imperative (`Call memory_recall(...) for the why.`); it is reworded to a descriptive statement with no imperative. This keeps the untrusted-memory channel data-only: no directive from memory moves into the prompt.
 
-UX gate: ACCEPT — user text stays first and unmodified; notices separated by a blank line, visibly labelled, ≤3 lines, data-only suffix.
-
-Decision: **KEEP E8-A**. No `src/` change required — the current prompt-tail placement wins on cache preservation with acceptable transcript visibility. See `docs/2026-10-27-e8-measurement.md` for full results.
+Interim product decision: **KEEP E8-A**. No placement change is required; the prompt-tail placement stays in production while a complete ≥5-pair run is pending. See `docs/2026-11-02-e8-measurement.md` for full results.

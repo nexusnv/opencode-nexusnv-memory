@@ -40,9 +40,7 @@ A two-prompt, multi-tool measurement was run against `google/gemini-3.5-flash-li
 | Baseline-adjusted later read        | +2016 tokens | —                 |
 | Baseline-adjusted p2 read           | +1 token     | —                 |
 
-All 6 valid runs: brief hashes match before/after. No billed-token claim is made (Free Tier).
-
-**Decision:** KEEP E8-A — see `docs/2026-10-27-e8-measurement.md` for full details.
+All 6 valid runs: brief hashes match before/after. No billed-token claim is made (Free Tier). This partial run was superseded by the Flint run below; it did not reach the validity gate. See `docs/2026-11-02-e8-measurement.md` for the combined record.
 
 ## Measurement results (2026-11-02)
 
@@ -59,8 +57,8 @@ A two-prompt, multi-tool measurement was run against `opencode/flint-40b-free` (
 
 All 9 valid runs: brief hashes match before/after. No billed-token claim is made (Free).
 
-**Cache verdict: WIN** — E8-A significantly preserves within-turn prefix-cache reuse and does not harm cross-prompt reuse.
+**Measurement verdict: NOT MEASURABLE** — only 4 valid pairs, below the 5-of-6 minimum in §2.5; per §2.6 Step 1 no branch is selected and issue #22 stays open. The partial data are directionally favorable to E8-A (Δlater +0.531, Δp2 +0.019, both 4/0 positive) but are not statistically conclusive.
 
-**UX verdict: ACCEPT** — the user's message stays clean and first; notices are clearly separated, labelled ([memory] / [memory-hint]), and marked as data-only.
+**UX verdict: ACCEPT WITH WORDING FIX** — the user's message stays clean and first; notices are clearly separated, labelled ([memory] / [memory-hint]), and marked as data-only on the first notice line. The measured hint contained an imperative; it is reworded to a descriptive statement.
 
-**Final decision: KEEP E8-A.** No code changes to `src/` are needed — the current prompt-tail placement is the one under test and it wins on cache preservation with acceptable transcript visibility.
+**Interim product decision: KEEP E8-A.** No placement change is needed; the prompt-tail placement stays in production while a complete ≥5-pair run is pending. See `docs/2026-11-02-e8-measurement.md` for full details.

@@ -1202,9 +1202,15 @@ function analyzeExport(data, meta = {}) {
   const laterCallCount = laterCalls.length;
   const laterCacheRead = sum(laterCalls, "cacheRead");
   const laterPromptTokens = sum(laterCalls, "promptTokens");
+  // Floor each later call's cache-read difference at zero before summing, so
+  // calls below the baseline do not offset calls above it. Keep the unadjusted
+  // aggregate subtraction separately as the raw result.
   const rawP1LaterIncrementalRead =
     laterCacheRead - firstCacheRead * laterCallCount;
-  const p1LaterIncrementalRead = Math.max(0, rawP1LaterIncrementalRead);
+  const p1LaterIncrementalRead = laterCalls.reduce(
+    (total, call) => total + Math.max(0, call.cacheRead - firstCacheRead),
+    0,
+  );
 
   const prompt2FirstCall = prompt2Calls[0];
   const rawP2FirstIncrementalRead =

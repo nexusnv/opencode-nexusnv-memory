@@ -36,17 +36,12 @@ See ADR-0007 for the containment half (untrusted content, proposal-only review, 
 
 The rotation/capture/forget status line and the INDEX recall hint are rendered by the `prompt` hook from `event.prompt.text` and appended to the canonical user prompt as at most three data-only notice lines. `statusLine` still consumes its notices only when the budget can carry the line; when it cannot, `hasStatusLine` peeks without consuming and the notices stay queued for a later turn. Snapshot writing remains a fire-and-forget `context`-hook writer. Ledger keys and idempotency are unchanged; `notice.forgotten` is a transient `ctx.storage` notice, not a metric.
 
-## Revision 2026-11-02 — measurement decision: KEEP E8-A (issue #22)
+## Revision 2026-11-02 — measurement result: not measurable; interim keep of E8-A (issue #22)
 
-Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota before completing 5 valid pairs; results below are Flint-specific.
+Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota after 6 valid runs / 2 pairs; Flint was used per option B and the results below are Flint-specific.
 
-4 valid pairs of 6 expected (rep 3 blocked by Flint's free usage limit). Pooled results (N=4, T=ceil(2N/3)=3):
+Only 4 valid pairs were produced, below the 5-of-6 minimum in §2.5 (rep 3 blocked by Flint's free usage limit). Per §2.6 Step 1, N < 5 means the measurement is **not measurable**; no decision branch is selected and issue #22 stays open. The partial data are directionally favorable to E8-A: within-turn cache hit rate Δ +0.531 (4/0 positive), cross-prompt Δ +0.019 (4/0 positive), baseline-adjusted later read +2368 tokens, p2 adjusted −128 tokens (within noise), and brief hashes match before/after on all 9 valid runs. These are not statistically conclusive.
 
-- Within-turn cache hit rate: Δ +0.531 (4/0 positive pairs ≥ T) — WIN
-- Cross-prompt cache hit rate: Δ +0.019 (4/0 positive pairs ≥ T) — no regression
-- Baseline-adjusted later read: +2368 tokens; p2 adjusted: −128 tokens (within noise)
-- Brief hashes match before/after on all 9 valid runs.
+UX gate: ACCEPT WITH WORDING FIX — user text stays first and unmodified; notices separated by a blank line, visibly labelled, ≤3 lines, marker/suffix on the first notice line. The measured hint contained an imperative (`Call memory_recall(...) for the why.`); it is reworded to a descriptive statement with no imperative.
 
-UX gate: ACCEPT — user text stays first and unmodified; notices separated by a blank line, visibly labelled, ≤3 lines, data-only suffix.
-
-Decision: **KEEP E8-A**. No `src/` change required — the current prompt-tail placement wins on cache preservation with acceptable transcript visibility. See `docs/2026-10-27-e8-measurement.md` for full results.
+Interim product decision: **KEEP E8-A**. No placement change is required; the prompt-tail placement stays in production while a complete ≥5-pair run is pending. See `docs/2026-11-02-e8-measurement.md` for full results.
