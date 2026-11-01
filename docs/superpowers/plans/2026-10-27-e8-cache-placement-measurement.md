@@ -38,13 +38,13 @@ A cache loss means the placement is not a win, and the issue's fallback (E8-B) o
 
 ### Tested starting point (historical context, not measurement evidence)
 
-A draft harness exists at `/tmp/opencode/e8-harness-draft.mjs` (created during plan preparation; not committed). It already:
+A draft harness was built and smoke-tested during plan preparation, but it lived only in `/tmp/opencode/e8-harness-draft.mjs` and is no longer present in this environment. Task 1 therefore specifies the harness from scratch. The draft's behavior and the plan-preparation findings below remain valid:
 
-- extracts two prompts and per-message assistant token rows from `opencode session export` (`input`, `output`, `reasoning`, `cache.read`, `cache.write`);
-- prepares pre-E8 and E8-A projects from `git archive 7629611^ src` and the working-tree `src/`;
-- patches `capture.ts` in both copies to disable `snapshotIfDue` so the brief cannot change mid-run;
-- runs two prompts, validates the tool calls, and renders paired deltas;
-- passes `--self-test`, `--dry-run`, and a complete pre-E8 end-to-end run.
+- it extracted two prompts and per-message assistant token rows from `opencode session export` (`input`, `output`, `reasoning`, `cache.read`, `cache.write`);
+- it prepared pre-E8 and E8-A projects from `git archive 7629611^ src` and the working-tree `src/`;
+- it patched `capture.ts` in both copies to disable `snapshotIfDue` so the brief could not change mid-run;
+- it ran two prompts, validated the tool calls, and rendered paired deltas;
+- it passed a self-test, a dry run, and a complete pre-E8 end-to-end run.
 
 Plan-preparation experiments added the following findings:
 
@@ -55,7 +55,7 @@ Plan-preparation experiments added the following findings:
 - A measurement-only load marker written at the start of the `prompt` hook (a directory named `.e8-plugin-loaded` under the project root) gives a deterministic "plugin is live" signal without changing the model request.
 - A unique salt in `AGENTS.md`/`activeContext.md` and the unique project path reduce cross-session cache hits, but the provider still reports a large shared base-system-prefix hit on the first call. The analysis therefore reports **baseline-adjusted** cache reads as well as raw hit rates.
 
-The draft is the starting point for Task 1. The plan records the deltas that must be applied; do not commit the draft unchanged.
+The plan's Task 1 is the authoritative harness specification; do not rely on a `/tmp` artifact.
 
 ---
 
@@ -75,6 +75,8 @@ This section is fixed **before** the full run. Do not change the metrics, scenar
 | Secondary provider | `opencode/deepseek-v4.1-flash-free` is rate-limited until roughly 2026-10-28; do not block the primary run on it. Record it as a follow-up, not a substitute. |
 
 One provider is enough for the issue. Do not generalize the result to OpenAI/Anthropic/DeepSeek; record them as unmeasured.
+
+**Run date:** the plan was authored 2026-10-27. Use the actual date of the full run. If it differs, name the measurement doc `docs/<YYYY-MM-DD>-e8-measurement.md` and substitute that path throughout this plan; record the actual date in the doc, the spike update, and the PR.
 
 ### 2.2 Variants and scenarios
 
@@ -181,12 +183,13 @@ Pool the valid pairs across both scenarios for the medians and sign counts, and 
 
 **Step 4 — branch.** Apply exactly one row:
 
-| Cache verdict  | UX verdict           | Decision                                           |
-| -------------- | -------------------- | -------------------------------------------------- |
-| win or neutral | accept / wording fix | **Keep E8-A** (Task 6)                             |
-| win or neutral | reject               | **Change to attachment** (Task 7), then re-measure |
-| loss           | accept / wording fix | **Change to E8-B** (Task 8), then re-measure       |
-| loss           | reject               | **Change to attachment** (Task 7), then re-measure |
+| Cache verdict  | UX verdict           | Decision                                                 |
+| -------------- | -------------------- | -------------------------------------------------------- |
+| win or neutral | accept / wording fix | **Keep E8-A** (Task 6)                                   |
+| win or neutral | reject               | **Change to attachment** (Task 7), then re-measure       |
+| loss           | accept / wording fix | **Change to E8-B** (Task 8), then re-measure             |
+| loss           | reject               | **Change to attachment** (Task 7), then re-measure       |
+| ambiguous      | —                    | **Not measurable** (Task 5 Step 7; issue #22 stays open) |
 
 For a change branch, adopt the candidate only if its re-measurement is not worse than E8-A by more than `0.05` on the metric that drove the decision; otherwise record the regression and leave issue #22 open with the evidence. Do not silently revert to pre-E8: revert is not one of issue #22's three options.
 
@@ -200,7 +203,7 @@ If the decision is **keep** but the UX gate says "accept with a wording fix", ap
 
 ### 2.7 "Not measurable" is a valid outcome
 
-If the free-tier quota, provider outage, or cache-field absence prevents 5 valid pairs, write "not measurable" in the doc, list what was attempted, and leave issue #22 open/blocked. Do not close on "CI has no credentials" or on a partial run. Do not claim a billed-token savings in any case; the account is free tier.
+If the free-tier quota, provider outage, cache-field absence, or an ambiguous cache verdict after the 5-rep rerun prevents a decision, write "not measurable" in the doc, list what was attempted, and leave issue #22 open/blocked. Do not close on "CI has no credentials" or on a partial run. Do not claim a billed-token savings in any case; the account is free tier.
 
 ---
 
@@ -240,14 +243,95 @@ If the free-tier quota, provider outage, or cache-field absence prevents 5 valid
 
 **Purpose:** Make the measurement reproducible and robust enough that a failed run is a provider/plugin failure, not a harness race.
 
-- [ ] **Step 1: Copy the draft and keep its tested parser/self-test**
+- [ ] **Step 1: Create the harness skeleton from scratch**
 
-```bash
-cp /tmp/opencode/e8-harness-draft.mjs scripts/e8-cache-measure.mjs
-node scripts/e8-cache-measure.mjs --self-test
+The plan-preparation draft at `/tmp/opencode/e8-harness-draft.mjs` is **not** part of the repository and may not exist on the execution host (it is already absent in this environment). Do not depend on it. Create `scripts/e8-cache-measure.mjs` as a dev-only Node ESM script with no runtime dependency. The script is not a package entrypoint and is excluded from the npm package.
+
+Use this structure; the steps below fill in the details:
+
+```text
+scripts/e8-cache-measure.mjs
+  header comment (Step 13)
+  imports: node:child_process (execFileSync, spawnSync), node:crypto (createHash),
+           node:fs (existsSync), node:fs/promises (cp, mkdir, readFile, readdir, rm, writeFile),
+           node:path (dirname, join, resolve), node:url (fileURLToPath)
+  constants: REPO_ROOT, PRE_E8_REF = "7629611^", E8_A_REF = "8a1f2bb",
+             DEFAULT_MODEL, DEFAULT_REPS, DEFAULT_SCENARIOS, ALL_SCENARIOS,
+             VARIANTS, LOAD_MARKER, DEFAULT_PACE_MS
+  CLI parsing: --self-test, --dry-run, --analyze <export>, --run, --out <dir>,
+               --model, --reps, --scenarios, --variants, --compare <a>:<b>,
+               --pace-ms, --max-retries, --attempts, --timeout-ms,
+               --keep-projects, --help
+  pure helpers: parseJsonLines, num, median, fmt, isQuotaError, isDirtySrc
+  process helpers: git, assertCleanSrc, runCli, pace, exportSession
+  variant prep: sourceFor, patchSnapshotDisabled, patchLoadMarker
+  project prep: prepareProject + fixtures (below)
+  runner: runPrompt, runOne, runMeasurement
+  analyzer: analyzeExport, validateRun
+  report: pairRuns, summarizeScenario, summarizePooled, buildReport, renderReport
+  selfTest, dryRun, analyzeMode, main
 ```
 
-Expected: `self-test ok`.
+`assertCleanSrc()` must be implemented in this task and called at the start of `runMeasurement`, before `sourceFor`, project preparation, or any provider call:
+
+```js
+function isDirtySrc(statusText) {
+  return String(statusText).trim().length > 0;
+}
+
+function assertCleanSrc() {
+  const status = git(["status", "--porcelain", "--", "src"]);
+  if (isDirtySrc(status)) {
+    throw new Error("src/ is dirty; commit or stash before measuring");
+  }
+}
+```
+
+`git(args)` runs `git -C REPO_ROOT ...`; `sourceFor(variant, dest)` must produce exactly one variant's `src/*.ts` **directly under `dest`** (the archive contains a `src/` prefix; strip it with `--strip-components=1` or move the files):
+
+- `pre-e8`: `git archive --format=tar 7629611^ src`, extract into `dest`.
+- `e8-a`: `git archive --format=tar 8a1f2bb src`, extract into `dest`.
+- `e8-attach` / `e8-b`: copy the current working-tree `src/*.ts` into `dest` (only after `assertCleanSrc`).
+
+Patch both copied variants:
+
+- `capture.ts`: insert `if (true) return false; // E8 measurement: disable handoff writer` immediately after the opening brace of `snapshotIfDue`.
+- `index.ts`: insert `await mkdir(join(projectRootOf(ctx), LOAD_MARKER), { recursive: true }).catch(() => {});` at the start of the prompt hook.
+
+`prepareProject(projectDir, variantDir, scenario, salt)` must create:
+
+- `.opencode/plugins/memory/` with the variant's `.ts` files;
+- `.opencode/opencode.jsonc` (Step 6);
+- `AGENTS.md` with `# E8 measurement fixture ${salt}` (Step 7);
+- `.opencode/memory/activeContext.md` with `- run salt: ${salt}`;
+- `.opencode/memory/INDEX.md`:
+  - `hint`: 3 lines, including `- auth-service: src/auth.ts`;
+  - `status`: 31 lines (heading + 30 entries), over the 30-line cap;
+  - `control`: 3 lines, no auth-service entry;
+- `.opencode/memory/handoffs/2026-10-26-120000-abcdef.md` with `# Handoff\n\n- branch: e8-measurement\n` (except `control`);
+- `.opencode/memory/decisions.md`, `architecture.md`, `style.md`, `issues.md` with small fixed fixtures;
+- `alpha.txt` and `beta.txt` in the project root.
+
+`promptOne(scenario, projectDir)` returns the §2.2 prompt; `PROMPT_TWO` is `Reply with exactly: SECOND-DONE`.
+
+The analyzer's `summary.json` contract (Task 4 reads it) is:
+
+```text
+runs[], failures[], pairs[], pooled, byScenario, comparisons[]
+run: scenario, rep, variant, attempt, sessionID, projectDir, salt, model,
+     prompts[], calls[], prompt1Calls, prompt2Calls, prompt1ToolParts,
+     prompt1First, prompt1Later{calls,cacheRead,promptTokens,cacheHitRate,p1LaterIncrementalRead},
+     prompt2First{p2FirstIncrementalRead}, prompt1Total, prompt2Total, sessionTotal,
+     notice{marker,label,hint,status,handoff,markerCount}, noticeLines, skillToolParts,
+     briefHashBefore, briefHashAfter, briefHashMatch, validationErrors, rawPath
+pair: scenario, rep, pre, e8, deltaLaterHit, deltaLaterCacheRead,
+      deltaLaterAdjustedRead, deltaPrompt2Hit, deltaPrompt2CacheRead,
+      deltaPrompt2AdjustedRead
+```
+
+`runMeasurement` writes `summary.json` and `summary.md` under `--out`, plus one raw export per run under `raw/`. `dryRun` prepares both variants and all projects without calling the model, and prints `dry-run ok: <scenario>/<variant>` for each.
+
+Expected: `node scripts/e8-cache-measure.mjs --self-test` prints `self-test ok` after Step 12.
 
 - [ ] **Step 2: Apply the provider/CLI defaults**
 
@@ -333,7 +417,7 @@ function isQuotaError(text) {
 }
 ```
 
-Extract the draft's inline JSONL parser into a helper, then make `runPrompt(projectDir, prompt, sessionID, model, opts)` async:
+Add the JSONL parser as a helper, then make `runPrompt(projectDir, prompt, sessionID, model, opts)` async:
 
 ```js
 function parseJsonLines(text) {
@@ -431,13 +515,13 @@ The active-context fixture already includes `- run salt: ${salt}`. The salt chan
 
 - [ ] **Step 8: Replace the fixed warm-up loop with a standalone readiness check**
 
-With `--standalone`, no provider warm-up is needed. Delete the draft's two-warm-up loop, the 2-second watcher delay, and the `session delete` warm-up cleanup. Then:
+With `--standalone`, no provider warm-up is needed. Do **not** add the draft's two-warm-up loop, the 2-second watcher delay, or `session delete` warm-up cleanup. Then:
 
 1. Move the per-attempt `projectDir` construction **inside** the attempt loop and include the attempt: `<out>/projects/<scenario>-<variant>-r<rep>-a<attempt>`. Never reuse a directory across attempts; a stale server/plugin state was the draft's failure mode.
 2. `prepareProject`, write the measured salt, and hash the brief.
 3. `await runPrompt(...)` for prompt 1.
 4. `exportSession(...)` and `analyzeExport(...)`.
-5. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice.
+5. `validateRun(...)`, which must also require `existsSync(join(projectDir, LOAD_MARKER))` and the variant's expected notice. Pass `projectDir` into `validateRun` (or do the marker check in `runOne` immediately before validation); the function needs the path, not just the export summary.
 6. On a missing marker or any validation error, delete that attempt's project and retry with a new directory. The measured session stays until its export is saved.
 
 No warm-up session is allowed before the measured prompt: it would seed the provider cache and bias the first-call baseline. If a future host version requires a warm-up, run it in a separate disposable project and record the deviation.
@@ -465,7 +549,7 @@ Save `briefHashBefore`; re-hash after prompt 2 and require equality. Add `create
 
 - [ ] **Step 10: Extend the analyzer with the baseline-adjusted metrics**
 
-In `analyzeExport`, add:
+In `analyzeExport`, compute:
 
 ```js
 const laterCalls = prompt1Calls.slice(1);
@@ -511,7 +595,7 @@ Add a "Validity" section that prints the failed checks per run. Add a "Brief sta
 
 - [ ] **Step 12: Extend the self-test**
 
-Add assertions to `selfTest` for:
+The `selfTest` must assert:
 
 - `prompt1Later.laterCacheHitRate` and the adjusted metrics on the synthetic export;
 - `prompt2First` incremental read;
@@ -519,7 +603,8 @@ Add assertions to `selfTest` for:
 - `skillToolParts` detected on a synthetic `skill` tool part;
 - the pre-E8 synthetic export has no marker and no notice lines;
 - `pairRuns(..., "pre-e8", "e8-a")` and the pooled summary on a synthetic two-variant pair;
-- `parseJsonLines` handling a non-JSON progress line without throwing.
+- `parseJsonLines` handling a non-JSON progress line without throwing;
+- `isDirtySrc("") === false` and `isDirtySrc(" M src/index.ts") === true`.
 
 Run:
 
@@ -1179,7 +1264,7 @@ Expected: tests pass, commit succeeds, `src clean`.
 }
 ```
 
-Update `VARIANTS`, the CLI `--variants` parsing, the self-test, and the comparison labels. Run the default comparison `pre-e8:e8-a` plus `e8-a:e8-attach`.
+Update `VARIANTS`, the CLI `--variants` parsing, the self-test, the `validateRun` expectations (prompt text equals the user text with no marker; the notice URI is in `prompt.files`; `.opencode/memory/prompt-notices.md` contains the marker/label; no skill/shell), and the comparison labels. Run the default comparison `pre-e8:e8-a` plus `e8-a:e8-attach`.
 
 - [ ] **Step 5: Re-run the measurement**
 
@@ -1232,19 +1317,85 @@ Execute this task only if Task 5 selected **change** and the UX gate accepted th
 
 - [ ] **Step 1: Freeze the bundle per prompt in `ctx.storage`**
 
-In the `context` hook, derive the current prompt from the last user message ID, with a prompt-hash fallback if the installed `Message` type has no `id`:
+In the `context` hook, derive the current prompt from the last user message ID, with a prompt-hash fallback if the installed `Message` type has no `id`. Extract the existing prompt-hook budget logic into a shared helper so E8-B cannot drift from E8-A:
 
 ```ts
-import { extractLatestUserText, matchIndex, promptHashFor } from "./hints.js";
+// Same file or a shared module; keep the existing metrics bumps at the call site.
+async function buildPromptNoticeText(args: {
+  promptText: string;
+  ledger: LedgerStorage;
+  projectID: string;
+  sessionID: string;
+  memoryRoot: string;
+  options: MemoryOptions;
+}): Promise<{
+  text: string;
+  statusShown: boolean;
+  statusDropped: boolean;
+  hintArms: boolean;
+  hintShown: boolean;
+}> {
+  const { promptText, ledger, projectID, sessionID, memoryRoot, options } =
+    args;
+  const noticeBudget = promptNoticeBudget(
+    options.indexLines,
+    options.injectBudgetLines,
+  );
+  const rememberHint = await matchRememberNearMiss(promptText, {
+    storage: ledger,
+    projectID,
+    sessionID,
+    memoryRoot,
+  });
+  const hint =
+    rememberHint ??
+    (await matchIndex(promptText, {
+      storage: ledger,
+      projectID,
+      sessionID,
+      memoryRoot,
+      indexLines: options.indexLines,
+    }));
+  const hintArms = rememberHint === undefined && hint !== undefined;
+  const statusFits = promptStatusFits(noticeBudget, hint !== undefined);
+  const hasStatus = await hasStatusLine(ledger, projectID);
+  const status =
+    statusFits && hasStatus
+      ? await statusLine(ledger, projectID, {
+          indexLines: options.indexLines,
+        })
+      : undefined;
+  const statusDropped = !statusFits && hasStatus;
+  const handoff = await newestHandoffLine(memoryRoot);
+  const plan = planPromptNotices({
+    handoff,
+    status,
+    hint,
+    budget: noticeBudget,
+  });
+  return {
+    text: plan.text,
+    statusShown: status !== undefined,
+    statusDropped,
+    hintArms,
+    hintShown: hint !== undefined,
+  };
+}
+```
 
-const lastUserText = extractLatestUserText(event.messages);
+Then the context hook:
+
+```ts
+import { extractLatestUserText, promptHashFor } from "./hints.js";
+
+const promptText = extractLatestUserText(event.messages) ?? "";
 const lastUserMessage = event.messages
   .filter((message) => message.role === "user")
   .at(-1) as { id?: string; role: string; content?: unknown } | undefined;
-const promptID = lastUserMessage?.id ?? promptHashFor(lastUserText ?? "");
+const promptID = lastUserMessage?.id ?? promptHashFor(promptText);
 const bundleKey = `e8b/${event.sessionID}`;
 const cached = await ctx.storage.get(bundleKey);
-let bundle: string | undefined;
+let bundle: string;
 if (
   cached !== undefined &&
   typeof cached === "object" &&
@@ -1259,24 +1410,31 @@ if (
     fileLines: options.fileLines,
     maxLines: briefInjectionCap(options.indexLines, options.injectBudgetLines),
   });
-  const status = await statusLine(ledger, projectID, {
-    indexLines: options.indexLines,
-  });
-  const handoff = await newestHandoffLine(memoryRoot);
-  const hint = await matchIndex(event.messages, {
-    storage: ledger,
+  const notices = await buildPromptNoticeText({
+    promptText,
+    ledger,
     projectID,
     sessionID: event.sessionID,
     memoryRoot,
-    indexLines: options.indexLines,
+    options,
   });
-  bundle = [brief, handoff, status, hint].filter(Boolean).join("\n");
+  bundle = [brief, notices.text].filter(Boolean).join("\n");
   await ctx.storage.set(bundleKey, { promptID, text: bundle });
+  if (notices.statusShown) bump("status.shown");
+  else if (notices.statusDropped) bump("status.dropped");
+  if (notices.hintShown) {
+    bump("hint.shown");
+    if (notices.hintArms) await setArm(ledger, projectID, event.sessionID);
+  }
 }
 if (bundle.length > 0) event.system.push({ type: "text", text: bundle });
 ```
 
+`planPromptNotices` enforces the same budget as E8-A: pointer dropped first, then status, never a hint. `statusLine` is called only when `statusFits && hasStatus`, so a tight budget leaves the notice queued instead of consuming it invisibly. `plan.text` carries the marker on its first line; the marker is inert in system text. If you prefer marker-free system text, strip the marker suffix without changing the line count.
+
 `src/hints.ts`'s `extractLatestUserText` already accepts the `event.messages` array and reads `role` + `content`; use it rather than inventing a second parser. Keep **one** bundle per session, overwritten when the last user message ID (or hash fallback) changes, so storage does not grow per prompt.
+
+The production context hook must not write debug files. The harness's `e8-b` variant patch (Task 8 Step 4) adds a measurement-only write of the computed bundle to `<project>/.e8-bundle.txt` so `validateRun` can assert the branch; that patch exists only in the copied variant.
 
 Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX attach and the remember fast path). Remove imports that become unused (`appendPromptNotices`, `planPromptNotices`, `statusLine`, `newestHandoffLine`, etc. only if no other call site uses them); `npm run typecheck` must stay clean. The status/hint are now computed in the context hook; the hint throttle still uses the session/prompt hash. `statusLine` consumes notices on the first call and the frozen bundle repeats the same text on later calls; the next prompt recomputes and may consume new notices.
 
@@ -1290,7 +1448,9 @@ Remove the notice block from the `prompt` hook (the prompt hook keeps INDEX atta
 - a hint is present on every call of the same prompt (no re-injection churn);
 - the prompt hook no longer appends notices to `event.prompt.text`;
 - the snapshot writer remains per-call (it may update the brief for the next prompt, but not the frozen bundle);
-- storage has one key per session, overwritten on prompt change.
+- storage has one key per session, overwritten on prompt change;
+- with `injectBudgetLines - indexLines < 3`, a status notice is **not** consumed: it stays queued and can appear on a later prompt; the pointer is dropped first and a hint is retained;
+- repeated context calls for the same prompt do not bump `status.shown`/`hint.shown` twice (the frozen bundle is computed once).
 
 `test/prompt-notices.test.ts`:
 
@@ -1320,7 +1480,7 @@ Expected: tests pass, commit succeeds, `src clean`.
 
 - [ ] **Step 4: Add the `e8-b` variant and re-measure**
 
-`sourceFor` copies the working-tree `src/` for `e8-b` and `8a1f2bb` for `e8-a` (the same pin as Task 7 Step 4). Add `e8-b` to `VARIANTS`, the self-test, and the comparison labels. Run:
+`sourceFor` copies the working-tree `src/` for `e8-b` and `8a1f2bb` for `e8-a` (the same pin as Task 7 Step 4). For the `e8-b` copy only, patch the context hook to write the computed bundle to `<project>/.e8-bundle.txt` (outside the model request) so `validateRun` can assert the notice marker/label and the frozen text. Add `e8-b` to `VARIANTS`, the self-test, the `validateRun` expectations (prompt text unchanged; `.e8-bundle.txt` contains the notice marker/label; no skill/shell), and the comparison labels. Run:
 
 ```bash
 node scripts/e8-cache-measure.mjs --run \
@@ -1336,7 +1496,7 @@ Expected: 18 valid runs (3 variants × 2 scenarios × 3 reps). If fewer than 5 o
 
 - [ ] **Step 5: Decide whether E8-B actually wins**
 
-Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. Adopt E8-B only if `Δlater(e8-b − pre-e8) ≥ +0.05` with at least `T` positive pairs and `Δp2(e8-b − e8-a) ≥ −0.05`; otherwise record that E8-B did not win and leave issue #22 open with the evidence. Record the cross-prompt trade-off explicitly. Do not claim a win from E8-B if the cache did not improve.
+Report `e8-b` vs `pre-e8` and `e8-b` vs `e8-a` with the same `N`/`T` rule. This is a **branch-specific adoption rule**, not the §2.6 gate: the `+0.05` bound is E8-B vs pre-E8, while the `−0.05` bound is E8-B vs E8-A. Compute `N`/`T` separately for each comparison; do not pool the two baselines. Adopt E8-B only if `Δlater(e8-b − pre-e8) ≥ +0.05` with at least `T` positive pairs and `Δp2(e8-b − e8-a) ≥ −0.05`; otherwise record that E8-B did not win and leave issue #22 open with the evidence. Record the cross-prompt trade-off explicitly. Do not claim a win from E8-B if the cache did not improve.
 
 - [ ] **Step 6: Update the docs**
 
