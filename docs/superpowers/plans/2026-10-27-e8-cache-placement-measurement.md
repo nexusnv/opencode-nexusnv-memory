@@ -65,22 +65,22 @@ This section is fixed **before** the full run. Do not change the metrics, scenar
 
 ### 2.1 Provider, model, and account tier
 
-| Field              | Value                                                                                                                                                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider           | Google AI Studio / Gemini API (`google`) (pre-registered)                                                                                                     |
-| Model              | `google/gemini-3.5-flash-lite` (pre-registered)                                                                                                               |
-| Account tier       | **Free Tier** (evidence: 429 `generate_content_free_tier_requests`, limit 15 requests/minute)                                                                 |
-| OpenCode           | 2.2.5                                                                                                                                                         |
-| Credential         | `GEMINI_API_KEY` in the environment; never write it to the repo or the measurement doc                                                                        |
+| Field        | Value                                                                                         |
+| ------------ | --------------------------------------------------------------------------------------------- |
+| Provider     | Google AI Studio / Gemini API (`google`) (pre-registered)                                     |
+| Model        | `google/gemini-3.5-flash-lite` (pre-registered)                                               |
+| Account tier | **Free Tier** (evidence: 429 `generate_content_free_tier_requests`, limit 15 requests/minute) |
+| OpenCode     | 2.2.5                                                                                         |
+| Credential   | `GEMINI_API_KEY` in the environment; never write it to the repo or the measurement doc        |
 
 **Provider deviation (2026-11-02):** The Google Free Tier daily quota (500 requests/day) was exhausted during the full run (6 valid runs / 2 pairs, then blocked ~17h). Per option B, the run was completed using **`opencode/flint-40b-free`** instead, which is a genuinely free ($0) prompt-caching provider. Flint was preflight-confirmed: turn 1 `cache.read: 256`, turn 2 `cache.read: 11,008` (cross-prompt reuse works), `cost: 0`, export format compatible (`info.tokens.cache.read/write`, per-message tokens, `outcome: "succeeded"`). Results below are Flint-specific, not Google-specific; this is recorded as a deviation from the pre-registered provider. Do not generalize to Google or other providers.
 
-| Field              | Value (actual run)                                                                                                                                           |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Provider           | OpenCode / Flint (`opencode`)                                                                                                                                 |
-| Model              | `opencode/flint-40b-free`                                                                                                                                     |
-| Account tier       | Free ($0; no billed-cost claim)                                                                                                                                 |
-| OpenCode           | 2.2.5                                                                                                                                                         |
+| Field        | Value (actual run)              |
+| ------------ | ------------------------------- |
+| Provider     | OpenCode / Flint (`opencode`)   |
+| Model        | `opencode/flint-40b-free`       |
+| Account tier | Free ($0; no billed-cost claim) |
+| OpenCode     | 2.2.5                           |
 
 Secondary provider: `opencode/deepseek-v4.1-flash-free` is rate-limited until roughly 2026-10-28; do not block the primary run on it. Record it as a follow-up, not a substitute.
 
@@ -252,6 +252,7 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 ## 4. Tasks
 
 **Status summary (2026-11-02):**
+
 - Task 1 (harness): COMPLETE — `scripts/e8-cache-measure.mjs` committed at `6f91295`
 - Task 2 (preflight): COMPLETE — Flint confirmed: turn 1 `cache.read: 256`, turn 2 `cache.read: 11,008`, cost $0
 - Task 3 (smoke): COMPLETE — 1 valid pair, hint scenario, Δlater hit +0.365

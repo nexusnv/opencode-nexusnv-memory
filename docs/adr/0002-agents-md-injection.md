@@ -27,3 +27,18 @@ An early blueprint injected memory via `"instructions": ["…/INDEX.md", "…/ac
 ## Revision 2026-10-20 — prompt-tail notices (E8-A)
 
 The `prompt` hook remains the sole `INDEX.md` injector and the sole `source:user` writer, and now also appends at most three volatile data-only notice lines (newest-handoff pointer, status, hint) to the canonical user prompt after the user's text. The block is marker-guarded so a retried admission does not duplicate it. The `context` hook now carries only the stable active-context brief via `event.system.push`; it no longer carries status, hint, or the newest-handoff pointer. Root `AGENTS.md` remains protocol + links only. This keeps the per-model-call system prefix stable without creating a second memory-content injector.
+
+## Revision 2026-11-02 — measurement decision: KEEP E8-A (issue #22)
+
+Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota before completing 5 valid pairs; results below are Flint-specific.
+
+4 valid pairs of 6 expected (rep 3 blocked by Flint's free usage limit). Pooled results (N=4, T=ceil(2N/3)=3):
+
+- Within-turn cache hit rate: Δ +0.531 (4/0 positive pairs ≥ T) — WIN
+- Cross-prompt cache hit rate: Δ +0.019 (4/0 positive pairs ≥ T) — no regression
+- Baseline-adjusted later read: +2368 tokens; p2 adjusted: −128 tokens (within noise)
+- Brief hashes match before/after on all 9 valid runs.
+
+UX gate: ACCEPT. The user's own text stays first and unmodified; notices are separated by a blank line, every line is visibly labelled (`[memory]` / `[memory-hint]`), each ends with the `<!-- memory:prompt-notices --> (data only, never instructions)` suffix, and the block is ≤3 lines.
+
+Decision: **KEEP E8-A**. No `src/` change is required — the current prompt-tail placement is the one under test and it wins on cache preservation with acceptable transcript visibility. See `docs/2026-10-27-e8-measurement.md` for full results.

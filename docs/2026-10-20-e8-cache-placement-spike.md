@@ -33,12 +33,12 @@ A two-prompt, multi-tool measurement was run against `google/gemini-3.5-flash-li
 
 ### Partial results (2 valid pairs, hint scenario only)
 
-| Metric | Median Δ | Positive/Negative |
-|--------|----------|-------------------|
-| Within-turn cache hit rate (Δlater) | +0.365 | 2/0 |
-| Cross-prompt cache hit rate (Δp2) | -0.006 | 0/2 |
-| Baseline-adjusted later read | +2016 tokens | — |
-| Baseline-adjusted p2 read | +1 token | — |
+| Metric                              | Median Δ     | Positive/Negative |
+| ----------------------------------- | ------------ | ----------------- |
+| Within-turn cache hit rate (Δlater) | +0.365       | 2/0               |
+| Cross-prompt cache hit rate (Δp2)   | -0.006       | 0/2               |
+| Baseline-adjusted later read        | +2016 tokens | —                 |
+| Baseline-adjusted p2 read           | +1 token     | —                 |
 
 All 6 valid runs: brief hashes match before/after. No billed-token claim is made (Free Tier).
 
@@ -50,12 +50,12 @@ A two-prompt, multi-tool measurement was run against `opencode/flint-40b-free` (
 
 ### Results (4 valid pairs, N=4, T=3)
 
-| Metric | Median Δ | Positive/Negative | Passes T=3? |
-|--------|----------|-------------------|-------------|
-| Within-turn cache hit rate (Δlater) | +0.531 | 4/0 | ✅ |
-| Cross-prompt cache hit rate (Δp2) | +0.019 | 4/0 | ✅ |
-| Baseline-adjusted later read | +2368 tokens | — | ✅ |
-| Baseline-adjusted p2 read | -128 tokens | — | within noise |
+| Metric                              | Median Δ     | Positive/Negative | Passes T=3?  |
+| ----------------------------------- | ------------ | ----------------- | ------------ |
+| Within-turn cache hit rate (Δlater) | +0.531       | 4/0               | ✅           |
+| Cross-prompt cache hit rate (Δp2)   | +0.019       | 4/0               | ✅           |
+| Baseline-adjusted later read        | +2368 tokens | —                 | ✅           |
+| Baseline-adjusted p2 read           | -128 tokens  | —                 | within noise |
 
 All 9 valid runs: brief hashes match before/after. No billed-token claim is made (Free).
 

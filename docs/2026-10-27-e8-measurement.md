@@ -7,20 +7,20 @@
 
 ## Method
 
-| Field | Value |
-|-------|-------|
-| Provider | OpenCode / Flint (`opencode`) — see provider deviation below |
-| Model | `opencode/flint-40b-free` |
-| Account tier | Free ($0; no billed-cost claim) |
-| OpenCode | v2.2.5 |
-| Repo HEAD | `7dbad43` |
-| Pre-E8 ref | `7629611^` |
-| E8-A ref | `8a1f2bb` (current working tree) |
-| Variants compared | `pre-e8` vs `e8-a` |
-| Scenarios | `hint`, `status` |
-| Reps requested | 3 |
-| Reps completed | 2 (rep 3 blocked by Flint free usage limit) |
-| Pacing | 6s minimum between model calls |
+| Field             | Value                                                        |
+| ----------------- | ------------------------------------------------------------ |
+| Provider          | OpenCode / Flint (`opencode`) — see provider deviation below |
+| Model             | `opencode/flint-40b-free`                                    |
+| Account tier      | Free ($0; no billed-cost claim)                              |
+| OpenCode          | v2.2.5                                                       |
+| Repo HEAD         | `7dbad43`                                                    |
+| Pre-E8 ref        | `7629611^`                                                   |
+| E8-A ref          | `8a1f2bb` (current working tree)                             |
+| Variants compared | `pre-e8` vs `e8-a`                                           |
+| Scenarios         | `hint`, `status`                                             |
+| Reps requested    | 3                                                            |
+| Reps completed    | 2 (rep 3 blocked by Flint free usage limit)                  |
+| Pacing            | 6s minimum between model calls                               |
 
 ## Provider deviation
 
@@ -46,14 +46,14 @@ All controls from §2.3 of the measurement plan were enforced:
 
 ### Valid runs: 9 of 12 expected
 
-| Scenario | Rep | pre-E8 | E8-A | Pair valid? |
-|----------|-----|--------|------|-------------|
-| hint | 1 | invalid¹ | valid | ❌ |
-| status | 1 | valid | valid | ✅ |
-| hint | 2 | valid | valid | ✅ |
-| status | 2 | valid | valid | ✅ |
-| hint | 3 | valid | quota² | ❌ |
-| status | 3 | quota² | quota² | ❌ |
+| Scenario | Rep | pre-E8   | E8-A   | Pair valid? |
+| -------- | --- | -------- | ------ | ----------- |
+| hint     | 1   | invalid¹ | valid  | ❌          |
+| status   | 1   | valid    | valid  | ✅          |
+| hint     | 2   | valid    | valid  | ✅          |
+| status   | 2   | valid    | valid  | ✅          |
+| hint     | 3   | valid    | quota² | ❌          |
+| status   | 3   | quota²   | quota² | ❌          |
 
 ¹ hint/pre-e8 rep 1 attempt 1: brief hashes differ (retry succeeded on attempt 2)
 ² Flint free usage limit reached — no more model calls available today
@@ -62,33 +62,33 @@ All controls from §2.3 of the measurement plan were enforced:
 
 **Pooled comparison (pre-e8 → e8-a):**
 
-| Metric | Median Δ | Positive/Negative | Passes T=3? |
-|--------|----------|-------------------|-------------|
-| Δlater hit (within-turn) | +0.531 | 4/0 | ✅ (4 ≥ 3) |
-| Δp2 hit (cross-prompt) | +0.019 | 4/0 | ✅ (4 ≥ 3) |
-| Δlater adjusted read | +2368 tokens | — | ✅ |
-| Δp2 adjusted read | -128 tokens | — | within noise |
+| Metric                   | Median Δ     | Positive/Negative | Passes T=3?  |
+| ------------------------ | ------------ | ----------------- | ------------ |
+| Δlater hit (within-turn) | +0.531       | 4/0               | ✅ (4 ≥ 3)   |
+| Δp2 hit (cross-prompt)   | +0.019       | 4/0               | ✅ (4 ≥ 3)   |
+| Δlater adjusted read     | +2368 tokens | —                 | ✅           |
+| Δp2 adjusted read        | -128 tokens  | —                 | within noise |
 
 **Per-scenario (N = 2 each, T = 2):**
 
 | Scenario | Δlater hit | +/- | Δp2 hit | +/- |
-|----------|------------|-----|---------|-----|
-| hint | +0.533 | 2/0 | +0.027 | 2/0 |
-| status | +0.530 | 2/0 | +0.009 | 2/0 |
+| -------- | ---------- | --- | ------- | --- |
+| hint     | +0.533     | 2/0 | +0.027  | 2/0 |
+| status   | +0.530     | 2/0 | +0.009  | 2/0 |
 
 ### Per-run metrics
 
 | Scenario | Rep | Variant | p1 later hit | p1 later cache read | p1 later adjusted | p2 first hit | p2 first cache read | p2 adjusted |
-|----------|-----|---------|--------------|---------------------|-------------------|--------------|---------------------|-------------|
-| hint | 1 | pre-E8 | 0.437 | 2304 | 2304 | 0.950 | 5120 | 5120 |
-| hint | 1 | E8-A | 0.973 | 6272 | 4224 | 0.976 | 6784 | 4736 |
-| status | 1 | pre-E8 | 0.442 | 2304 | 256 | 0.965 | 5120 | 3072 |
-| status | 1 | E8-A | 0.969 | 5120 | 3072 | 0.970 | 5248 | 3200 |
-| hint | 2 | pre-E8 | 0.431 | 2304 | 256 | 0.957 | 5248 | 3200 |
-| hint | 2 | E8-A | 0.961 | 6400 | 4352 | 0.985 | 6784 | 4736 |
-| status | 2 | pre-E8 | 0.440 | 2304 | 2304 | 0.961 | 5120 | 5120 |
-| status | 2 | E8-A | 0.972 | 5248 | 3200 | 0.973 | 5376 | 3328 |
-| hint | 3 | pre-E8 | 0.437 | 2304 | 256 | 0.946 | 5120 | 3072 |
+| -------- | --- | ------- | ------------ | ------------------- | ----------------- | ------------ | ------------------- | ----------- |
+| hint     | 1   | pre-E8  | 0.437        | 2304                | 2304              | 0.950        | 5120                | 5120        |
+| hint     | 1   | E8-A    | 0.973        | 6272                | 4224              | 0.976        | 6784                | 4736        |
+| status   | 1   | pre-E8  | 0.442        | 2304                | 256               | 0.965        | 5120                | 3072        |
+| status   | 1   | E8-A    | 0.969        | 5120                | 3072              | 0.970        | 5248                | 3200        |
+| hint     | 2   | pre-E8  | 0.431        | 2304                | 256               | 0.957        | 5248                | 3200        |
+| hint     | 2   | E8-A    | 0.961        | 6400                | 4352              | 0.985        | 6784                | 4736        |
+| status   | 2   | pre-E8  | 0.440        | 2304                | 2304              | 0.961        | 5120                | 5120        |
+| status   | 2   | E8-A    | 0.972        | 5248                | 3200              | 0.973        | 5376                | 3328        |
+| hint     | 3   | pre-E8  | 0.437        | 2304                | 256               | 0.946        | 5120                | 3072        |
 
 ### Brief stability
 
@@ -97,6 +97,7 @@ All 9 valid runs: brief hashes match before/after (yes). The brief did not chang
 ### Raw usage
 
 Per-call token rows and raw session exports are saved under:
+
 - `/tmp/opencode/e8-measurement-flint-2026-11-02-v2/summary.json`
 - `/tmp/opencode/e8-measurement-flint-2026-11-02-v2/summary.md`
 - `/tmp/opencode/e8-measurement-flint-2026-11-02-v2/raw/` (9 raw exports)
@@ -126,9 +127,9 @@ Reviewing the prompt-tail block as a user would see it in the transcript:
 
 ## Final decision: **KEEP E8-A**
 
-| Cache verdict | UX verdict | Decision |
-|---------------|------------|----------|
-| win | accept | **Keep E8-A** |
+| Cache verdict | UX verdict | Decision      |
+| ------------- | ---------- | ------------- |
+| win           | accept     | **Keep E8-A** |
 
 E8-A is kept as-is. No code changes to `src/` are needed — the current prompt-tail placement is the one under test and it wins on cache preservation with acceptable transcript visibility.
 

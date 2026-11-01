@@ -82,3 +82,18 @@ as "injection detected".
 ## Revision 2026-10-20 — prompt-tail placement (E8-A)
 
 The stable active-context brief remains in the per-model-call system prefix with the fixed untrusted-data label. Volatile status, hint, and newest-handoff pointer are appended once per prompt to the canonical user input, not pushed into system, and not re-emitted on every tool continuation. The handoff pointer is a path + "(latest)" only, never content. The block is labelled data-only. Status/hint are plugin-generated; the pointer is memory-derived. No directive from memory moves into the prompt; the existing `AGENTS.md` protocol remains the only instruction channel. A retry marker prevents duplicate/lost notices.
+
+## Revision 2026-11-02 — measurement decision: KEEP E8-A (issue #22)
+
+Measured E8-A prompt-tail placement against `opencode/flint-40b-free` (a prompt-caching provider, Free, $0) using two prompts and a multi-tool turn across 3 reps × 2 scenarios. The pre-registered provider (Google `gemini-3.5-flash-lite`) exhausted its Free Tier daily quota before completing 5 valid pairs; results below are Flint-specific.
+
+4 valid pairs of 6 expected (rep 3 blocked by Flint's free usage limit). Pooled results (N=4, T=ceil(2N/3)=3):
+
+- Within-turn cache hit rate: Δ +0.531 (4/0 positive pairs ≥ T) — WIN
+- Cross-prompt cache hit rate: Δ +0.019 (4/0 positive pairs ≥ T) — no regression
+- Baseline-adjusted later read: +2368 tokens; p2 adjusted: −128 tokens (within noise)
+- Brief hashes match before/after on all 9 valid runs.
+
+UX gate: ACCEPT — user text stays first and unmodified; notices separated by a blank line, visibly labelled, ≤3 lines, data-only suffix.
+
+Decision: **KEEP E8-A**. No `src/` change required — the current prompt-tail placement wins on cache preservation with acceptable transcript visibility. See `docs/2026-10-27-e8-measurement.md` for full results.
