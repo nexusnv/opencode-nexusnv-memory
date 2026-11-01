@@ -229,6 +229,15 @@ function resolveUnderRoot(root: string, file: string): string {
 const READ_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
 
 /**
+ * Bounded retries for a read that races an atomic rename of its target. A
+ * single attempt normally succeeds; the generous bound keeps a reader from
+ * being starved by a tight concurrent write loop (the failure mode that made
+ * the atomic-replacement test flaky). Each extra attempt is only paid on a
+ * detected inode swap, so the normal path is one open.
+ */
+const REPLACE_RETRY_LIMIT = 64;
+
+/**
  * Open an allowlisted path, then validate the *opened inode* against the
  * memory root. Resolving first and opening second left a check-then-open race:
  * a concurrent replace could swap the validated path for an outside symlink
@@ -246,9 +255,10 @@ async function openContainedRead(
   await assertContainedAncestors(root, dirname(abs));
   // Atomic publish replaces the inode on every write. A reader that opened
   // just before the rename sees the old inode at `stat` time; that is normal
-  // concurrency, so retry a bounded number of times before treating it as a
-  // rewrite race rather than a symlink escape.
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  // concurrency, so retry before treating it as a rewrite race rather than a
+  // symlink escape. Yield between attempts so a writer churning renames can
+  // make progress instead of starving the reader out of every retry.
+  for (let attempt = 0; attempt < REPLACE_RETRY_LIMIT; attempt += 1) {
     const handle = await open(abs, READ_OPEN_FLAGS);
     try {
       const opened = await handle.stat();
@@ -265,15 +275,17 @@ async function openContainedRead(
       // The path may have been swapped after `open`; only accept the read
       // when the descriptor still names the contained path's current inode.
       const target = await stat(realAbs);
-      if (target.dev !== opened.dev || target.ino !== opened.ino) {
-        await handle.close().catch(() => undefined);
-        if (attempt < 3) continue;
-        throw new Error(`[memory] memory file is being rewritten: ${file}`);
+      if (target.dev === opened.dev && target.ino === opened.ino) {
+        return { handle, size: opened.size };
       }
-      return { handle, size: opened.size };
     } catch (error) {
       await handle.close().catch(() => undefined);
       throw error;
+    }
+    // Inode swapped under us: drop this descriptor and retry after yielding.
+    await handle.close().catch(() => undefined);
+    if (attempt < REPLACE_RETRY_LIMIT - 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
   throw new Error(`[memory] memory file is being rewritten: ${file}`);
