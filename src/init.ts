@@ -65,12 +65,30 @@ function errorLine(error: unknown): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
+/** Per-process chain: overlapping init calls must not observe each other's fresh templates. */
+let initChain: Promise<void> = Promise.resolve();
+
+function withInitMutex<T>(fn: () => Promise<T>): Promise<T> {
+  const run = initChain.then(fn, fn);
+  initChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /**
  * Idempotent create/repair. Creates `INDEX.md` last; when `INDEX.md` was
  * absent and any earlier target failed, INDEX is never attempted, so the
  * project remains uninitialized.
  */
-export async function initializeMemory(
+export function initializeMemory(
+  input: MemoryInitInput,
+): Promise<MemoryInitResult> {
+  return withInitMutex(() => initializeMemoryUnlocked(input));
+}
+
+async function initializeMemoryUnlocked(
   input: MemoryInitInput,
 ): Promise<MemoryInitResult> {
   const root = resolve(input.memoryRoot);
