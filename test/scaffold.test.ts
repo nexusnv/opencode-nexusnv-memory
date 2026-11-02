@@ -9,11 +9,12 @@ import {
   ARCHIVE_DIR,
   HANDOFFS_DIR,
   MEMORY_FILES,
-  firstRunInstallText,
   getScaffoldFiles,
+  initInstallText,
   optionsSnippet,
   permissionsSnippet,
 } from "../src/templates.js";
+import { MEMORY_INIT_COMMAND_DESCRIPTION } from "../src/init.js";
 import { MEMORY_METRICS_COMMAND_DESCRIPTION } from "../src/metrics.js";
 import { MEMORY_STATUS_COMMAND_DESCRIPTION } from "../src/status-report.js";
 
@@ -212,14 +213,17 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     });
 
     // Command editor received ALL plugin commands, in setup order
-    // (memory-review, memory-forget, memory-gc, memory-metrics, memory-status).
+    // (memory-init, memory-review, memory-forget, memory-gc, memory-metrics,
+    // memory-status).
     expect([...commands.keys()]).toEqual([
+      "memory-init",
       "memory-review",
       "memory-forget",
       "memory-gc",
       "memory-metrics",
       "memory-status",
     ]);
+    expect(commands.get("memory-init")).toBe(MEMORY_INIT_COMMAND_DESCRIPTION);
     // And the registered descriptions are exactly the plugin constants.
     expect(commands.get("memory-metrics")).toBe(
       MEMORY_METRICS_COMMAND_DESCRIPTION,
@@ -269,11 +273,11 @@ describe("install_surface_P0_parity", () => {
     }
     expect(HANDOFFS_DIR).toBe("handoffs");
     expect(ARCHIVE_DIR).toBe("handoffs/archive");
-    // index.ts actually scaffolds both dirs (never overwrites).
-    const index = read("src/index.ts");
-    expect(index).toContain("HANDOFFS_DIR");
-    expect(index).toContain("ARCHIVE_DIR");
-    expect(index).toMatch(/writeNewCapped/);
+    // /memory-init actually creates both dirs (never overwrites).
+    const init = read("src/init.ts");
+    expect(init).toContain("HANDOFFS_DIR");
+    expect(init).toContain("ARCHIVE_DIR");
+    expect(init).toMatch(/writeNewCapped/);
 
     // Commented options snippet: exactly the 5 spec §3 options, all commented.
     const options = optionsSnippet();
@@ -444,10 +448,10 @@ async function preScaffold(projectRoot: string): Promise<void> {
   }
 }
 
-describe("first_run_install_checklist", () => {
+describe("init_install_checklist", () => {
   it("is one checklist with all install actions", () => {
-    const text = firstRunInstallText();
-    expect(text).toContain("scaffolded .opencode/memory/");
+    const text = initInstallText();
+    expect(text).toContain("Next steps:");
     expect(text).toContain("memory_write");
     expect(text).toContain('"effect": "ask"');
     expect(text).toContain(AGENTS_PROTOCOL_BLOCK);
@@ -462,39 +466,25 @@ describe("first_run_install_checklist", () => {
     expect(text.split(optionsSnippet()).length - 1).toBe(1);
   });
 
-  it("first run emits the consolidated checklist once and no separate log", async () => {
+  it("setup creates nothing and prints no memory message on a fresh project", async () => {
     resetInstallNudgesForTests();
-    const projectRoot = await mkdtemp(join(tmpdir(), "memory-first-run-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-no-scaffold-"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
       const setup = plugin.setup as unknown as (
         ctx: unknown,
       ) => Promise<(() => Promise<void>) | void>;
-      const cleanup = await setup(installCtx(projectRoot));
-      const checklist = warn.mock.calls.filter((c) =>
-        String(c[0]).includes("first run"),
-      );
-      expect(checklist).toHaveLength(1);
-      expect(String(checklist[0]![0])).toContain(permissionsSnippet());
-      expect(String(checklist[0]![0])).toContain("/memory-status");
-      // Exactly one warning, and it is the checklist — not the legacy
-      // standalone permission warning plus a dump.
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0]![0])).not.toContain(
-        "[memory] install the memory_write",
-      );
-      expect(log).not.toHaveBeenCalled();
-      await cleanup?.();
+      await setup(installCtx(projectRoot));
+      expect(existsSync(join(projectRoot, ".opencode", "memory"))).toBe(false);
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
-      log.mockRestore();
     }
   });
 
-  it("non-first-run keeps the unconditional permission warning", async () => {
+  it("an initialized project keeps the unconditional permission warning", async () => {
     resetInstallNudgesForTests();
-    const projectRoot = await mkdtemp(join(tmpdir(), "memory-non-first-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-initialized-"));
     await preScaffold(projectRoot);
     await writeFile(
       join(projectRoot, "AGENTS.md"),
@@ -512,9 +502,8 @@ describe("first_run_install_checklist", () => {
       );
       expect(permissionWarnings).toHaveLength(1);
       expect(String(permissionWarnings[0]![0])).toContain(permissionsSnippet());
-      // The first-run checklist is not printed on a pre-scaffolded project.
       expect(
-        warn.mock.calls.some((c) => String(c[0]).includes("first run")),
+        warn.mock.calls.some((c) => String(c[0]).includes("Next steps:")),
       ).toBe(false);
     } finally {
       warn.mockRestore();
@@ -523,7 +512,7 @@ describe("first_run_install_checklist", () => {
 });
 
 describe("agents_protocol_nudge", () => {
-  it("warns once when a non-first-run AGENTS.md lacks the protocol block", async () => {
+  it("warns once when an initialized project lacks the block", async () => {
     resetInstallNudgesForTests();
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-nudge-"));
     await preScaffold(projectRoot);
@@ -551,7 +540,7 @@ describe("agents_protocol_nudge", () => {
     }
   });
 
-  it("stays quiet on the first run even when AGENTS.md lacks the block", async () => {
+  it("stays quiet on an uninitialized project", async () => {
     resetInstallNudgesForTests();
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-nudge-first-"));
     await writeFile(join(projectRoot, "AGENTS.md"), "# Repo guide\n", "utf8");

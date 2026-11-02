@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin";
-import { access, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -15,6 +15,7 @@ import {
   asLedger,
   logDiagnostic,
   MEMORY_DIR,
+  memoryRootOf,
   projectIDOf,
   projectRootOf,
 } from "./command-context.js";
@@ -35,9 +36,10 @@ import {
 } from "./prompt-notices.js";
 import { hasStatusLine, statusLine } from "./status.js";
 import { rememberAsserted } from "./provenance.js";
+import { isInitialized, registerMemoryInit } from "./init.js";
 import { registerMemoryReview } from "./review.js";
 import { parseMemoryOptions } from "./config.js";
-import { TRUNCATION_NOTICE_LINE, writeNewCapped } from "./files.js";
+import { TRUNCATION_NOTICE_LINE } from "./files.js";
 import { registerMemoryTools } from "./tools.js";
 import { registerMemoryForget } from "./forget-command.js";
 import { registerMemoryGc } from "./gc-command.js";
@@ -47,10 +49,6 @@ import {
 } from "./status-report.js";
 import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
-  ARCHIVE_DIR,
-  HANDOFFS_DIR,
-  firstRunInstallText,
-  getScaffoldFiles,
   hasMemoryProtocolBlock,
   permissionsSnippet,
 } from "./templates.js";
@@ -70,35 +68,6 @@ let agentsProtocolNudgeLogged = false;
 /** Test seam: reset the once-per-process install nudge. */
 export function resetInstallNudgesForTests(): void {
   agentsProtocolNudgeLogged = false;
-}
-
-/**
- * Scaffold `.opencode/memory/` + six templates + `handoffs/` (+ archive dir).
- * Only writes missing files; never overwrites hand-owned content; never throws.
- * Returns true when anything was created (first run).
- */
-async function scaffoldMemoryDir(projectRoot: string): Promise<boolean> {
-  try {
-    const dir = join(projectRoot, MEMORY_DIR);
-    await mkdir(join(dir, HANDOFFS_DIR), { recursive: true });
-    await mkdir(join(dir, ARCHIVE_DIR), { recursive: true });
-    let created = false;
-    for (const [name, content] of Object.entries(getScaffoldFiles())) {
-      try {
-        await access(join(dir, name));
-        continue;
-      } catch {
-        // Missing (or unreadable): fall through to the exclusive create.
-      }
-      const outcome = await writeNewCapped(name, content, {
-        memoryRoot: dir,
-      });
-      if (outcome === "created") created = true;
-    }
-    return created;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -137,6 +106,7 @@ export default Plugin.define({
     registrations.push(
       await ctx.session.hook("prompt", async (event) => {
         try {
+          if (!(await isInitialized(memoryRootOf(ctx)))) return;
           bump("hook.prompt");
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
@@ -263,6 +233,7 @@ export default Plugin.define({
     registrations.push(
       await ctx.session.hook("context", async (event) => {
         try {
+          if (!(await isInitialized(memoryRootOf(ctx)))) return;
           bump("hook.context");
           const ledger = asLedger(ctx.storage);
           const projectID = projectIDOf(ctx);
@@ -308,6 +279,7 @@ export default Plugin.define({
     registrations.push(
       await ctx.session.hook("compaction", async (event) => {
         try {
+          if (!(await isInitialized(memoryRootOf(ctx)))) return;
           bump("hook.compaction");
           const memoryRoot = join(projectRootOf(ctx), MEMORY_DIR);
           const priors = await loadPriors(memoryRoot, {
@@ -333,6 +305,7 @@ export default Plugin.define({
     registrations.push(
       await ctx.tool.hook("execute.after", async (event) => {
         try {
+          if (!(await isInitialized(memoryRootOf(ctx)))) return;
           if ((event as { status?: string }).status !== "error") return;
           if (!options.captureFailures) return;
           const ledger = asLedger(ctx.storage);
@@ -394,6 +367,10 @@ export default Plugin.define({
     // deterministic apply channel with fail-closed per-line approval (§§5.4, 5.5).
     registrations.push(await registerMemoryTools(ctx));
 
+    // /memory-init: explicit, user-invoked scaffold. It is the only write path
+    // available before initialization and it creates INDEX.md last.
+    registrations.push(await registerMemoryInit(ctx));
+
     // /memory-review command: read+propose phase only — writes nothing,
     // never resets counters (only memory_apply resets, incl. []); its one
     // §5.12 exception is the count-only `review.invoked` metrics bump
@@ -435,8 +412,9 @@ export default Plugin.define({
           (opts) => subscribe.call(ctx.event, opts) as AsyncIterable<unknown>,
           {
             signal: controller.signal,
-            handleEvent: (event) =>
-              dispatchEvent(event, {
+            handleEvent: async (event) => {
+              if (!(await isInitialized(memoryRoot))) return;
+              await dispatchEvent(event, {
                 vcs: ctx.vcs as unknown as VcsPort,
                 storage: ledger,
                 projectID,
@@ -445,7 +423,8 @@ export default Plugin.define({
                 fileLines: options.fileLines,
                 log: logDiagnostic,
                 bump,
-              }),
+              });
+            },
             log: logDiagnostic,
           },
         );
@@ -455,29 +434,21 @@ export default Plugin.define({
     }
 
     const projectRoot = projectRootOf(ctx);
-    const firstRun = await scaffoldMemoryDir(projectRoot);
+    const initialized = await isInitialized(memoryRootOf(ctx));
 
-    // Unconditional loud warning: effective rules are unverifiable at setup
-    // (no acting agent), so scaffold + first-run print are the install channel.
-    // First run consolidates every install action into ONE message (E12); the
-    // non-first-run path keeps the spec §4.4 standalone permission warning.
-    try {
-      if (firstRun) {
-        console.warn(firstRunInstallText());
-      } else {
+    if (initialized) {
+      // Unconditional loud warning: effective rules are unverifiable at setup
+      // (no acting agent), so installed projects keep the spec §4.4 warning.
+      try {
         console.warn(
           "[memory] install the memory_write → ask rule or per-line approval fails open:\n" +
             permissionsSnippet(),
         );
+      } catch {
+        // Logging must never break plugin load.
       }
-    } catch {
-      // Logging must never break plugin load.
-    }
 
-    if (!firstRun) {
-      // Non-first-run installs with a hand-owned AGENTS.md that predates the
-      // protocol block never see the first-run print; nudge once per process.
-      // A missing/unreadable AGENTS.md stays silent (a global block may exist).
+      // Once-per-process nudge for a hand-owned AGENTS.md without the block.
       try {
         const agentsText = await readFile(
           join(projectRoot, "AGENTS.md"),
@@ -486,7 +457,7 @@ export default Plugin.define({
         if (!agentsProtocolNudgeLogged && !hasMemoryProtocolBlock(agentsText)) {
           agentsProtocolNudgeLogged = true;
           console.warn(
-            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block printed on first run (or in the README install section).",
+            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block printed by /memory-init (or in the README install section).",
           );
         }
       } catch {

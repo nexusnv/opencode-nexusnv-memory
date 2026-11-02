@@ -1,5 +1,12 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { mkdtemp, mkdir, readdir, readFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../src/index.js";
@@ -178,6 +185,7 @@ beforeEach(async () => {
   projectRoot = await mkdtemp(join(tmpdir(), "memory-isolation-"));
   memoryRoot = join(projectRoot, ".opencode", "memory");
   await mkdir(join(memoryRoot, "handoffs"), { recursive: true });
+  await writeFile(join(memoryRoot, "INDEX.md"), "# INDEX\n", "utf8");
   storage = new FakeStorage();
   evtSeq = 0;
   resetWriteChainForTests();
@@ -217,7 +225,7 @@ async function handoffFiles(): Promise<string[]> {
       withFileTypes: true,
     });
     return entries
-      .filter((e) => e.isFile())
+      .filter((e) => e.isFile() && /^[A-Za-z0-9._-]+\.md$/.test(e.name))
       .map((e) => e.name)
       .sort();
   } catch {
@@ -842,6 +850,61 @@ describe("setup wiring: single controller + dispose()", () => {
     expect(hooks.size).toBe(0);
     expect(toolDisposed).toBe(true);
     expect(commandDisposed).toBe(true);
+  });
+
+  it("drops local events and writes nothing when INDEX.md is absent", async () => {
+    // beforeEach seeds INDEX so the wired event loop is live; removing it
+    // before setup proves the event-loop guard is inert.
+    await rm(join(memoryRoot, "INDEX.md"));
+
+    let subscribed = 0;
+    const script = [idleEvent("sess-gated", projectRoot)];
+    const fakeCtx = {
+      options: {},
+      location: {
+        directory: projectRoot,
+        project: {
+          id: PROJECT,
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+      storage,
+      vcs: new FakeVcs({ current: "gated-branch", files: [] }),
+      event: {
+        subscribe: async function* () {
+          subscribed += 1;
+          for (const event of script) yield event as never;
+        },
+      },
+      permission: {
+        assert: async (_input: unknown): Promise<void> => undefined,
+      },
+      session: {
+        hook: async () => ({ dispose: async () => undefined }),
+        prompt: async (_args: unknown) => ({ sessionID: "s" }) as never,
+      },
+      tool: {
+        transform: async () => ({ dispose: async () => undefined }),
+        hook: async () => ({ dispose: async () => undefined }),
+      },
+      command: {
+        transform: async () => ({ dispose: async () => undefined }),
+      },
+    };
+    const setup = plugin.setup as unknown as (
+      ctx: unknown,
+    ) => Promise<(() => Promise<void>) | void>;
+    const cleanup = await setup(fakeCtx);
+    await vi.waitFor(() => expect(subscribed).toBe(1), {
+      timeout: 3000,
+      interval: 10,
+    });
+    // One macrotask: the gate probe resolves before any dispatch could run.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await handoffFiles()).toHaveLength(0);
+    expect(await readTotals(storage, PROJECT)).toEqual({});
+    await cleanup?.();
   });
 });
 
