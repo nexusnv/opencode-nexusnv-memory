@@ -77,8 +77,15 @@ export async function initializeMemory(
   const firstInit = !(await isInitialized(root));
   const created: string[] = [];
   const present: string[] = [];
-  const preexisting: string[] = [];
   const failures: string[] = [];
+  const templates = getScaffoldFiles();
+  // Snapshot survivor state before any write. A concurrent init that is
+  // creating these files must not make this call report a lost custom map.
+  const preexisting = new Set<string>();
+  for (const name of MEMORY_FILES) {
+    if (name === "INDEX.md") continue;
+    if (await isRegularFile(join(root, name))) preexisting.add(name);
+  }
   const opts = {
     memoryRoot: root,
     indexLines: input.indexLines,
@@ -93,12 +100,10 @@ export async function initializeMemory(
     }
   }
 
-  const templates = getScaffoldFiles();
   for (const name of MEMORY_FILES) {
     if (name === "INDEX.md") continue;
     if (await isRegularFile(join(root, name))) {
       present.push(name);
-      preexisting.push(name);
       continue;
     }
     try {
@@ -149,18 +154,19 @@ export async function initializeMemory(
     present,
     failures,
     initialized,
-    lostMapWarning: firstInit && initialized && preexisting.length > 0,
+    lostMapWarning: firstInit && initialized && preexisting.size > 0,
   };
 }
 
 /** Deterministic command output. No memory body, no captured content. */
 export function renderInitResult(result: MemoryInitResult): string {
   const lines: string[] = [];
+  const createdIndex = result.created.includes("INDEX.md");
   if (result.initialized) {
     lines.push(
       result.failures.length > 0
         ? "[memory] memory is initialized, but repair did not complete."
-        : result.firstInit
+        : createdIndex
           ? "[memory] initialized .opencode/memory (+ handoffs/)."
           : "[memory] memory already initialized; repair complete.",
     );
@@ -185,7 +191,7 @@ export function renderInitResult(result: MemoryInitResult): string {
       "[memory] warning: INDEX.md was missing while other memory files were present. The new INDEX.md is the default map; it does not reconstruct a lost custom map. Existing files were left untouched.",
     );
   }
-  if (result.firstInit && result.initialized) {
+  if (createdIndex && result.initialized) {
     lines.push("");
     lines.push(initInstallText());
   }

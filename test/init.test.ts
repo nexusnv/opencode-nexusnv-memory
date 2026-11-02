@@ -147,6 +147,9 @@ describe("initializeMemory", () => {
 
     expect(result.firstInit).toBe(true);
     expect(result.lostMapWarning).toBe(true);
+    expect(renderInitResult(result)).toContain(
+      "warning: INDEX.md was missing while other memory files were present",
+    );
     expect(await readFile(join(root, "decisions.md"), "utf8")).toBe(
       "- survive\n",
     );
@@ -164,6 +167,14 @@ describe("initializeMemory", () => {
     expect([...first.created, ...second.created].sort()).toEqual(
       [...MEMORY_FILES].sort(),
     );
+    // Exactly one call published INDEX, so exactly one prints the first-init
+    // checklist; neither may claim a lost map it did not observe at entry.
+    const texts = [renderInitResult(first), renderInitResult(second)];
+    expect(texts.filter((text) => text.includes("Next steps:"))).toHaveLength(
+      1,
+    );
+    expect(first.lostMapWarning).toBe(false);
+    expect(second.lostMapWarning).toBe(false);
   });
 });
 

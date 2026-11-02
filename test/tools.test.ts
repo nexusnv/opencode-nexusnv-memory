@@ -1069,5 +1069,17 @@ describe("initialization gate", () => {
       ).resolves.toEqual({ content: MEMORY_NOT_INITIALIZED });
     }
     expect(storage.data.size).toBe(0);
+
+    // The same registered executor re-probes per call: creating INDEX
+    // activates it without re-registering or restarting.
+    await writeFile(
+      join(projectRoot, ".opencode", "memory", "INDEX.md"),
+      "# INDEX\n",
+      "utf8",
+    );
+    const recall = added.find((tool) => tool.name === "memory_recall")!;
+    const afterInit = await recall.execute({ file: "INDEX.md" }, TOOL_CTX);
+    expect(afterInit).not.toEqual({ content: MEMORY_NOT_INITIALIZED });
+    expect((afterInit as { content: string }).content).toContain("# INDEX");
   });
 });
