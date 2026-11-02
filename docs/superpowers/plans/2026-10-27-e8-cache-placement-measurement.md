@@ -258,7 +258,8 @@ If the free-tier quota, provider outage, cache-field absence, or an ambiguous ca
 - Task 3 (smoke): COMPLETE — 1 valid pair, hint scenario, Δlater hit +0.365
 - Task 4 (full run): PARTIAL — 4 valid pairs (2 hint + 2 status), Flint free usage limit blocked rep 3; below the §2.5 5-pair minimum
 - Task 5 (measurement doc): COMPLETE — `docs/2026-11-02-e8-measurement.md` written; result: not measurable (N=4 < 5)
-- Task 6 (keep branch): NOT SELECTED — §2.6 Step 1 stops at not measurable. Interim product decision: keep E8-A pending a complete ≥5-pair run; issue #22 stays open.
+- Task 6 (keep branch): NOT SELECTED — §2.6 Step 1 stops at not measurable (N < 5).
+- Task 6 (not-measurable documentation step): RECORDED — because the run falls below the §2.5 5-of-6 minimum, the doc records `not measurable`, lists what was attempted, leaves issue #22 open/blocked, and documents the interim product decision to keep E8-A plus the transcript-visibility acceptance. This is documentation-only: Tasks 7/8 (change/E8-B) are not selected, and Task 9 verification alone is not sufficient — the doc must state the not-measurable outcome before Task 9 is treated as complete.
 - Tasks 7/8 (change/E8-B): NOT NEEDED — no branch selected
 - Task 9 (verification, changelog, PR): COMPLETE — typecheck, tests, audit, pack verified; changelog/README/ADRs updated; PR #27 carries the corrected record
 
@@ -994,12 +995,12 @@ Do not commit the `/tmp` directory. If the doc needs a full raw table, paste the
 Use this skeleton and fill the bracketed values from the run; do not leave placeholders:
 
 ```markdown
-# E8 cache-placement measurement — 2026-10-27
+# E8 cache-placement measurement — 2026-11-02
 
 ## Status
 
 Measured against Google Gemini 3.5 Flash Lite (Google AI Studio free tier)
-on 2026-10-27. Decision: **<keep | change to attachment | fall back to E8-B | not measurable>**.
+on 2026-11-02. Decision: **<keep | change to attachment | fall back to E8-B | not measurable>**.
 No billed-token savings claim is made; the account is free tier.
 
 ## Method
@@ -1113,7 +1114,7 @@ Change the status line to:
 ```markdown
 ## Status
 
-Placement is implemented and covered by tests. Measured on 2026-10-27 against
+Placement is implemented and covered by tests. Measured on 2026-11-02 against
 Google Gemini 3.5 Flash Lite (free tier): see
 [`2026-11-02-e8-measurement.md`](./2026-11-02-e8-measurement.md). Decision:
 <keep / change to attachment / change to E8-B / not measurable>. No billed-token
@@ -1155,7 +1156,7 @@ Replace the bullet that currently says the block is model-facing "not the user d
   transcript as part of that message. The server-plugin API exposes no separate
   UI/notification primitive, so delivery as a distinct alert still depends on
   the model relaying it; that remains best-effort. The placement was measured
-  on 2026-10-27 (`docs/2026-11-02-e8-measurement.md`) and kept: the block is
+  on 2026-11-02 (`docs/2026-11-02-e8-measurement.md`) and kept: the block is
   labelled data-only, capped at three lines, and keeps the stable system prefix
   free of volatile notices. The raw export shows the marker; rendered Markdown
   may hide the HTML comment. This visibility is an explicit, accepted trade-off,
@@ -1169,9 +1170,9 @@ If the UX verdict was "accept with a wording fix", describe the final marker/lab
 In the budget/eval section, after the 237-line sentence, add:
 
 ```markdown
-The 2026-10-27 measurement (`docs/2026-11-02-e8-measurement.md`) compared
-pre-E8 system placement with E8-A prompt-tail placement on Gemini 3.5 Flash
-Lite (free tier). It records token/cache fields and the UX verdict; it does not
+The 2026-11-02 measurement (`docs/2026-11-02-e8-measurement.md`) compared
+pre-E8 system placement with E8-A prompt-tail placement on `opencode/flint-40b-free`
+(free tier). It records token/cache fields and the UX verdict; it does not
 convert line counts into billed tokens. The account was free tier, so no
 billed-cost claim is made.
 ```
@@ -1183,7 +1184,7 @@ After the "It costs some context" bullet in the context/cost section, add:
 ```markdown
 - The volatile `[memory]` notice block (newest-handoff pointer, status, hint) is
   appended to the user prompt itself, so it is visible in the transcript. It is
-  capped at three labelled data-only lines. The 2026-10-27 measurement and the
+  capped at three labelled data-only lines. The 2026-11-02 measurement and the
   visibility decision are recorded in `docs/2026-11-02-e8-measurement.md`.
 ```
 
@@ -1192,8 +1193,8 @@ After the "It costs some context" bullet in the context/cost section, add:
 At the end of the E8 revision in each ADR, add one sentence:
 
 ```markdown
-Measurement (2026-10-27): compared with pre-E8 on Gemini 3.5 Flash Lite (free
-tier); see `docs/2026-11-02-e8-measurement.md`. The placement was kept and the
+Measurement (2026-11-02): compared with pre-E8 on Flint free tier;
+see `docs/2026-11-02-e8-measurement.md`. The placement was kept and the
 transcript visibility was accepted explicitly (or: changed to <option>).
 ```
 
@@ -1204,7 +1205,7 @@ Do not rewrite the ADR's original decision or its trust rationale; the note is a
 Under `Unreleased`, add:
 
 ```markdown
-- Docs: record the 2026-10-27 E8 cache-placement measurement (Gemini 3.5 Flash
+- Docs: record the 2026-11-02 E8 cache-placement measurement (Flint, free tier)
   Lite, free tier) and keep the prompt-tail notice placement. The prompt-tail
   block remains visible in the transcript by design; no billed-token claim is
   made.
