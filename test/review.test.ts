@@ -1,5 +1,12 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,7 +26,9 @@ import {
   type LedgerStorage,
 } from "../src/capture.js";
 import { withWriteLock } from "../src/files.js";
+import { MEMORY_NOT_INITIALIZED } from "../src/init.js";
 import { totalKey } from "../src/metrics.js";
+import { getScaffoldFiles } from "../src/templates.js";
 
 /**
  * `/memory-review` is the read+propose phase (spec §5.5 + c4-04): its sole
@@ -82,6 +91,9 @@ beforeEach(async () => {
   projectRoot = await mkdtemp(join(tmpdir(), "memory-review-"));
   memoryRoot = join(projectRoot, ".opencode", "memory");
   await mkdir(join(memoryRoot, "handoffs"), { recursive: true });
+  for (const [name, content] of Object.entries(getScaffoldFiles())) {
+    await writeFile(join(memoryRoot, name), content, "utf8");
+  }
   storage = new FakeStorage();
 });
 
@@ -103,14 +115,20 @@ function fakeForCommand(metrics?: {
 }) {
   const added: AddedCommand[] = [];
   const prompted: unknown[] = [];
+  const synthetics: unknown[] = [];
   const fakeCtx = {
-    ...(metrics
-      ? {
-          options: {},
-          location: metrics.location,
-          storage: metrics.storage,
-        }
-      : {}),
+    options: {},
+    location: metrics?.location ?? {
+      directory: projectRoot,
+      project: {
+        id: PROJECT,
+        directory: projectRoot,
+        canonical: projectRoot,
+      },
+    },
+    // Without an explicit metrics store, the fire-and-forget review counter
+    // goes to a throwaway store so the memory-write assertions stay isolated.
+    storage: metrics?.storage ?? new FakeStorage(),
     command: {
       transform: async (
         cb: (editor: { add: (def: AddedCommand) => void }) => void,
@@ -120,13 +138,17 @@ function fakeForCommand(metrics?: {
       },
     },
     session: {
+      synthetic: async (args: unknown) => {
+        synthetics.push(args);
+        return undefined;
+      },
       prompt: async (args: unknown) => {
         prompted.push(args);
         return { sessionID: SESSION } as never;
       },
     },
   };
-  return { added, prompted, fakeCtx };
+  return { added, prompted, synthetics, fakeCtx };
 }
 
 /** Full fake for plugin.setup wiring (mirrors test/hooks.test.ts + command). */
@@ -355,5 +377,22 @@ describe("proposes_table_and_writes_nothing", () => {
     const cleanup = await setup(fakeCtx);
     expect(added.map((c) => c.name)).toContain("memory-review");
     await (cleanup as () => Promise<void>)?.();
+  });
+});
+
+describe("initialization gate", () => {
+  it("returns the fixed pre-init message and bumps no counter", async () => {
+    await rm(join(memoryRoot, "INDEX.md"));
+    const { added, synthetics, fakeCtx } = fakeForCommand();
+    await registerMemoryReview(fakeCtx as never);
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "review", files: [], agents: [], skills: [] },
+      delivery: "steer",
+    });
+    expect((synthetics[0] as { text: string }).text).toBe(
+      MEMORY_NOT_INITIALIZED,
+    );
+    expect(await getPending(storage, PROJECT)).toBe(0);
   });
 });

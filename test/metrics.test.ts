@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import { withWriteLock } from "../src/files.js";
+import { MEMORY_NOT_INITIALIZED } from "../src/init.js";
 import {
   HINT_RETENTION_MS,
   hintKey,
@@ -167,6 +169,8 @@ const EXPECTED_VOCAB: MetricName[] = [
 
 /** Temp roots created by the health tests; removed after each test. */
 let healthRoots: string[] = [];
+/** Per-test command project (initialized unless a gate test says otherwise). */
+let cmdRoot: string;
 
 function trackRoot(root: string): string {
   healthRoots.push(root);
@@ -191,6 +195,10 @@ beforeEach(() => {
   // Each test starts from zero metrics state: the next bump is genuinely
   // the process's first (prune piggyback fires, warned labels are fresh).
   resetMetricsStateForTests();
+  cmdRoot = trackRoot(mkdtempSync(join(tmpdir(), "memory-metrics-cmd-")));
+  const memoryRoot = join(cmdRoot, ".opencode", "memory");
+  mkdirSync(join(memoryRoot, "handoffs"), { recursive: true });
+  writeFileSync(join(memoryRoot, "INDEX.md"), "# INDEX\n", "utf8");
 });
 
 afterEach(async () => {
@@ -1171,6 +1179,7 @@ function fakeForMetricsCommand(params?: {
   storage?: LedgerStorage;
   synthetic?: (input: unknown) => Promise<unknown>;
   prompt?: (input: unknown) => Promise<unknown>;
+  projectRoot?: string;
 }) {
   const added: AddedCommand[] = [];
   const synthetic = vi.fn(async (_input: unknown): Promise<unknown> => undefined);
@@ -1182,14 +1191,15 @@ function fakeForMetricsCommand(params?: {
     prompt.mockImplementation(params.prompt);
   }
   const storage = params?.storage ?? new FakeStorage();
+  const projectRoot = params?.projectRoot ?? cmdRoot;
   const fakeCtx = {
     options: {},
     location: {
-      directory: "/tmp/metrics-cmd",
+      directory: projectRoot,
       project: {
         id: PROJECT,
-        directory: "/tmp/metrics-cmd",
-        canonical: "/tmp/metrics-cmd",
+        directory: projectRoot,
+        canonical: projectRoot,
       },
     },
     storage,
@@ -1673,5 +1683,21 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
           call[0]!.startsWith("[memory] metrics diagnostic:"),
       ).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("memory-metrics initialization gate", () => {
+  it("returns the fixed pre-init message and resets nothing", async () => {
+    const gateRoot = await mkdtemp(join(tmpdir(), "memory-metrics-gate-"));
+    trackRoot(gateRoot);
+    const { added, fakeCtx, synthetic, storage } = fakeForMetricsCommand({
+      projectRoot: gateRoot,
+    });
+    await registerMetricsCommand(fakeCtx);
+    await invokeOf(added[0]!)("reset confirm");
+    expect(
+      (synthetic.mock.calls[0]![0] as { text: string }).text,
+    ).toContain(MEMORY_NOT_INITIALIZED);
+    expect(storage.data.size).toBe(0);
   });
 });
