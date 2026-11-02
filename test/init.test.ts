@@ -155,12 +155,35 @@ describe("initializeMemory", () => {
     );
   });
 
+  it("keeps reporting an existing INDEX when a repair target fails", async () => {
+    const root = await tempRoot();
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "INDEX.md"), "# existing\n");
+    await mkdir(join(root, "activeContext.md"));
+
+    const result = await initializeMemory({ memoryRoot: root });
+
+    expect(result.firstInit).toBe(false);
+    expect(result.initialized).toBe(true);
+    expect(result.present).toContain("INDEX.md");
+    expect(
+      result.failures.some((failure) => failure.startsWith("activeContext.md:")),
+    ).toBe(true);
+    expect(renderInitResult(result)).toContain(
+      "memory is initialized, but repair did not complete",
+    );
+  });
+
   it("is safe when two init calls race", async () => {
     const root = await tempRoot();
     const [first, second] = await Promise.all([
       initializeMemory({ memoryRoot: root }),
       initializeMemory({ memoryRoot: root }),
     ]);
+    // The in-process init mutex makes the second call enter after the first
+    // publishes INDEX. Without it both would observe an absent INDEX.
+    expect(first.firstInit).toBe(true);
+    expect(second.firstInit).toBe(false);
     expect(first.initialized).toBe(true);
     expect(second.initialized).toBe(true);
     expect(await isInitialized(root)).toBe(true);
