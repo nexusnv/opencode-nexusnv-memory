@@ -26,9 +26,9 @@ references are not an automatic injection channel.
 - Memory lives at the **fixed** path `.opencode/memory/`. It is not configurable.
 - The plugin exposes exactly five options (`indexLines`, `fileLines`, `injectBudgetLines`,
   `captureFailures`, `snapshotThrottleMinutes`), all optional, read via `ctx.options`.
-- The plugin registers **no** `references` entry and never edits `opencode.jsonc` or `AGENTS.md`; on
-  first run it scaffolds memory files and emits the commented options snippet and protocol block for
-  the user to paste.
+- The plugin registers **no** `references` entry and never edits `opencode.jsonc` or `AGENTS.md`.
+  Memory files are created only by the explicit `/memory-init` command (ADR-0011); the command emits
+  the commented options snippet and protocol block for the user to paste.
 - If a future need for a configurable root is proven, the memory root must be threaded through
   `readCapped`/`writeCapped`, the recall allowlist, and any generated agent frontmatter together.
 

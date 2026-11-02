@@ -2,11 +2,24 @@
 
 **Status:** proposed. **Sources:** Synthesized Report §4.6; V2 docs `/v2/docs/build/plugins/` (tool/command/hook shapes). **Normative on V2 contracts:** `design-spec-v2-production.md` §5. (Numbered `c4-04` for sequence; not a C4 core level — see `c4-06-code.md` note.)
 
+## Initialization gate (all tools, commands, and hooks)
+
+- Initialized means `.opencode/memory/INDEX.md` exists as a regular file (`lstat().isFile()`; symlinks, directories, and special files do not count). Probes fail closed. An existing install activates with no migration; deleting INDEX re-inerts the plugin without a restart.
+- Pre-init allowlist: only `/memory-init`, `/memory-status`, and `memory_status` run. Every other memory tool and command (including `--help`-less `/memory-review`) returns exactly `[memory] not initialized; run /memory-init to create .opencode/memory`. Commands with a help path may still render usage; no operation runs.
+- Pre-init, every hook and the event-loop callback return before injecting, capturing, snapshotting, remembering, or bumping a metric. Pre-init `remember:` is silently ignored. Setup creates nothing and prints no permission warning or AGENTS.md nudge.
+- `/memory-init` accepts no arguments except `--help`/`-h`. It creates only missing directories/templates (`handoffs/`, `handoffs/archive/`, the six structural files), never overwrites, and creates `INDEX.md` last. If INDEX was absent and any earlier target failed, INDEX is not created and the result says the project remains uninitialized.
+
 ## `memory_recall` tool
 
 - Input: `{ "file": "INDEX.md" | "activeContext.md" | "decisions.md" | "architecture.md" | "style.md" | "issues.md" | "handoffs" | "handoffs/archive" | "handoffs/<name>.md" | "handoffs/archive/<name>.md" }` (required; `additionalProperties:false`; `handoffs`/`handoffs/archive` are names-only listing values; archive paths recallable on demand, never auto-injected).
 - Output: `{ content: <text> }` — the documented tool-**executor** envelope (default; route it through one `toolResult(text)` adapter, G2). File content is truncated to cap with a truncation notice; unknown/traversal/missing single-file paths error (`memory file not found: <name>`, listing hint for handoff paths); `handoffs`/`handoffs/archive` return names-only listings — never a content listing of any other path. `readCapped` is the single choke point and re-validates the resolved path stays within `.opencode/memory`.
 - Description (normative, doubles as retrieval policy): "Past project decisions, renames, and rejected alternatives (capped). Use when the user asks why something is named/designed this way, when touching a contract or previously-renamed symbol, or when INDEX.md mentions the area. Do not use for fresh implementation from current code alone. List available handoffs with file: \"handoffs\" (root) or \"handoffs/archive\"."
+
+## `/memory-init` command
+
+- Invocation: `/memory-init` (optional `--help`/`-h`). Behavior: idempotent repair of `.opencode/memory/` — creates `handoffs/`, `handoffs/archive/`, and the six structural files that are missing; never overwrites an existing path; creates `INDEX.md` last. If INDEX was absent and any earlier target failed, INDEX is not created and the project stays uninitialized. First init posts the consolidated install checklist (permission rule, AGENTS.md protocol block, optional options snippet, `/memory-status` pointer); a repair run posts only a created/already-present summary, plus a warning when a recreated INDEX is the default map while other files survived.
+- Output: deterministic text via `ctx.session.synthetic({ sessionID, text })`, falling back to the §5.5 prompt echo when the post rejects. Never throws. Creates no memory content beyond templates and writes no metrics.
+- User-invoked only: no model-facing init tool, no file-based `commands/memory-init.md` stub (a prompt-only stub cannot create files). It is the only command available before initialization besides `/memory-status`.
 
 ## `/memory-review` command
 
@@ -39,7 +52,7 @@
 ## `memory_status` tool
 
 - Input: `{}` (empty object; `additionalProperties:false`; read-only, no arguments). Normative contract: `design-spec-v2-production.md` §5.13.
-- Output: `{ content: <markdown report> }` via `toolResult`: scaffold presence, INDEX lines/cap/attachability (missing INDEX = `missing — not attached`, not a 0-line ok), AGENTS.md protocol block, advisory same-object `memory_write → ask` evidence, optional `memory-manager` agent, capture/health counts, budgets, version, validated `since`, newest root handoff name, and next actions. The renderer is deterministic (fixed strings, allowlisted names, integers, one-line bounded version, relative/`~/` config paths); no memory body or captured content is emitted.
+- Output: `{ content: <markdown report> }` via `toolResult`: initialization state, INDEX lines/cap/attachability (missing INDEX = `missing — not attached`, not a 0-line ok), AGENTS.md protocol block, advisory same-object `memory_write → ask` evidence, optional `memory-manager` agent, capture/health counts, budgets, version, validated `since`, newest root handoff name, and next actions. The renderer is deterministic (fixed strings, allowlisted names, integers, one-line bounded version, relative/`~/` config paths); no memory body or captured content is emitted.
 - Side effects: none. It reads existing counters/health/install markers only, writes no storage, and bumps no counter. Degraded reads render `unknown`/`unreadable`/`not-found` (the config scan is advisory; effective merged permissions are unverifiable).
 
 ## `/memory-metrics` command
@@ -67,6 +80,8 @@
 - Strict listing fails closed on aliased/off-root directories; containment is checked before delete. There is no automatic sweep, TTL, or background job (ADR-0009).
 
 ## Hook contracts
+
+All four hooks (and the event-loop callback) probe `isInitialized()` first and return before any injection, capture, or metric bump when `.opencode/memory/INDEX.md` is not a regular file.
 
 - `prompt`: **sole** injector of `INDEX.md` content (capped; over-cap file is not attached) to the current prompt only; retry-safe (V2 runs hooks once at admission; concurrent resubmissions may re-run — stay idempotent). Dedup guard: skip if an `INDEX.md` attachment is already present. Root `AGENTS.md` carries protocol+links only, never content, so no double injection. It is also the **sole volatile-notice injector**: newest-handoff pointer + one `[memory]` status line + ≤1 hint are appended after the user's own text as ≤3 marker-guarded data-only lines. The hook is **async and never throws** and performs **one** bounded memory side effect: a `source:user` directive (documented form, outside fences/quotations; pastes covered only by that heuristic) is appended to `decisions.md` — the only hook that sees `event.prompt.text` before admission — under the per-process mutex + cross-process `.write.lock`, ledger-idempotent by content ID; plus the ADR-0008/§5.12 count-only metrics bumps in `ctx.storage` (fire-and-forget counters — diagnostics, never memory content). `classifyProvenance` detection stays pure.
 - `context`: **async** (it reads Promise-based `ctx.storage`/`ctx.vcs`) and **never throws**. Push the stable brief only: a capped active slice of `activeContext` with at most 5 message-derived error summary lines; never the INDEX map, the decisions tail, the newest-handoff pointer, status, or a hint. **Known Errors enter the brief as message-derived summary lines only** (one line per error, `source:` tagged; `<cmd>:` prefix only when `event.input` yields it); full captured bodies stay `memory_recall`-only (P16, ADR-0007). If the `## Known errors` heading is missing, a generated `source:tool` block is still summarised rather than injected raw. The prompt-tail block is **model-facing**; delivery depends on the agent relaying it. The hint is computed in `prompt` from `event.prompt.text`, throttled via `<projectID>/hint/<sessionID>/<promptHash>`, and never appears here. Under budget pressure the pointer is dropped first, then status; a hint is never dropped on a hit.

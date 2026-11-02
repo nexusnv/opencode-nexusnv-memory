@@ -226,9 +226,9 @@ Exactly five options, all optional, read once in `setup` via `ctx.options`:
   skipped-capture notice; forgotten notice) are likewise fixed.
 - `captureFailures: false` disables tool-output capture entirely — the smallest attack surface for teams
   that never want captured command output in memory (§5.11).
-- The plugin never edits `opencode.jsonc`; `ctx.options` is the only config channel. On first run it
-  scaffolds the memory directory and emits the commented options snippet for the user to paste
-  (ADR-0006, §4.4).
+- The plugin never edits `opencode.jsonc`; `ctx.options` is the only config channel. `/memory-init`
+  creates the memory directory and emits the commented options snippet for the user to paste
+  (ADR-0006/0011, §4.4). Setup writes nothing.
 - Coherence warnings (Tier 0, 2026-10-19): a valid parse still warns once (no behavior change) when
   `injectBudgetLines <= indexLines` (no budget remains for brief/notices) or `fileLines < 10`
   (aggressive truncation). No sixth option; ADR-0006 stands.
@@ -278,12 +278,12 @@ Ship this user-pasted rule so `memory_apply` prompts instead of failing open (ba
 }
 ```
 
-The plugin never edits `opencode.jsonc`; the scaffold output emits this snippet and first run prints it. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. On first run the plugin emits one consolidated install checklist (this permission rule, the `AGENTS.md` protocol block, the optional options snippet, and a `/memory-status` pointer) instead of separate warning + dump. On later setups it keeps the unconditional loud permission warning; effective rules cannot be verified at setup (no acting agent; `ctx.agent.get` returns only that agent's own permissions, never the global array; `ctx.permission.list` returns pending requests, not rules). The scaffold + first-run print remain the channel; optionally re-check lazily at apply time. The snippet and protocol-block bytes are unchanged by the consolidation. Never set `compaction` thresholds or `auto`. V2 does
+The plugin never edits `opencode.jsonc`; the `/memory-init` output emits this snippet and prints it once on first init. Without it, `ctx.permission.assert` resolves silently and the per-line gate is bypassed. The first-init checklist consolidates this permission rule, the `AGENTS.md` protocol block, the optional options snippet, and a `/memory-status` pointer instead of separate warning + dump. Initialized projects keep the unconditional loud permission warning at setup; effective rules cannot be verified at setup (no acting agent; `ctx.agent.get` returns only that agent's own permissions, never the global array; `ctx.permission.list` returns pending requests, not rules). The first-init checklist remains the channel; optionally re-check lazily at apply time. The snippet and protocol-block bytes are unchanged by the consolidation. Never set `compaction` thresholds or `auto`. V2 does
 resolve the `instructions` array, but this design deliberately does not use it: memory rides
 `AGENTS.md` + the `prompt` hook so injection has one owner and needs no client config edit.
 
 Root `AGENTS.md` protocol block (hand-owned, ≤10 lines, links only, never content, never auto-written
-— ADR-0002). The plugin scaffolds **file templates** and _emits this text_; the user pastes it. The
+— ADR-0002). `/memory-init` creates the **file templates** and _emits this text_; the user pastes it. The
 trigger forms are normative (§5.11) and deliberately narrow: code fences and block/inline quotations
 are excluded by rule; "pasted blocks" cannot be distinguished from typed text in `prompt.text`, so
 pastes are handled only via the fence/quote heuristic (best-effort) and anything ambiguous stays in
@@ -690,6 +690,17 @@ registrations.push(
   (`data.text` + `data.recent`, G1), not from `event.result`; when the event is missing, a pointer-only handoff is written.
 
 ### 5.7 Loaders, redactor, ledger, status (HS-05, US-15/25, `c4-06`)
+
+**Initialization gate (E15, ADR-0011).** Setup registers `/memory-init` but creates nothing. A project
+is initialized only when `.opencode/memory/INDEX.md` is a regular file (`lstat().isFile()`), so
+existing installs activate without migration and deleting INDEX de-inerts the plugin without a
+restart. Before initialization, the prompt/context/compaction/execute.after hooks and the event-loop
+callback return before any read, write, snapshot, remember, or metrics bump; `memory_recall`,
+`memory_apply`, `memory_metrics`, `memory_search`, `/memory-review`, `/memory-forget`, `/memory-gc`,
+and `/memory-metrics` return one fixed message. Only `/memory-init`, `/memory-status`, and
+`memory_status` remain available. `/memory-init` is idempotent repair: it creates only missing
+directories/templates, never overwrites, and creates INDEX last, so a partial scaffold never
+activates the plugin.
 
 - IO channel: `node:fs/promises` server-side only (no `ctx.filesystem` domain exists for plugins). All file IO is async; the prompt-hook cap check is an async read + line count (never sync-block the event loop).
 - `readCapped(file)` / `writeCapped(file, text)`: allowlisted paths only; `readCapped` opens then
@@ -1139,10 +1150,13 @@ their preview/result output; `/memory-forget` adds the persistent `notice.forgot
 
 ## 7. Lifecycle (normative flow)
 
-0. **Init (once):** scaffold `.opencode/memory/` + six templates + `handoffs/`; emit one consolidated
-   install checklist (permission rule, protocol block, commented ≤5-option snippet, `/memory-status`
-   pointer). Later setups keep the unconditional permission warning. Root `AGENTS.md` is hand-edited
-   only (the plugin emits the block text). Nothing injects beyond INDEX until content exists.
+0. **Init (explicit, user-invoked):** `/memory-init` creates `.opencode/memory/` + six templates +
+   `handoffs/` + `handoffs/archive/`, with `INDEX.md` created last, and emits one consolidated install
+   checklist (permission rule, protocol block, commented ≤5-option snippet, `/memory-status`
+   pointer). Setup writes nothing and stays silent pre-init; initialized projects keep the
+   unconditional permission warning. Root `AGENTS.md` is hand-edited only (the plugin emits the block
+   text). Every hook/tool/command except `/memory-init`, `/memory-status`, and `memory_status` is
+   inert before INDEX exists. Nothing injects beyond INDEX until content exists.
 1. **Capture (zero-LLM, provenance-tagged):** tool-hook failure path (§5.3) → scratchpad as
    `source:tool` (message-derived summary line + optional recall-only detail, plus advisory injection flags;
    increments `<projectID>/curation.pending`). A
@@ -1268,11 +1282,13 @@ path.
 
 **Checks (fixed order).**
 
-1. **Memory directory** — present or missing (missing: "scaffolds on first run"; next action: restart/
-   reload the plugin).
+1. **Memory directory + initialization** — the directory is `present`,
+   `present (not initialized)`, or `missing — run /memory-init`; a separate `initialization` row is
+   `initialized` or `not initialized — run /memory-init`. Both pre-init states add the
+   `run /memory-init to create .opencode/memory` next action.
 2. **INDEX.md attachability** — line count against `indexLines`; over cap reports "over cap, not
    attached" and a trim action. A missing `INDEX.md` reports "missing — not attached" (not a 0-line
-   "ok") and adds a restore action when the memory directory exists.
+   "ok"); the initialization row/action covers repair.
 3. **AGENTS.md protocol block** — `present`, `missing (AGENTS.md has no protocol block)`, `no AGENTS.md
 found`, or `unreadable`; the check uses the same heuristic as the install nudge.
 4. **`memory_write -> ask` rule** — **advisory** scan of readable config files
@@ -1286,7 +1302,8 @@ found`, or `unreadable`; the check uses the same heuristic as the install nudge.
 5. **`memory-manager` agent** — `present`, `absent (optional)`, or `unknown (agent lookup
 unavailable)`; a rejecting/absent agent registry degrades to `unknown`, never a throw.
 6. **Capture activity** — `snapshot.written` + `compactionCapture.captured` from existing §5.12
-   totals, with a deploy-check action when both are zero; failure totals (`snapshot.failed`,
+   totals, with a deploy-check action when both are zero **and the project is initialized**
+   (pre-init advice is suppressed); failure totals (`snapshot.failed`,
    `compactionCapture.failed`) and health counts (handoffs, archive, pending, seen) render in the
    activity table.
 7. **Context** — plugin options budgets (`INDEX ≤ N`, `files ≤ N`, `injected ≤ N`), OpenCode version
@@ -1421,7 +1438,7 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   - **dashboard/reset/onboarding (Tier 2):** `METRIC_LABELS` is exhaustive and fixed (labels are the only
     display prose; renderer stays deterministic); bare `/memory-metrics reset` renders the notice without
     wiping and `reset confirm` wipes (no new metric names); the `remember:` near-miss nudge shares the
-    one hint slot and prompt-hash throttle, keeps one line, and never arms hint→recall; first run emits
+    one hint slot and prompt-hash throttle, keeps one line, and never arms hint→recall; `/memory-init` emits
     one consolidated checklist whose snippet/block bytes match the originals;
   - **G1–G4 type-proven and recorded in the PR**; deploy-time `event.type` log confirms `session.idle` /
     `session.compaction.ended` delivery; `scan` uses the `<projectID>/seen/` prefix with pagination;
@@ -1496,8 +1513,11 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   attempt/hint/snapshot/throttle prune piggybacked on the daily metrics pass), E10 dashboard labels +
   two-step reset confirmation (no new counter; still exactly five ADR-0006 options and 45 frozen metric
   names), E11 `remember:` near-miss nudge (one hint slot, never writes memory, never arms hint→recall),
-  E12 consolidated first-run checklist + README quickstart.
+  E12 consolidated init checklist + README quickstart.
   **Tier-3 delivered (2026-10-20):** E8 stable-prefix brief + prompt-tail notices (ADR-0002/0004/0007
   revisions), E13 `/memory-forget` + `/memory-gc` (ADR-0009), E14 same-host cross-process lock +
-  atomic publish (ADR-0010). Still deferred/out of scope: FTS/embeddings, TTL/decay as automatic
-  aging, archive purge/physical erasure, and the rich TUI panel.
+  atomic publish (ADR-0010). **E15 explicit initialization gate (2026-11-02):** setup no longer
+  scaffolds; `/memory-init` owns creation (INDEX last) and pre-init surfaces are inert (ADR-0011).
+  Still deferred/out of scope: FTS/embeddings, TTL/decay as automatic aging, archive
+  purge/physical erasure, and the rich TUI panel. A TUI sidebar initialization indicator remains a
+  separate future issue, not part of E15.
