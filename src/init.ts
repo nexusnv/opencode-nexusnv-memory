@@ -138,26 +138,27 @@ async function initializeMemoryUnlocked(
     }
   }
 
-  if (failures.length === 0) {
-    if (await isRegularFile(join(root, "INDEX.md"))) {
-      present.push("INDEX.md");
-    } else {
-      try {
-        const outcome = await writeNewCapped(
-          "INDEX.md",
-          templates["INDEX.md"] ?? "",
-          opts,
-        );
-        if (outcome === "created") {
-          created.push("INDEX.md");
-        } else if (await isRegularFile(join(root, "INDEX.md"))) {
-          present.push("INDEX.md");
-        } else {
-          failures.push("INDEX.md: existing path is not a regular file");
-        }
-      } catch (error) {
-        failures.push(`INDEX.md: ${errorLine(error)}`);
+  const indexIsRegular = await isRegularFile(join(root, "INDEX.md"));
+  if (indexIsRegular) {
+    // Report an existing INDEX even when an earlier repair failed; the
+    // project is initialized and the output should say so accurately.
+    present.push("INDEX.md");
+  } else if (failures.length === 0) {
+    try {
+      const outcome = await writeNewCapped(
+        "INDEX.md",
+        templates["INDEX.md"] ?? "",
+        opts,
+      );
+      if (outcome === "created") {
+        created.push("INDEX.md");
+      } else if (await isRegularFile(join(root, "INDEX.md"))) {
+        present.push("INDEX.md");
+      } else {
+        failures.push("INDEX.md: existing path is not a regular file");
       }
+    } catch (error) {
+      failures.push(`INDEX.md: ${errorLine(error)}`);
     }
   }
 
