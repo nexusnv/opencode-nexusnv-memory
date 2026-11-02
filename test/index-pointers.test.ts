@@ -137,6 +137,28 @@ describe("detectIndexPointers", () => {
     ]);
   });
 
+  it("flags a duplicate heading match as ambiguous", () => {
+    const current = [
+      "# Architecture",
+      "## Integrations",
+      "- old adapter",
+      "## Integrations",
+      "- retry",
+    ].join("\n");
+    const result = report({
+      index: "- legacy → architecture.md:Integrations\n",
+      current,
+      next: current,
+      removed: [{ lineNumbers: [3], text: "- old adapter" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toHaveLength(1);
+    expect(result.ambiguous[0]!.line).toBe(1);
+    expect(result.ambiguous[0]!.reason).toContain(
+      'matches more than one heading',
+    );
+  });
+
   it("ignores pointers to other files", () => {
     const result = report({
       index: "- legacy queue adapter → decisions.md\n",

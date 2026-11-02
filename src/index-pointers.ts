@@ -307,16 +307,15 @@ export function detectIndexPointers(input: {
       continue;
     }
     if (topicGone) {
-      if (section.length === 0) {
-        candidates.push({ line: i + 1, text: raw, reason: "literal" });
-      } else {
-        ambiguous.push({
-          line: i + 1,
-          text: raw,
-          reason:
-            "names removed content but the referenced section still has content; edit the line rather than remove it",
-        });
-      }
+      // section.length === 0 is unreachable here: pointer === topic, and
+      // pointerGone (checked above) evaluates the identical condition and
+      // would have continued already.
+      ambiguous.push({
+        line: i + 1,
+        text: raw,
+        reason:
+          "names removed content but the referenced section still has content; edit the line rather than remove it",
+      });
       continue;
     }
     if (section.length > 0 && topic.length > 0) {
