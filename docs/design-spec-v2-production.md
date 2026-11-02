@@ -1160,7 +1160,8 @@ their preview/result output; `/memory-forget` adds the persistent `notice.forgot
    pointer). Setup writes nothing and stays silent pre-init; initialized projects keep the
    unconditional permission warning. Root `AGENTS.md` is hand-edited only (the plugin emits the block
    text). Every hook/tool/command except `/memory-init`, `/memory-status`, and `memory_status` is
-   inert before INDEX exists. Nothing injects beyond INDEX until content exists.
+   inert before INDEX exists; gated commands still render `--help`/`-h` usage. Nothing injects
+   beyond INDEX until content exists.
 1. **Capture (zero-LLM, provenance-tagged):** tool-hook failure path (§5.3) → scratchpad as
    `source:tool` (message-derived summary line + optional recall-only detail, plus advisory injection flags;
    increments `<projectID>/curation.pending`). A

@@ -1733,7 +1733,7 @@ with:
 - §4.4 permission prose: replace “first run prints it” and “scaffold + first-run print remain the channel” with “`/memory-init` prints it once” and “the first-init checklist remains the channel”; initialized projects keep the unconditional setup warning.
 - §5.7 lifecycle: setup registers `/memory-init`; no scaffold; add the pre-init gate.
 - §5.13 status: add the `initialization` row, `/memory-init` actions, and remove “scaffolds on first run”.
-- §7 step 0: `/memory-init` creates six templates + `handoffs/` + `handoffs/archive/`, INDEX last, prints the checklist; note that every hook/tool except init/status is inert before INDEX.
+- §7 step 0: `/memory-init` creates six templates + `handoffs/` + `handoffs/archive/`, INDEX last, prints the checklist; note that every hook/tool/command except init/status is inert before INDEX, while gated commands still render `--help`/`-h` usage.
 - §8 roadmap: add E15 (explicit initialization gate) to the shipped tier; do not renumber existing entries.
 - §10 open questions: remove any “first-run scaffold” language; note the TUI sidebar indicator as a separate future issue, not part of E15.
 

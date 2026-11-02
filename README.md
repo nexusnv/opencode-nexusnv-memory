@@ -317,7 +317,7 @@ A successful forget leaves a short status notice on a later prompt, reminding yo
 ## Things to know before you rely on it
 
 - **The permission rule is the safety gate.** Without `{ "action": "memory_write", "resource": "*", "effect": "ask" }`, OpenCode's default policy can apply a reviewed line, a forget, or a GC batch without asking you. Add the rule last in your permissions list, and do not let a later wildcard override it.
-- **Nothing happens until you initialize.** Setup writes no files, and hooks, the event loop, tools, and commands stay inert until `.opencode/memory/INDEX.md` exists. A `remember:` line written before then is ignored rather than buffered. Run `/memory-status` if you are not sure.
+- **Nothing happens until you initialize.** Setup writes no files, and hooks, the event loop, tools, and commands stay inert until `.opencode/memory/INDEX.md` exists (gated commands still render `--help`/`-h` usage). A `remember:` line written before then is ignored rather than buffered. Run `/memory-status` if you are not sure.
 - **The startup warning is expected.** In an initialized project, the plugin prints the permission warning even when the rule is installed. It cannot see your effective rules. Check your config or `/memory-status` if you are unsure.
 - **Memory becomes model input.** The plugin makes no network calls, but it puts memory into prompts and system context. OpenCode sends those requests to your configured model provider; with a hosted provider, that content leaves your machine. Treat memory as something your model provider can see.
 - **Talking about something does not make it permanent.** Captures sit in the scratchpad until you review them. If you never review, the longer files stay thin.
