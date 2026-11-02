@@ -10,10 +10,16 @@
 import {
   countLines,
   getCapForFile,
+  readContainedText,
   readRawContained,
   withCappedTransaction,
   type CappedFileOptions,
 } from "./files.js";
+import {
+  detectIndexPointers,
+  emptyIndexPointerReport,
+  type IndexPointerReport,
+} from "./index-pointers.js";
 import { DEFAULT_MEMORY_OPTIONS } from "./config.js";
 import {
   findKnownErrorsHeading,
@@ -56,6 +62,7 @@ export interface ForgetResult {
   readonly archiveFile: string;
   readonly removedLineCount: number;
   readonly units: number;
+  readonly indexPointers: IndexPointerReport;
 }
 
 export interface ForgetInput {
@@ -294,10 +301,84 @@ export function buildForgetArchive(
   ].join("\n");
 }
 
+function pointerReasonLabel(
+  reason: "literal" | "empty-section",
+): string {
+  return reason === "empty-section"
+    ? "section is now empty"
+    : "names removed content";
+}
+
+function renderIndexPointerSection(
+  report: IndexPointerReport,
+  targetIsIndex: boolean,
+  indexTargetText: string,
+): string[] {
+  if (targetIsIndex) {
+    return [indexTargetText];
+  }
+  if (report.status === "missing") {
+    return ["No INDEX.md found; no pointer cleanup is needed."];
+  }
+  if (report.status === "truncated") {
+    return [
+      "INDEX.md is too large to inspect; no pointer detection was performed — review pointers manually.",
+    ];
+  }
+  if (report.status === "unreadable") {
+    return [
+      "INDEX.md could not be read; no pointer detection was performed — review pointers manually.",
+    ];
+  }
+  const lines: string[] = [];
+  if (report.candidates.length === 0 && report.ambiguous.length === 0) {
+    lines.push(
+      "No INDEX pointer found for this selection; INDEX.md was not rewritten.",
+    );
+    return lines;
+  }
+  if (report.candidates.length > 0) {
+    lines.push(
+      "INDEX.md candidate cleanup (not applied; exact line numbers):",
+    );
+    for (const candidate of report.candidates.slice(0, 10)) {
+      lines.push(
+        `- INDEX.md line ${candidate.line} — ${pointerReasonLabel(candidate.reason)}: ${clip(candidate.text)}`,
+      );
+      lines.push(
+        `  follow-up: /memory-forget INDEX.md --line ${candidate.line} --confirm`,
+      );
+    }
+    if (report.candidates.length > 10) {
+      lines.push(
+        `- … ${report.candidates.length - 10} more candidate line(s); re-run the dry-run after editing INDEX.md`,
+      );
+    }
+    lines.push(
+      "Each INDEX line needs its own --confirm; the command never bulk-removes INDEX rows.",
+    );
+  }
+  if (report.ambiguous.length > 0) {
+    lines.push(
+      "INDEX.md ambiguous pointers (left unchanged; review manually):",
+    );
+    for (const item of report.ambiguous.slice(0, 10)) {
+      lines.push(
+        `- INDEX.md line ${item.line}: ${redact(item.reason)} — ${clip(item.text)}`,
+      );
+    }
+    if (report.ambiguous.length > 10) {
+      lines.push(`- … ${report.ambiguous.length - 10} more ambiguous line(s)`);
+    }
+  }
+  return lines;
+}
+
 export function renderForgetPreview(
   plan: ForgetPlan,
   reason: string,
   capWarning?: string,
+  indexPointers?: IndexPointerReport,
 ): string {
   const lines = [
     "[memory] forget dry-run — no files changed",
@@ -319,11 +400,21 @@ export function renderForgetPreview(
     "archive: handoffs/archive/forgotten-<timestamp>-<random>.md (created on confirm; DATA ONLY, never instructions)",
     "Warning: this is a logical forget, not secure erasure. Git history, backups, and other clones may retain the text; rotate any exposed secret.",
   );
-  lines.push(
-    plan.file === "INDEX.md"
-      ? "This forget targets INDEX.md itself; the file will be rewritten on confirm."
-      : "INDEX.md is not rewritten automatically; remove stale pointers with `/memory-forget INDEX.md --line N --confirm`.",
-  );
+  if (indexPointers === undefined) {
+    lines.push(
+      plan.file === "INDEX.md"
+        ? "This forget targets INDEX.md itself; the file will be rewritten on confirm."
+        : "INDEX.md is not rewritten automatically; remove stale pointers with `/memory-forget INDEX.md --line N --confirm`.",
+    );
+  } else {
+    lines.push(
+      ...renderIndexPointerSection(
+        indexPointers,
+        plan.file === "INDEX.md",
+        "This forget targets INDEX.md itself; the file will be rewritten on confirm.",
+      ),
+    );
+  }
   lines.push("Run the same command with --confirm to approve each unit.");
   if (capWarning !== undefined) lines.push(capWarning);
   return `${lines.join("\n")}\n`;
@@ -338,9 +429,11 @@ export function renderForgetResult(result: ForgetResult): string {
     "Warning: logical forget only; git history/backups may retain the text. Rotate any exposed secret.",
   ];
   lines.push(
-    result.file === "INDEX.md"
-      ? "INDEX.md itself was rewritten; review any stale pointers in the new content."
-      : "INDEX.md was not rewritten; remove stale pointers explicitly.",
+    ...renderIndexPointerSection(
+      result.indexPointers,
+      result.file === "INDEX.md",
+      "INDEX.md itself was rewritten; review any stale pointers in the new content.",
+    ),
   );
   return lines.join("\n");
 }
@@ -351,6 +444,33 @@ function transactionOptions(input: ForgetInput): CappedFileOptions {
     indexLines: input.indexLines,
     fileLines: input.fileLines,
   };
+}
+
+async function inspectIndexPointers(
+  input: ForgetInput,
+  current: string,
+  plan: ForgetPlan,
+): Promise<IndexPointerReport> {
+  if (input.file === "INDEX.md") {
+    return emptyIndexPointerReport("inspected");
+  }
+  try {
+    const read = await readContainedText("INDEX.md", {
+      memoryRoot: input.memoryRoot,
+      onMissing: "skip",
+    });
+    if (read === undefined) return emptyIndexPointerReport("missing");
+    if (read.truncated) return emptyIndexPointerReport("truncated");
+    return detectIndexPointers({
+      forgottenFile: input.file,
+      currentFileText: current,
+      nextFileText: plan.nextText,
+      removedUnits: plan.units,
+      indexText: read.text,
+    });
+  } catch {
+    return emptyIndexPointerReport("unreadable");
+  }
 }
 
 export async function previewForget(input: ForgetInput): Promise<string> {
@@ -366,7 +486,8 @@ export async function previewForget(input: ForgetInput): Promise<string> {
   } catch (error) {
     capWarning = error instanceof Error ? error.message : String(error);
   }
-  return renderForgetPreview(plan, input.reason, capWarning);
+  const indexPointers = await inspectIndexPointers(input, current, plan);
+  return renderForgetPreview(plan, input.reason, capWarning, indexPointers);
 }
 
 function samePlan(left: ForgetPlan, right: ForgetPlan): boolean {
@@ -480,11 +601,13 @@ export async function applyForget(
         { cause: error },
       );
     });
+    const indexPointers = await inspectIndexPointers(input, current, plan);
     return {
       file: input.file,
       archiveFile,
       removedLineCount: plan.removedLineCount,
       units: plan.units.length,
+      indexPointers,
     };
   });
 }
