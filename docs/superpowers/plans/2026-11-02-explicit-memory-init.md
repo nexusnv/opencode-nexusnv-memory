@@ -391,6 +391,7 @@ export async function initializeMemory(
   const firstInit = !(await isInitialized(root));
   const created: string[] = [];
   const present: string[] = [];
+  const preexisting: string[] = [];
   const failures: string[] = [];
   const opts = {
     memoryRoot: root,
@@ -411,6 +412,7 @@ export async function initializeMemory(
     if (name === "INDEX.md") continue;
     if (await isRegularFile(join(root, name))) {
       present.push(name);
+      preexisting.push(name);
       continue;
     }
     try {
@@ -461,7 +463,7 @@ export async function initializeMemory(
     present,
     failures,
     initialized,
-    lostMapWarning: firstInit && initialized && present.length > 0,
+    lostMapWarning: firstInit && initialized && preexisting.length > 0,
   };
 }
 
@@ -708,10 +710,9 @@ describe("/memory-init command", () => {
     expect(
       await isInitialized(join(projectRoot, ".opencode", "memory")),
     ).toBe(true);
-    expect(String(fake.syntheticCalls[0])).toContain(
-      "[memory] initialized .opencode/memory",
-    );
-    expect(String(fake.syntheticCalls[0])).toContain("Next steps:");
+    const initText = (fake.syntheticCalls[0] as { text: string }).text;
+    expect(initText).toContain("[memory] initialized .opencode/memory");
+    expect(initText).toContain("Next steps:");
     expect(fake.promptCalls).toEqual([]);
   });
 
@@ -720,9 +721,13 @@ describe("/memory-init command", () => {
     const fake = fakeInitContext({ projectRoot });
     await registerMemoryInit(fake.ctx);
     await fake.added[0]!.execute(invocationOf("--help"));
-    expect(fake.syntheticCalls[0]).toContain(MEMORY_INIT_USAGE);
+    expect((fake.syntheticCalls[0] as { text: string }).text).toContain(
+      MEMORY_INIT_USAGE,
+    );
     await fake.added[0]!.execute(invocationOf("extra"));
-    expect(String(fake.syntheticCalls[1])).toContain("unexpected argument");
+    expect((fake.syntheticCalls[1] as { text: string }).text).toContain(
+      "unexpected argument",
+    );
     expect(
       await isInitialized(join(projectRoot, ".opencode", "memory")),
     ).toBe(false);
@@ -753,7 +758,7 @@ describe("/memory-init command", () => {
     await expect(
       fake.added[0]!.execute(invocationOf("")),
     ).resolves.toBeUndefined();
-    expect(String(fake.syntheticCalls[0])).toContain(
+    expect((fake.syntheticCalls[0] as { text: string }).text).toContain(
       "initialization did not complete",
     );
   });
@@ -891,6 +896,13 @@ expect(commands.get("memory-init")).toBe(MEMORY_INIT_COMMAND_DESCRIPTION);
 
 Update `firstRunInstallText` imports to `initInstallText`.
 
+Update `install_surface_P0_parity`: it currently asserts `src/index.ts` contains `HANDOFFS_DIR`, `ARCHIVE_DIR`, and `writeNewCapped`. After the move those assertions must read `const init = read("src/init.ts");` and check `init`. Keep the template/snippet assertions unchanged.
+
+Inside `init_install_checklist`:
+- keep the old “is one checklist with all install actions” test, renamed/rewritten as shown;
+- delete the old “first run emits the consolidated checklist once and no separate log” test (setup no longer prints it; the new “setup creates nothing…” test covers the fresh project);
+- rename “non-first-run keeps the unconditional permission warning” to “an initialized project keeps the unconditional permission warning” and assert the checklist is not printed by filtering for `"Next steps:"`.
+
 Update the `agents_protocol_nudge` describe:
 - “warns once when an initialized project lacks the block” keeps `preScaffold`.
 - Replace “stays quiet on the first run even when AGENTS.md lacks the block” with “stays quiet on an uninitialized project”: fresh project, `setup`, assert no nudge.
@@ -919,15 +931,71 @@ The test at “does not attach an over-cap or missing INDEX” may still remove 
 
 - [ ] **Step 3: Seed INDEX in `test/isolation.test.ts`**
 
-In the setup-wiring test’s `beforeEach` (around line 177), add:
+In the file-level `beforeEach` (around line 177, shared by the setup-wiring test and the rest of the file), add:
 
 ```ts
 await writeFile(join(memoryRoot, "INDEX.md"), "# INDEX\n", "utf8");
 ```
 
-Import `writeFile` from `node:fs/promises`. This keeps the event-loop seam test dispatching idle/compaction events after the guard lands.
+Add `writeFile` to the existing `node:fs/promises` import list. This keeps the event-loop seam test dispatching idle/compaction events after the guard lands.
 
-- [ ] **Step 4: Modify `src/index.ts`**
+- [ ] **Step 4: Add the pre-init hook gate test**
+
+Append to `test/hooks.test.ts`:
+
+```ts
+describe("initialization gate", () => {
+  it("leaves every hook event untouched and bumps no counter before init", async () => {
+    await rm(join(memoryRoot, "INDEX.md"));
+    const store = new FakeStorage();
+    const { hooks, toolHooks } = await setupHooks({}, store);
+
+    const prompt = promptEvent("remember: deploy on Fridays");
+    await runHook(hooks, "prompt", prompt);
+    expect(prompt.prompt.files).toHaveLength(0);
+    expect(prompt.prompt.text).toBe("remember: deploy on Fridays");
+
+    const context = contextEvent([userMessage("hello")]);
+    await runHook(hooks, "context", context);
+    expect(context.system).toHaveLength(0);
+
+    const compaction = contextEvent([userMessage("summarize")]);
+    await runHook(hooks, "compaction", compaction);
+    expect(compaction.system).toHaveLength(0);
+
+    const failure = {
+      status: "error",
+      message: "boom",
+      input: { command: "npm test" },
+    };
+    await toolHooks.get("execute.after")!(failure as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await readTotals(store, PROJECT)).toEqual({});
+    expect(
+      await readFile(join(memoryRoot, "activeContext.md"), "utf8"),
+    ).toBe(getScaffoldFiles()["activeContext.md"]);
+  });
+
+  it("re-inerts without a restart when INDEX.md is deleted", async () => {
+    await writeMemory("INDEX.md", "- auth: login\n");
+    const { hooks } = await setupHooks();
+    const first = promptEvent("hello");
+    await runHook(hooks, "prompt", first);
+    expect(first.prompt.files).toHaveLength(1);
+
+    await rm(join(memoryRoot, "INDEX.md"));
+    const afterDelete = promptEvent("hello again");
+    await runHook(hooks, "prompt", afterDelete);
+    expect(afterDelete.prompt.files).toHaveLength(0);
+    expect(afterDelete.prompt.text).toBe("hello again");
+  });
+});
+```
+
+For the event-loop guard, extend the existing `setup wiring: single controller + dispose()` test in `test/isolation.test.ts` with a second small test that removes `INDEX.md` before `plugin.setup`, emits one local `session.idle` event through the fake subscribe, waits one macrotask, and asserts `await handoffFiles()` is still empty and no metrics keys were written. Reuse that test’s fake context construction; do not duplicate the whole fake if a local helper can be extracted.
+
+- [ ] **Step 5: Modify `src/index.ts`**
 
 Remove `scaffoldMemoryDir()` and these imports: `access`, `mkdir`, `ARCHIVE_DIR`, `HANDOFFS_DIR`, `getScaffoldFiles`, `initInstallText`, `writeNewCapped`. Keep `readFile`, `join`, `permissionsSnippet`, `hasMemoryProtocolBlock`.
 
@@ -999,7 +1067,7 @@ if (initialized) {
 }
 ```
 
-- [ ] **Step 5: Run the affected suites**
+- [ ] **Step 6: Run the affected suites**
 
 ```bash
 npx vitest run test/scaffold.test.ts test/hooks.test.ts test/isolation.test.ts test/init.test.ts
@@ -1008,7 +1076,7 @@ npm run typecheck
 
 Expected: PASS. If `hooks.test.ts` still reads `decisions.md` without writing it, the scaffold seed must be present; do not remove the seed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/index.ts test/scaffold.test.ts test/hooks.test.ts test/isolation.test.ts
@@ -1471,14 +1539,28 @@ Also assert the healthy report’s `initialized` is `true`. The existing determi
 ```ts
 import { getScaffoldFiles } from "../src/templates.js";
 
-// inside the driver, after `const memoryRoot = join(projectRoot, MEMORY_DIR);`
+// inside the driver, immediately after
+// `const memoryRoot = join(projectRoot, MEMORY_DIR);`
 await mkdir(join(memoryRoot, "handoffs", "archive"), { recursive: true });
 for (const [name, content] of Object.entries(getScaffoldFiles())) {
   await writeFile(join(memoryRoot, name), content, "utf8");
 }
 ```
 
-Update the expected command list to include `"memory-init"` first, and change the phase-1 comment from “scaffolded INDEX” to “seeded INDEX”.
+The seed must run **before** `setupAccHarness(...)`: both harnesses register against the same project, and an uninitialized project would register commands but stay inert. Change the expected command list to:
+
+```ts
+expect([...harnessA.commands.keys()]).toEqual([
+  "memory-init",
+  "memory-review",
+  "memory-forget",
+  "memory-gc",
+  "memory-metrics",
+  "memory-status",
+]);
+```
+
+Also change the phase-1 comment from “scaffolded INDEX” to “seeded INDEX”, and add `memory-init` to any assertion that enumerates registered commands.
 
 - [ ] **Step 5: Run**
 
