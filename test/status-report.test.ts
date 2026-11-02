@@ -227,7 +227,9 @@ describe("collectStatus + renderStatusReport", () => {
       "Budgets: INDEX ≤ 30 lines, files ≤ 60, injected ≤ 120",
     );
     expect(text).toContain("| memory directory | present |");
+    expect(text).toContain("| initialization | initialized |");
     expect(report.indexExists).toBe(true);
+    expect(report.initialized).toBe(true);
     expect(text).toContain("| INDEX.md | 2/30 lines — within cap");
     expect(text).toContain("| AGENTS.md protocol block | present |");
     expect(text).toContain(
@@ -256,7 +258,10 @@ describe("collectStatus + renderStatusReport", () => {
     });
     const text = renderStatusReport(report);
 
-    expect(text).toContain("| memory directory | missing");
+    expect(text).toContain("| memory directory | missing — run /memory-init |");
+    expect(text).toContain(
+      "| initialization | not initialized — run /memory-init |",
+    );
     expect(text).toContain("| INDEX.md | missing — not attached |");
     expect(text).toContain("| AGENTS.md protocol block | no AGENTS.md found |");
     expect(text).toContain(
@@ -264,18 +269,21 @@ describe("collectStatus + renderStatusReport", () => {
     );
     expect(text).toContain("| memory-manager agent | unknown");
     expect(report.indexExists).toBe(false);
-    expect(report.actions).toEqual(
-      expect.arrayContaining([
-        "restart/reload the plugin to scaffold .opencode/memory",
-        "install the AGENTS.md protocol block (README install)",
-        "declare the memory_write -> ask permission rule (README install; effective rules are unverifiable here)",
-        "no idle/compaction captures observed yet — use the session normally, then re-check",
-      ]),
+    expect(report.initialized).toBe(false);
+    expect(report.actions).toContain(
+      "run /memory-init to create .opencode/memory",
     );
-    // The missing memory directory already has the scaffold action; do not
-    // also ask the user to restore a file that does not exist yet.
+    expect(report.actions).toContain(
+      "install the AGENTS.md protocol block (README install)",
+    );
+    expect(report.actions).toContain(
+      "declare the memory_write -> ask permission rule (README install; effective rules are unverifiable here)",
+    );
     expect(report.actions).not.toContain(
-      "restore .opencode/memory/INDEX.md (not attached while missing)",
+      "restart/reload the plugin to scaffold .opencode/memory",
+    );
+    expect(report.actions).not.toContain(
+      "no idle/compaction captures observed yet — use the session normally, then re-check",
     );
   });
 
@@ -446,10 +454,15 @@ describe("collectStatus + renderStatusReport", () => {
     const text = renderStatusReport(report);
 
     expect(report.indexExists).toBe(false);
+    expect(report.initialized).toBe(false);
+    expect(text).toContain("| memory directory | present (not initialized) |");
+    expect(text).toContain(
+      "| initialization | not initialized — run /memory-init |",
+    );
     expect(text).toContain("| INDEX.md | missing — not attached |");
     expect(text).toContain("| INDEX.md | 0 | 30 | missing |");
     expect(report.actions).toContain(
-      "restore .opencode/memory/INDEX.md (not attached while missing)",
+      "run /memory-init to create .opencode/memory",
     );
   });
 
