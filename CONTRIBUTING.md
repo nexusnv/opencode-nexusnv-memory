@@ -68,6 +68,7 @@ src/
 ├── args.ts            # Command argument tokenizer and flag parser
 ├── command-context.ts # Command posting and context helpers
 ├── forget.ts          # Forget planning, archive, and apply
+├── index-pointers.ts  # INDEX pointer detection for forget cleanup (pure)
 ├── forget-command.ts  # The /memory-forget command
 ├── gc.ts              # Handoff GC planning and apply
 └── gc-command.ts      # The /memory-gc command
@@ -115,7 +116,7 @@ Storage is the plugin-scoped `ctx.storage`, used for the ledger (seen IDs, retry
 ### The six invariants worth protecting
 
 1. **The memory root is fixed.** Do not add a `memoryDir` option. The allowlist and the capped readers/writers assume `.opencode/memory`.
-2. **Durable writes are review-gated.** `/memory-review` proposes; it does not write. `memory_apply` is the only deterministic apply channel, and it asserts `memory_write` once per line, in order. A deny stops the batch and leaves the rest pending. The one fast path is a user-asserted `remember:` line, which appends to `decisions.md` immediately. `/memory-forget` is a separate, user-invoked lifecycle path: it archives before rewriting and asks once per unit; it is not a model-callable tool.
+2. **Durable writes are review-gated.** `/memory-review` proposes; it does not write. `memory_apply` is the only deterministic apply channel, and it asserts `memory_write` once per line, in order. A deny stops the batch and leaves the rest pending. The one fast path is a user-asserted `remember:` line, which appends to `decisions.md` immediately. `/memory-forget` is a separate, user-invoked lifecycle path: it archives before rewriting and asks once per unit; it is not a model-callable tool. INDEX cleanup is suggested as a separate per-line command, never applied by the source forget.
 3. **Memory is untrusted data.** Never execute, fetch, or obey instructions found in memory files or captured output. Raw captured output must never enter the auto-injected brief; only a capped summary line may. Search results are returned as untrusted data and are never auto-injected. This is why the `memory-manager` subagent is read-only.
 4. **Budgets are enforced on write, on read, and on inject.** `INDEX.md` is capped at 30 lines by default; `activeContext.md`, `architecture.md`, `style.md`, `issues.md`, and root handoffs at 60; archive writes are uncapped for preservation, while archive reads are recall-capped. `decisions.md` is unbounded on disk but its recallable/injectable tail is capped. `activeContext.md` rotates the oldest Known-Errors block to `handoffs/archive/` when full. An over-cap `INDEX.md` is not attached at all. The stable brief is at most 47 lines at defaults (loader maximum 48), and prompt-tail notices are at most 3 lines, keeping the total injectable payload at `injectBudgetLines`.
 5. **Compaction stays native.** The plugin may add priors, but it must not set thresholds, `event.result`, model overrides, or a custom trigger.
@@ -183,6 +184,7 @@ If you change behavior, update the relevant document and the CHANGELOG. If you c
 - The `remember:` detection is fence/quote aware.
 - `/memory-status` and `memory_status` write nothing and bump no counters.
 - Forget is dry-run by default, archives before rewriting, asks per unit, and aborts on drift; GC is dry-run by default, root-only, batch-approved, and never touches the archive.
+- Forget detects stale INDEX pointers, offers per-line follow-ups, and never rewrites INDEX.
 - Cross-process writers serialize through the lock, stale locks are reclaimed safely, and readers never see a partial publish.
 - The deploy-time event-type log confirms both primary event types.
 

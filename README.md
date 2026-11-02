@@ -274,6 +274,14 @@ Preview the redacted selection first, then add `--confirm`:
 
 You can select with `--line N`, `--match TEXT`, or `--all`. On confirmation, each unit gets its own permission prompt. Approved text is archived under `handoffs/archive/` before the active file is rewritten. `decisions.md` is append-only and handoffs are immutable, so both are rejected. This is logical forgetting, not secure erasure: git history, backups, clones, and editor caches may still contain the text. If you are removing an exposed secret, rotate it as well.
 
+After forgetting from `activeContext.md`, `architecture.md`, `style.md`, or `issues.md`, the preview and result also check `INDEX.md` for lines that point at the removed content. Unambiguous pointers are listed with exact line numbers and a separate per-line follow-up:
+
+```text
+/memory-forget INDEX.md --line 7 --confirm
+```
+
+Nothing is bulk-removed, the source forget never rewrites `INDEX.md`, and pointers that are file-general or only partly related are reported as ambiguous for you to edit by hand. A successful forget with candidates leaves a status notice so the follow-up is not lost.
+
 Prune old root handoff snapshots:
 
 ```text
@@ -284,7 +292,7 @@ Prune old root handoff snapshots:
 
 All three examples above are dry-runs until you add `--confirm`. Adding it deletes the listed root `handoffs/*.md` snapshots. `handoffs/archive/` is never touched, and there is no automatic sweep or background job. Deletion is irreversible on this machine, and untracked snapshots cannot be recovered from git, so commit first if you care about them.
 
-A successful forget leaves a short status notice on a later prompt, reminding you that the content was archived and may persist in git history or backups.
+A successful forget leaves a short status notice on a later prompt, reminding you that the content was archived and may persist in git history or backups. If the forget left unambiguous INDEX pointers, the same status line says how many and points to the per-line cleanup command.
 
 ## Things to know before you rely on it
 
@@ -295,7 +303,7 @@ A successful forget leaves a short status notice on a later prompt, reminding yo
 - **It will not remind you of anything.** There is no scheduler and no notification channel. A fact in memory is available to the agent when it looks; it is not an alarm clock.
 - **"Remember" is picky on purpose.** Only a line starting with `remember:` or `remember that`, outside fences and quotes, takes the fast path. Everything else waits for review or gets a near-miss nudge. This makes accidental memories much less likely.
 - **Search is literal.** `memory_search` matches exact text, not meaning. A synonym, a different spelling, or a paraphrase may find nothing.
-- **Forget is not secure erasure, and GC is irreversible.** Forgetting archives before rewriting, but old copies may survive in git, backups, or caches. GC deletes root handoffs outright and never touches `handoffs/archive/`.
+- **Forget is not secure erasure, and GC is irreversible.** Forgetting archives before rewriting, but old copies may survive in git, backups, or caches. GC deletes root handoffs outright and never touches `handoffs/archive/`. INDEX cleanup is suggested, not automatic: a forget lists stale pointer candidates, but you remove each one with its own `--confirm`.
 - **Redaction is best-effort.** Common secrets and `<private>…</private>` blocks are stripped before the plugin writes memory and before it returns or injects the brief, recall results, search results, and compaction priors. `INDEX.md` is attached as a file, not run through that pass, so keep secrets out of it. Pattern matching is not a guarantee. Failed command output can be captured; if your commands print sensitive data, set `captureFailures` to `false` or keep secrets out of the commands you run.
 - **The files have size limits.** `INDEX.md` stops being attached when it grows past its cap. Promotions into the other capped files are refused if they would overflow, except `activeContext.md`, which rotates old error blocks to `handoffs/archive/`. `decisions.md` keeps everything on disk, but recall only shows its recent tail; use `memory_search` for older entries.
 - **Two OpenCode processes can write at once, but they take turns.** A second writer waits up to five seconds while another process holds the memory lock. If it still cannot get the lock, the write fails with a `[memory] another OpenCode process is writing memory` message instead of silently dropping data. Retry after the other process finishes. The lock is for one host and a local filesystem; network shares and containers without a shared process namespace are not covered.
