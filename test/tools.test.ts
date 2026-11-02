@@ -32,12 +32,13 @@ import {
   setArm,
 } from "../src/metrics.js";
 import { readCapped, withWriteLock } from "../src/files.js";
+import { MEMORY_NOT_INITIALIZED } from "../src/init.js";
 
 /**
  * Shipped-gate note (spec §4.4): `memory_apply` prompts per line only when
  * the user installs `{ "action": "memory_write", "resource": "*", "effect": "ask" }`.
  * Without it the request matches only the base star/star allow wildcard and
- * per-line approval gate fails open. The scaffold + first-run print remain the
+ * per-line approval gate fails open. The `/memory-init` checklist remains the
  * channel; these tests prove the per-line `assert` calls that the rule gates.
  */
 
@@ -1021,5 +1022,52 @@ describe("tools", () => {
       "utf8",
     );
     expect(src).toMatch(/registerMemoryTools/);
+  });
+});
+
+describe("initialization gate", () => {
+  it("returns one fixed message from every tool and writes no counter", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "memory-tools-gate-"));
+    await mkdir(join(projectRoot, ".opencode", "memory"), { recursive: true });
+    const storage = new FakeStorage();
+    const added: Array<{
+      name: string;
+      execute: (input: unknown, context: ApplyToolContext) => Promise<unknown>;
+    }> = [];
+    const fakeCtx = {
+      options: {},
+      location: {
+        directory: projectRoot,
+        project: {
+          id: PROJECT,
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+      storage,
+      permission: new FakePermission(),
+      tool: {
+        transform: async (
+          cb: (editor: { add: (tool: (typeof added)[number]) => void }) => void,
+        ) => {
+          cb({ add: (tool) => added.push(tool) });
+          return { dispose: async () => undefined };
+        },
+      },
+    };
+    await registerMemoryTools(fakeCtx as never);
+
+    const inputs: Record<string, unknown> = {
+      memory_recall: { file: "INDEX.md" },
+      memory_apply: { candidates: [] },
+      memory_metrics: undefined,
+      memory_search: { query: "anything" },
+    };
+    for (const tool of added) {
+      await expect(
+        tool.execute(inputs[tool.name], TOOL_CTX),
+      ).resolves.toEqual({ content: MEMORY_NOT_INITIALIZED });
+    }
+    expect(storage.data.size).toBe(0);
   });
 });

@@ -60,6 +60,7 @@ import {
   type MetricName,
   type MetricsBump,
 } from "./metrics.js";
+import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 import { redact } from "./redact.js";
 import {
   MEMORY_SEARCH_DESCRIPTION,
@@ -634,6 +635,9 @@ export function registerMemoryTools(
       description: MEMORY_RECALL_DESCRIPTION,
       input: MEMORY_RECALL_INPUT,
       execute: async (input, context) => {
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          return toolResult(MEMORY_NOT_INITIALIZED);
+        }
         const execute = createMemoryRecallExecute({
           memoryRoot: memoryRootOf(ctx),
           indexLines: options.indexLines,
@@ -654,6 +658,9 @@ export function registerMemoryTools(
       description: MEMORY_APPLY_DESCRIPTION,
       input: MEMORY_APPLY_INPUT,
       execute: async (input, context) => {
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          return toolResult(MEMORY_NOT_INITIALIZED);
+        }
         const execute = createMemoryApplyExecute({
           memoryRoot: memoryRootOf(ctx),
           projectID: projectIDOf(ctx),
@@ -679,8 +686,11 @@ export function registerMemoryTools(
       // per call from the live context (P22), and the rendered markdown
       // count table returns through the single toolResult adapter. No
       // storage set/remove, no memory body reads.
-      execute: async () =>
-        toolResult(
+      execute: async () => {
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          return toolResult(MEMORY_NOT_INITIALIZED);
+        }
+        return toolResult(
           await collectAndRender({
             storage: ledgerOf(ctx),
             projectID: projectIDOf(ctx),
@@ -690,7 +700,8 @@ export function registerMemoryTools(
               fileLines: options.fileLines,
             },
           }),
-        ),
+        );
+      },
     });
     editor.add({
       name: "memory_search",
@@ -698,8 +709,14 @@ export function registerMemoryTools(
       input: MEMORY_SEARCH_INPUT,
       // Full allowlisted reads (no line cap) with the same traversal +
       // redaction choke point; deterministic literal matches, no side effects.
-      execute: async (input) =>
-        createMemorySearchExecute({ memoryRoot: memoryRootOf(ctx) })(input),
+      execute: async (input) => {
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          return toolResult(MEMORY_NOT_INITIALIZED);
+        }
+        return createMemorySearchExecute({ memoryRoot: memoryRootOf(ctx) })(
+          input,
+        );
+      },
     });
   });
 }
