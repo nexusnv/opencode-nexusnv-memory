@@ -502,6 +502,30 @@ describe("collectStatus + renderStatusReport", () => {
     expect(renderStatusReport(second)).toBe(renderStatusReport(first));
     expect(storage.data).toEqual(before);
   });
+
+  it("surfaces pending stale INDEX pointers without consuming the notice", async () => {
+    const { projectRoot, home } = await newProject();
+    await seedHealthyInstall(projectRoot, home);
+    const storage = new FakeStorage();
+    await storage.set(`${PROJECT}/notice.indexStale`, 2);
+
+    const report = await collectStatus({
+      memoryRoot: join(projectRoot, ".opencode", "memory"),
+      projectRoot,
+      home,
+      storage,
+      projectID: PROJECT,
+      caps: { indexLines: 30, fileLines: 60, injectBudgetLines: 120 },
+      version: "2.0.29",
+      agentNames: ["memory-manager"],
+    });
+    const text = renderStatusReport(report);
+    expect(report.indexStalePointers).toBe(2);
+    expect(text).toContain("| stale INDEX pointers | 2 |");
+    expect(text).toContain("review 2 stale INDEX.md pointer(s)");
+    expect(text).toContain("/memory-forget INDEX.md --line N --confirm");
+    expect(await storage.get(`${PROJECT}/notice.indexStale`)).toBe(2);
+  });
 });
 
 describe("status command + tool", () => {

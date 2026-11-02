@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import { listHandoffs } from "./brief.js";
-import type { LedgerStorage } from "./capture.js";
+import { getNotice, type LedgerStorage } from "./capture.js";
 import { parseMemoryOptions } from "./config.js";
 import {
   collectHealth,
@@ -99,6 +99,7 @@ export interface StatusReport {
   readonly compactionFailed: number;
   readonly since?: string;
   readonly newestHandoff?: string;
+  readonly indexStalePointers: number;
   readonly actions: readonly string[];
 }
 
@@ -319,6 +320,11 @@ function deriveActions(report: StatusReportBase): string[] {
       `run /memory-review (${report.health.pending} uncurated captures)`,
     );
   }
+  if (report.indexStalePointers > 0) {
+    actions.push(
+      `review ${report.indexStalePointers} stale INDEX.md pointer(s) from a forget; run /memory-forget INDEX.md --line N --confirm with the line numbers from the forget result`,
+    );
+  }
   if (report.snapshotsWritten + report.compactionCaptures === 0) {
     actions.push(
       "no idle/compaction captures observed yet — use the session normally, then re-check",
@@ -351,6 +357,7 @@ export async function collectStatus(
     newestHandoff,
     exists,
     indexExists,
+    indexStale,
   ] = await Promise.all([
     collectHealth(deps.memoryRoot, deps.storage, deps.projectID, deps.caps),
     protocolStatusOf(deps.projectRoot),
@@ -360,6 +367,7 @@ export async function collectStatus(
     newestHandoffName(deps.memoryRoot),
     pathExists(deps.memoryRoot),
     pathExists(join(deps.memoryRoot, "INDEX.md")),
+    getNotice(deps.storage, deps.projectID, "indexStale"),
   ]);
 
   const version =
@@ -391,6 +399,7 @@ export async function collectStatus(
     compactionFailed: totals["compactionCapture.failed"] ?? 0,
     since,
     newestHandoff,
+    indexStalePointers: indexStale ?? 0,
   };
   return { ...base, actions: deriveActions(base) };
 }
@@ -506,6 +515,7 @@ export function renderStatusReport(report: StatusReport): string {
   lines.push(`| archive | ${report.health.archive} |`);
   lines.push(`| pending captures | ${report.health.pending} |`);
   lines.push(`| seen entries | ${report.health.seen} |`);
+  lines.push(`| stale INDEX pointers | ${report.indexStalePointers} |`);
   lines.push("");
   lines.push("## Next actions");
   for (const action of report.actions) lines.push(`- ${action}`);
