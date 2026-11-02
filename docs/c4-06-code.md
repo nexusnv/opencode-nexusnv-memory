@@ -8,31 +8,31 @@ Production package (`src/`) and local drop-in (`.opencode/plugins/memory/`) shar
 
 ```
 src/ (or .opencode/plugins/memory/)
-└── index.ts        # Plugin.define({ id: "memory", setup }) — wiring only
-    ├── init.ts      # isInitialized gate, idempotent initializeMemory, /memory-init (ADR-0011)
-    ├── brief.ts     # loadBrief, loadPriors (capped; Known-Errors summaries)
-    ├── known-errors.ts # shared heading/no-heading block parser (brief + forget + rotation)
-    ├── hints.ts     # matchIndex + matchRememberNearMiss (one hint slot, once-per-prompt throttle)
-    ├── prompt-notices.ts # prompt-tail budget/order/marker (pointer → status → hint)
-    ├── status.ts    # statusLine (over-cap/oversize INDEX + rotation + skipped-capture + forgotten + review-due)
-    ├── capture.ts   # captureFailure, snapshotHandoffIfChanged, pruneSeenTo500, pruneLedgerState, ledger helpers
-    ├── provenance.ts# classifyProvenance, rememberAsserted (source:user fast path)
-    ├── guard.ts     # flagInjection (advisory), untrusted labelling, sanitizeForBrief
-    ├── tools.ts     # ctx.tool.transform: memory_recall, memory_apply, memory_metrics, memory_search, memory_status
-    ├── files.ts     # readCapped, readFullRedacted (full allowlisted read + byte guard), writeCapped, budget enforcement, archive routing, atomic publish, cross-process lock
-    ├── lock.ts      # .write.lock + .write.lock.claim (PID liveness, bounded wait)
-    ├── forget.ts    # pure forget planner + two-phase archive/rewrite application
-    ├── forget-command.ts # /memory-forget parsing, dry-run, per-unit approval, output
-    ├── gc.ts        # root-handoff policy planner + strict re-list/re-plan/delete
-    ├── gc-command.ts# /memory-gc parsing, dry-run, one batch approval, output
-    ├── args.ts      # shared command flag/selector parsing
-    ├── command-context.ts # command project/memory-root helpers + required output delivery
-    ├── search.ts    # literal full-allowlist search core + deterministic renderer (spec §5.14)
-    ├── status-report.ts # read-only status collectors + pure renderer + /memory-status + memory_status (spec §5.13)
-    ├── redact.ts    # secrets blocklist + <private> stripping (bounded URL-credential regex for linear-time full-file reads)
-    ├── metrics.ts   # count-only counters (bump via ledger mutex), 90-day prune, METRIC_LABELS renderer, /memory-metrics command with two-step reset (ADR-0008, spec §5.12)
-    ├── config.ts    # ≤5 options, defaults, validation (ctx.options)
-    └── templates.ts # six-file scaffolds + AGENTS.md protocol block text
+├── index.ts        # Plugin.define({ id: "memory", setup }) — wiring only
+├── init.ts         # isInitialized gate, idempotent initializeMemory, /memory-init (ADR-0011)
+├── brief.ts        # loadBrief, loadPriors (capped; Known-Errors summaries)
+├── known-errors.ts # shared heading/no-heading block parser (brief + forget + rotation)
+├── hints.ts        # matchIndex + matchRememberNearMiss (one hint slot, once-per-prompt throttle)
+├── prompt-notices.ts # prompt-tail budget/order/marker (pointer → status → hint)
+├── status.ts       # statusLine (over-cap/oversize INDEX + rotation + skipped-capture + forgotten + review-due)
+├── capture.ts      # captureFailure, snapshotHandoffIfChanged, pruneSeenTo500, pruneLedgerState, ledger helpers
+├── provenance.ts   # classifyProvenance, rememberAsserted (source:user fast path)
+├── guard.ts        # flagInjection (advisory), untrusted labelling, sanitizeForBrief
+├── tools.ts        # ctx.tool.transform: memory_recall, memory_apply, memory_metrics, memory_search, memory_status
+├── files.ts        # readCapped, readFullRedacted (full allowlisted read + byte guard), writeCapped, budget enforcement, archive routing, atomic publish, cross-process lock
+├── lock.ts         # .write.lock + .write.lock.claim (PID liveness, bounded wait)
+├── forget.ts       # pure forget planner + two-phase archive/rewrite application
+├── forget-command.ts # /memory-forget parsing, dry-run, per-unit approval, output
+├── gc.ts           # root-handoff policy planner + strict re-list/re-plan/delete
+├── gc-command.ts   # /memory-gc parsing, dry-run, one batch approval, output
+├── args.ts         # shared command flag/selector parsing
+├── command-context.ts # command project/memory-root helpers + required output delivery
+├── search.ts       # literal full-allowlist search core + deterministic renderer (spec §5.14)
+├── status-report.ts # read-only status collectors + pure renderer + /memory-status + memory_status (spec §5.13)
+├── redact.ts       # secrets blocklist + <private> stripping (bounded URL-credential regex for linear-time full-file reads)
+├── metrics.ts      # count-only counters (bump via ledger mutex), 90-day prune, METRIC_LABELS renderer, /memory-metrics command with two-step reset (ADR-0008, spec §5.12)
+├── config.ts       # ≤5 options, defaults, validation (ctx.options)
+└── templates.ts    # six-file scaffolds + AGENTS.md protocol block text
 commands/
 └── memory-status.md # optional file-based status stub (plugin-registered command is normative)
 test/
@@ -51,7 +51,7 @@ test/
 - `planForget(file, current, selector)` / `applyForget(input)`: pure planner + two-phase application. The planner uses the same `known-errors.ts` parser as the brief, so a `source:tool` selection expands to its whole detail block even when the heading is missing or orphaned outside the heading region; it rejects `decisions.md`/handoffs and the bare column-0 `## Known errors` heading, and preflights the post-forget cap. Application plans under a short lock, releases for per-unit approval, then re-locks/re-plans/compares, writes the redacted archive (0600) before rewriting the active file. A stale plan aborts; no mutation survives a denial.
 - `planHandoffGc` / `applyHandoffGc`: root `handoffs/*.md` regular files only, `older-than` and `keep` intersection, strict list/re-plan under the lock after one batch approval, contained deletes, and a per-result deleted/missing/failed report. Archive is never a candidate; dry-run is lock-free/read-only.
 - `toolResult(text)`: the single adapter for the tool-executor return envelope (`{ content: text }` by default; G2 proven via `Tool.Result`); every tool return goes through it.
-- `isInitialized(memoryRoot)`: `lstat(<root>/INDEX.md).isFile()`, any probe error → `false` (never throws). `initializeMemory({memoryRoot, indexLines?, fileLines?})`: idempotent repair via `mkdir(recursive)` + `writeNewCapped`; records `created`/`present`/`failures`, creates `INDEX.md` only when no earlier target failed, and returns `firstInit` (INDEX absent at entry) plus `lostMapWarning` (INDEX recreated while other templates survived). `renderInitResult(result)`: deterministic text; prints the consolidated checklist only on first successful init. `registerMemoryInit(ctx)`: `/memory-init` command; no arguments except help; always posts output (synthetic, then §5.5 fallback) and never throws.
+- `isInitialized(memoryRoot)`: `lstat(<root>/INDEX.md).isFile()`, any probe error → `false` (never throws). `initializeMemory({memoryRoot, indexLines?, fileLines?})`: **serialized in-process** (overlapping init calls cannot observe each other's fresh templates); idempotent repair via `mkdir(recursive)` + `writeNewCapped`; records `created`/`present`/`failures`, creates `INDEX.md` only when no earlier target failed, and returns `firstInit` (INDEX absent at entry) plus `lostMapWarning` (INDEX recreated while other templates survived). `renderInitResult(result)`: deterministic text; prints the consolidated checklist only when this invocation created `INDEX.md` (the first-init path). `registerMemoryInit(ctx)`: `/memory-init` command; no arguments except help; always posts output (synthetic, then §5.5 fallback) and never throws.
 - `memory_apply(candidates)`: the only write channel for approved lines — executor binds `sessionID/agent/source` from its tool context; one `ctx.permission.assert({action:"memory_write",resources:[file],metadata:{line,source},source,save:[]})` per candidate sequentially → `writeCapped` on allow, propagate on first deny (no summary); `candidates:[]` resets without writes; untrusted lines cannot be bulk-approved; requires the shipped `memory_write → ask` rule; resets `<projectID>/curation.pending` → 0 and clears `<projectID>/curation.rotated` on completion.
 - `loadBrief()`: async; activeContext slice only (output max 48; dynamic cap 47 at defaults, incl. max 5 error lines; the raw read covers the configured per-file cap so an error block appended past the output window stays visible); truncates with notice; redacted. Does **not** contain the INDEX map, the decisions tail, the newest-handoff pointer, status, or hint. **Known Errors contribute message-derived summary lines only** (max 5) — `sanitizeForBrief()` emits one `source:`-tagged line per error (≤120 chars, newlines collapsed; `<cmd>:` prefix only when `event.input` yields it) and never a captured body. A structural `## Known errors` heading must start at column 0 (first-line BOM ignored); indented lookalikes in detail are data, and generated `source:tool` blocks remain errors when the heading is missing or orphaned outside the region. The block structure is parsed from the **raw** text and only the emitted content is redacted (redaction preserves line positions), so a `<private>` span cannot promote captured detail into the trusted slice. Total auto-inject payload (`INDEX 30 + brief 47 + prompt-tail notices 3` = 80) ≤ `injectBudgetLines`; excludes static root `AGENTS.md` directive + retrieval-policy descriptions (16 lines measured: 6 protocol + 5 recall + 5 search). Session total at 4 steps is 237, an uncached line guardrail.
 - `loadPriors()`: async; capped + redacted priors for the compaction hook (activeContext slice + Known-Errors summary lines only + decisions tail ≤60 + handoff pointer); payload ≤ `2 × fileLines + 11` lines, truncates with notice. Captured detail is never injected here (recall-only, ADR-0007). The only auto-inject path for the decisions tail.
