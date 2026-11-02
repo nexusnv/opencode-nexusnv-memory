@@ -19,6 +19,7 @@ import {
   type ForgetPermission,
 } from "../src/forget.js";
 import { readCapped } from "../src/files.js";
+import { emptyIndexPointerReport } from "../src/index-pointers.js";
 
 let root: string;
 
@@ -407,6 +408,7 @@ describe("forget archive and application", () => {
       archiveFile: "handoffs/archive/forgotten-x.md",
       removedLineCount: 1,
       units: 1,
+      indexPointers: emptyIndexPointerReport("inspected"),
     });
     expect(result).toContain("INDEX.md itself was rewritten");
   });
@@ -418,5 +420,97 @@ describe("forget archive and application", () => {
     expect(text).toContain("Git history");
     expect(text).toContain("INDEX.md is not rewritten");
     expect(text).toContain("--confirm");
+  });
+
+  it("surfaces unambiguous INDEX cleanup candidates in the dry-run", async () => {
+    await writeFile(
+      join(root, "architecture.md"),
+      "# Architecture\n## Queue\n- legacy queue adapter\n",
+    );
+    await writeFile(
+      join(root, "INDEX.md"),
+      "- Queue → architecture.md:Queue\n- architecture: contracts\n",
+    );
+    const preview = await previewForget({
+      ...opts(),
+      file: "architecture.md",
+      selector: { kind: "line", line: 3 },
+      reason: "remove old adapter",
+    });
+    expect(preview).toContain("INDEX.md candidate cleanup");
+    expect(preview).toContain("INDEX.md line 1");
+    expect(preview).toContain("section is now empty");
+    expect(preview).toContain("/memory-forget INDEX.md --line 1 --confirm");
+    expect(preview).toContain("never bulk-removes");
+    expect(await readFile(join(root, "INDEX.md"), "utf8")).toBe(
+      "- Queue → architecture.md:Queue\n- architecture: contracts\n",
+    );
+  });
+
+  it("reports no INDEX pointer when the map line is file-general", async () => {
+    await writeFile(
+      join(root, "architecture.md"),
+      "# Architecture\n- keep\n- drop\n",
+    );
+    await writeFile(
+      join(root, "INDEX.md"),
+      "- architecture: contracts, sibling implementations\n",
+    );
+    const preview = await previewForget({
+      ...opts(),
+      file: "architecture.md",
+      selector: { kind: "line", line: 3 },
+      reason: "remove one line",
+    });
+    expect(preview).toContain("No INDEX pointer found for this selection");
+  });
+
+  it("reports ambiguous INDEX pointers without offering removal", async () => {
+    await writeFile(
+      join(root, "architecture.md"),
+      "# Architecture\n## Integrations\n- legacy queue adapter\n- keep\n",
+    );
+    await writeFile(
+      join(root, "INDEX.md"),
+      "- legacy queue adapter → architecture.md:Integrations\n",
+    );
+    const preview = await previewForget({
+      ...opts(),
+      file: "architecture.md",
+      selector: { kind: "line", line: 3 },
+      reason: "remove old adapter",
+    });
+    expect(preview).toContain("ambiguous pointers");
+    expect(preview).toContain("section still has content");
+    expect(preview).not.toContain(
+      "/memory-forget INDEX.md --line 1 --confirm",
+    );
+  });
+
+  it("returns INDEX cleanup candidates from applyForget without rewriting INDEX", async () => {
+    await writeFile(
+      join(root, "architecture.md"),
+      "# Architecture\n## Queue\n- legacy queue adapter\n",
+    );
+    await writeFile(join(root, "INDEX.md"), "- Queue → architecture.md:Queue\n");
+    const permission = new FakePermission();
+    const result = await applyForget({
+      ...opts(),
+      file: "architecture.md",
+      selector: { kind: "line", line: 3 },
+      reason: "remove old adapter",
+      permission,
+      sessionID: "s",
+    });
+    expect(result.indexPointers.candidates).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+    expect(await readFile(join(root, "INDEX.md"), "utf8")).toBe(
+      "- Queue → architecture.md:Queue\n",
+    );
   });
 });
