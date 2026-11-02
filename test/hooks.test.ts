@@ -132,7 +132,10 @@ let storage: FakeStorage;
 beforeEach(async () => {
   projectRoot = await mkdtemp(join(tmpdir(), "memory-hooks-"));
   memoryRoot = join(projectRoot, ".opencode", "memory");
-  await mkdir(join(memoryRoot, "handoffs"), { recursive: true });
+  await mkdir(join(memoryRoot, "handoffs", "archive"), { recursive: true });
+  for (const [name, content] of Object.entries(getScaffoldFiles())) {
+    await writeFile(join(memoryRoot, name), content, "utf8");
+  }
   storage = new FakeStorage();
 });
 
@@ -302,6 +305,7 @@ describe("indexWithinCap", () => {
       const target = join(outside, "INDEX.md");
       await writeFile(target, "- leaked\n");
       const abs = join(memoryRoot, "INDEX.md");
+      await rm(abs);
       await symlink(target, abs);
       expect(await indexWithinCap(abs, 30)).toBe(false);
       expect(
@@ -475,10 +479,13 @@ describe("prompt hook", () => {
     await runHook(hooks, "prompt", over);
     expect(over.prompt.files).toHaveLength(0);
 
+    // Removing INDEX also de-initializes the project: the gate leaves the
+    // second prompt untouched, proving the plugin is inert.
     await rm(join(memoryRoot, "INDEX.md"));
     const missing = promptEvent("hello");
     await runHook(hooks, "prompt", missing);
     expect(missing.prompt.files).toHaveLength(0);
+    expect(missing.prompt.text).toBe("hello");
   });
 
   it("sets the over-cap INDEX notice on prompt admission", async () => {
@@ -650,6 +657,7 @@ describe("contained memory reads", () => {
     const outside = await mkdtemp(join(tmpdir(), "memory-brief-outside-"));
     try {
       await writeFile(join(outside, "activeContext.md"), "SECRET\n");
+      await rm(join(memoryRoot, "activeContext.md"));
       await symlink(
         join(outside, "activeContext.md"),
         join(memoryRoot, "activeContext.md"),
@@ -690,6 +698,10 @@ describe("contained memory reads", () => {
   });
 
   it("does not list an aliased archive", async () => {
+    await rm(join(memoryRoot, "handoffs", "archive"), {
+      recursive: true,
+      force: true,
+    });
     await symlink("..", join(memoryRoot, "handoffs", "archive"), "dir");
     expect((await listHandoffs(memoryRoot, "archive")).names).toEqual([]);
   });
@@ -724,6 +736,10 @@ describe("contained memory reads", () => {
         join(archive, "rotated-2026-10-20-110000-abcdef.md"),
         "outside\n",
       );
+      await rm(join(memoryRoot, "handoffs", "archive"), {
+        recursive: true,
+        force: true,
+      });
       await symlink(archive, join(memoryRoot, "handoffs", "archive"), "dir");
       expect((await listHandoffs(memoryRoot, "archive")).names).toEqual([]);
     } finally {
@@ -1106,6 +1122,9 @@ describe("loadPriors", () => {
       "activeContext.md",
       getScaffoldFiles()["activeContext.md"]!,
     );
+    // The seeded decisions template would add its own (truncated) tail;
+    // this assertion isolates the fresh activeContext behavior.
+    await rm(join(memoryRoot, "decisions.md"));
     const priors = await loadPriors(memoryRoot, { fileLines: 10 });
     expect(priors).not.toContain("## active context");
     expect(priors).not.toContain("[truncated");
@@ -1533,9 +1552,9 @@ describe("metrics taps (M-T3)", () => {
     {
       const store = countedStore();
       const { hooks } = await setupHooks({}, store);
-      // Remove the scaffolded files: nothing to inject at all.
+      // Remove activeContext only: INDEX stays present so the project
+      // remains initialized; an empty brief is still brief.empty.
       await rm(join(memoryRoot, "activeContext.md"));
-      await rm(join(memoryRoot, "INDEX.md"));
       const event = contextEvent([userMessage("what is the weather today?")]);
       await runHook(hooks, "context", event);
       expect(event.system).toHaveLength(0);
@@ -1616,5 +1635,53 @@ describe("metrics taps (M-T3)", () => {
       await handler!(toolEvent("error", { message: "m-t3-retry" }) as never);
       expect(await totalsOf(store)).toEqual({ "failure.retry": 1 });
     }
+  });
+});
+
+describe("initialization gate", () => {
+  it("leaves every hook event untouched and bumps no counter before init", async () => {
+    await rm(join(memoryRoot, "INDEX.md"));
+    const store = new FakeStorage();
+    const { hooks, toolHooks } = await setupHooks({}, store);
+
+    const prompt = promptEvent("remember: deploy on Fridays");
+    await runHook(hooks, "prompt", prompt);
+    expect(prompt.prompt.files).toHaveLength(0);
+    expect(prompt.prompt.text).toBe("remember: deploy on Fridays");
+
+    const context = contextEvent([userMessage("hello")]);
+    await runHook(hooks, "context", context);
+    expect(context.system).toHaveLength(0);
+
+    const compaction = contextEvent([userMessage("summarize")]);
+    await runHook(hooks, "compaction", compaction);
+    expect(compaction.system).toHaveLength(0);
+
+    const failure = {
+      status: "error",
+      message: "boom",
+      input: { command: "npm test" },
+    };
+    await toolHooks.get("execute.after")!(failure as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await readTotals(store, PROJECT)).toEqual({});
+    expect(await readFile(join(memoryRoot, "activeContext.md"), "utf8")).toBe(
+      getScaffoldFiles()["activeContext.md"],
+    );
+  });
+
+  it("re-inerts without a restart when INDEX.md is deleted", async () => {
+    await writeMemory("INDEX.md", "- auth: login\n");
+    const { hooks } = await setupHooks();
+    const first = promptEvent("hello");
+    await runHook(hooks, "prompt", first);
+    expect(first.prompt.files).toHaveLength(1);
+
+    await rm(join(memoryRoot, "INDEX.md"));
+    const afterDelete = promptEvent("hello again");
+    await runHook(hooks, "prompt", afterDelete);
+    expect(afterDelete.prompt.files).toHaveLength(0);
+    expect(afterDelete.prompt.text).toBe("hello again");
   });
 });

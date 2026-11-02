@@ -1,10 +1,9 @@
 /**
  * Scaffold templates + install snippets (spec §§4.4, 6, 7 step 0).
  *
- * The plugin scaffolds the six memory files and `handoffs/` under the fixed
- * root `.opencode/memory/` on first run and *emits* the snippets below; the
- * user pastes them by hand. The plugin never edits `opencode.jsonc` or
- * `AGENTS.md` itself.
+ * `/memory-init` creates the six memory files and `handoffs/` under the fixed
+ * root `.opencode/memory/` and *emits* the snippets below; the user pastes
+ * them by hand. The plugin never edits `opencode.jsonc` or `AGENTS.md` itself.
  */
 
 /** The six memory files, in INDEX-first order (spec §6). */
@@ -122,7 +121,7 @@ export function permissionsSnippet(): string {
 
 /**
  * Root `AGENTS.md` protocol block (spec §4.4). Hand-owned, ≤10 lines, links
- * only, never content, never auto-written — the plugin scaffolds file
+ * only, never content, never auto-written — `/memory-init` creates the file
  * templates and emits this text; the user pastes it.
  *
  * Trigger forms are deliberately narrow: code fences and block/inline
@@ -149,15 +148,13 @@ export function hasMemoryProtocolBlock(text: string): boolean {
 }
 
 /**
- * One consolidated first-run install message (E12): required permission rule,
- * protocol block, optional options snippet, and the status-doctor pointer.
- * Fixed prose + the existing snippets only; no content channel. The
- * non-first-run setup path keeps the spec §4.4 unconditional permission
- * warning separately.
+ * One consolidated install checklist (E12; emitted after the first successful
+ * `/memory-init`, E15). Required permission rule, protocol block, optional
+ * options snippet, and the status-doctor pointer. Fixed prose + the existing
+ * snippets only; no content channel.
  */
-export function firstRunInstallText(): string {
-  return `[memory] first run: scaffolded .opencode/memory/ (+ handoffs/).
-Next steps:
+export function initInstallText(): string {
+  return `Next steps:
 1. Required — add the memory_write → ask rule to opencode.jsonc (without it, per-line approval fails open):
 ${permissionsSnippet()}
 2. Paste this protocol block into root AGENTS.md (hand-owned, never auto-written):
