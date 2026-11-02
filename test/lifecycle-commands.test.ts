@@ -1,5 +1,12 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { mkdtemp, mkdir, readFile, writeFile, symlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
@@ -9,6 +16,7 @@ import {
 } from "../src/forget-command.js";
 import { forgetRowHash } from "../src/forget.js";
 import { registerMemoryGc } from "../src/gc-command.js";
+import { MEMORY_NOT_INITIALIZED } from "../src/init.js";
 
 let root: string;
 let memory: string;
@@ -43,6 +51,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "memory-cmd-"));
   memory = join(root, ".opencode", "memory");
   await mkdir(memory, { recursive: true });
+  await writeFile(join(memory, "INDEX.md"), "# INDEX\n", "utf8");
   store = new Map();
   permissionCalls = 0;
   permissionDeny = false;
@@ -298,5 +307,21 @@ describe("/memory-gc", () => {
     await run("memory-gc", "--older-than 0 --keep 0 --confirm");
     expect(permissionCalls).toBe(1);
     expect(posts.join("\n")).toContain("GC applied");
+  });
+});
+
+describe("initialization gate", () => {
+  it("keeps --help available and blocks forget/GC operations", async () => {
+    await rm(join(memory, "INDEX.md"));
+    await registerMemoryForget(ctx());
+    await run("memory-forget", "--help");
+    expect(posts.at(-1)).toContain("Usage: /memory-forget");
+
+    await run("memory-forget", "INDEX.md --line 1");
+    expect(posts.at(-1)).toBe(MEMORY_NOT_INITIALIZED);
+
+    await registerMemoryGc(ctx());
+    await run("memory-gc", "--keep 1");
+    expect(posts.at(-1)).toBe(MEMORY_NOT_INITIALIZED);
   });
 });

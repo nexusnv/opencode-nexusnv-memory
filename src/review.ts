@@ -34,6 +34,8 @@
  * (count diagnostics; never a memory write, no content — ADR-0008 §7).
  */
 import type { Plugin } from "@opencode/plugin";
+import { memoryRootOf, postCommandOutput } from "./command-context.js";
+import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 import { metricsBumpOf } from "./metrics.js";
 
 export const MEMORY_REVIEW_COMMAND_NAME = "memory-review";
@@ -66,7 +68,12 @@ export function registerMemoryReview(
     editor.add({
       name: MEMORY_REVIEW_COMMAND_NAME,
       description: MEMORY_REVIEW_DESCRIPTION,
-      execute: async ({ sessionID, prompt, delivery }) => {
+      execute: async (invocation) => {
+        const { sessionID, prompt, delivery } = invocation;
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
+          return;
+        }
         const base =
           typeof prompt?.text === "string" ? prompt.text : "";
         const ask = buildReviewAsk(base);

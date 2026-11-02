@@ -65,6 +65,8 @@ import {
   type LedgerStorage,
 } from "./capture.js";
 import { DEFAULT_MEMORY_OPTIONS, parseMemoryOptions } from "./config.js";
+import { postCommandOutput } from "./command-context.js";
+import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 import type { Plugin } from "@opencode/plugin";
 
 /**
@@ -1139,7 +1141,12 @@ export function registerMetricsCommand(
     editor.add({
       name: MEMORY_METRICS_COMMAND_NAME,
       description: MEMORY_METRICS_COMMAND_DESCRIPTION,
-      execute: async ({ sessionID, prompt, delivery }) => {
+      execute: async (invocation) => {
+        const { sessionID, prompt, delivery } = invocation;
+        if (!(await isInitialized(memoryRootOf(ctx)))) {
+          await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
+          return;
+        }
         try {
           const bump = metricsBumpOf(ctx);
           // All deps for THIS call resolve from the live context (P22).

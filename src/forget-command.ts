@@ -13,6 +13,7 @@ import {
   projectIDOf,
 } from "./command-context.js";
 import { incNotice, incNoticeBy } from "./capture.js";
+import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 import { parseMemoryOptions } from "./config.js";
 import {
   applyForget,
@@ -176,6 +177,15 @@ export function registerMemoryForget(
           );
           if ("help" in parsed) {
             await postCommandOutput(ctx, invocation, MEMORY_FORGET_USAGE, true);
+            return;
+          }
+          if (!(await isInitialized(memoryRootOf(ctx)))) {
+            await postCommandOutput(
+              ctx,
+              invocation,
+              MEMORY_NOT_INITIALIZED,
+              true,
+            );
             return;
           }
           if ("error" in parsed) {

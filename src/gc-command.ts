@@ -14,6 +14,7 @@ import {
   renderGcResult,
   type GcPolicy,
 } from "./gc.js";
+import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 
 export const MEMORY_GC_COMMAND_NAME = "memory-gc";
 export const MEMORY_GC_DESCRIPTION =
@@ -109,6 +110,15 @@ export function registerMemoryGc(
           );
           if ("help" in parsed) {
             await postCommandOutput(ctx, invocation, MEMORY_GC_USAGE, true);
+            return;
+          }
+          if (!(await isInitialized(memoryRootOf(ctx)))) {
+            await postCommandOutput(
+              ctx,
+              invocation,
+              MEMORY_NOT_INITIALIZED,
+              true,
+            );
             return;
           }
           if ("error" in parsed) {
