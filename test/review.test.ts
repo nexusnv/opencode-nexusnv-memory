@@ -383,7 +383,7 @@ describe("proposes_table_and_writes_nothing", () => {
 describe("initialization gate", () => {
   it("returns the fixed pre-init message and bumps no counter", async () => {
     await rm(join(memoryRoot, "INDEX.md"));
-    const { added, synthetics, fakeCtx } = fakeForCommand();
+    const { added, prompted, synthetics, fakeCtx } = fakeForCommand();
     await registerMemoryReview(fakeCtx as never);
     await added[0]!.execute({
       sessionID: SESSION,
@@ -394,5 +394,18 @@ describe("initialization gate", () => {
       MEMORY_NOT_INITIALIZED,
     );
     expect(await getPending(storage, PROJECT)).toBe(0);
+
+    // The same registered executor re-probes per call: creating INDEX
+    // activates the command without re-registering or restarting.
+    await writeFile(join(memoryRoot, "INDEX.md"), "# INDEX\n", "utf8");
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "review", files: [], agents: [], skills: [] },
+      delivery: "steer",
+    });
+    expect(prompted).toHaveLength(1);
+    expect((prompted[0] as { text: string }).text).toBe(
+      buildReviewAsk("review"),
+    );
   });
 });

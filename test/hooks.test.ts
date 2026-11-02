@@ -1684,4 +1684,17 @@ describe("initialization gate", () => {
     expect(afterDelete.prompt.files).toHaveLength(0);
     expect(afterDelete.prompt.text).toBe("hello again");
   });
+
+  it("activates without a restart when INDEX.md is created", async () => {
+    await rm(join(memoryRoot, "INDEX.md"));
+    const { hooks } = await setupHooks();
+    const before = promptEvent("hello");
+    await runHook(hooks, "prompt", before);
+    expect(before.prompt.files).toHaveLength(0);
+
+    await writeMemory("INDEX.md", "- auth: login\n");
+    const afterCreate = promptEvent("hello again");
+    await runHook(hooks, "prompt", afterCreate);
+    expect(afterCreate.prompt.files).toHaveLength(1);
+  });
 });

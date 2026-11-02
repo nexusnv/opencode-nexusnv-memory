@@ -112,7 +112,7 @@ Test the installed package, not only a workspace link.
 - The `/memory-init`, `/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`, and `/memory-status` commands.
 - One event subscription for `session.idle` and `session.compaction.*`, filtered by project location.
 
-Every hook, the event loop, the four mutating tools, and the four gated commands check `isInitialized()` before doing anything. `src/index.ts` itself writes no memory files; `/memory-init` owns creation and repair.
+Every hook, the event loop, the four gated tools, and the four gated commands check `isInitialized()` before doing anything. `src/index.ts` itself writes no memory files; `/memory-init` owns creation and repair.
 
 Storage is the plugin-scoped `ctx.storage`, used for the ledger (seen IDs, retry attempts, pending/rotation counters), snapshot hashes, throttles, hint arms, and metrics. The ledger is bounded: `seen` is capped at 500, and aged attempts, hint throttles, and snapshot/throttle stamps are pruned by once-per-UTC-day housekeeping. The ledger is durable JSON, not memory content. Memory content is always Markdown on disk.
 

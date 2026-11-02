@@ -457,7 +457,7 @@ export default Plugin.define({
         if (!agentsProtocolNudgeLogged && !hasMemoryProtocolBlock(agentsText)) {
           agentsProtocolNudgeLogged = true;
           console.warn(
-            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block printed by /memory-init (or in the README install section).",
+            "[memory] root AGENTS.md has no memory protocol block; the agent will not read memory. Paste the block from the README install section (the first-init checklist also prints it).",
           );
         }
       } catch {
