@@ -60,6 +60,7 @@ import {
 import { DEFAULT_MEMORY_OPTIONS } from "../src/config.js";
 import { resetWriteChainForTests, withWriteLock } from "../src/files.js";
 import { redact } from "../src/redact.js";
+import { getScaffoldFiles } from "../src/templates.js";
 import { MEMORY_REVIEW_ASK } from "../src/review.js";
 import {
   DAY_BUCKET_RETENTION_DAYS,
@@ -624,6 +625,12 @@ async function driveUsageRun(
     // harmlessly via force + catch).
     earlyDisposable = projectRoot;
     const memoryRoot = join(projectRoot, MEMORY_DIR);
+    // Seed the full scaffold BEFORE setup: both harnesses register against
+    // the same project, and an uninitialized project stays inert.
+    await mkdir(join(memoryRoot, "handoffs", "archive"), { recursive: true });
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeFile(join(memoryRoot, name), content, "utf8");
+    }
 
     /* -- Registration (both real setups share one store/project) ---- */
     const harnessA = await setupAccHarness(projectRoot, store, {});
@@ -647,6 +654,7 @@ async function driveUsageRun(
       "memory_status",
     ]);
     expect([...harnessA.commands.keys()]).toEqual([
+      "memory-init",
       "memory-review",
       "memory-forget",
       "memory-gc",
@@ -685,7 +693,7 @@ async function driveUsageRun(
     /* -- Phase 1: the prompt hook seam ------------------------------ */
     let before = await phaseStart(store, dataChecks);
 
-    // (1) attach: the scaffolded INDEX.md is within cap.
+    // (1) attach: the seeded INDEX.md is within cap.
     const attached = promptEvent("acc hello first");
     await runHook(harnessA.hooks, "prompt", attached);
     expect(attached.prompt.files).toHaveLength(1);
@@ -1622,6 +1630,11 @@ describe("acceptance-metrics §9 gates (real plugin.setup end-to-end)", () => {
   it("ff_gate: 1,000-bump burst against a saturated chain stays fire-and-forget", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "acc-metrics-ff-"));
     disposableRoots.push(projectRoot);
+    const memoryRoot = join(projectRoot, MEMORY_DIR);
+    await mkdir(join(memoryRoot, "handoffs", "archive"), { recursive: true });
+    for (const [name, content] of Object.entries(getScaffoldFiles())) {
+      await writeFile(join(memoryRoot, name), content, "utf8");
+    }
     const store = new FakeStorage();
     const harness = await setupAccHarness(projectRoot, store);
 

@@ -2,8 +2,8 @@
  * `/memory-status` + `memory_status` — read-only install/health doctor
  * (spec §5.13, Tier 1 E2).
  *
- * Answers the questions a new user otherwise assembles by hand: is the memory
- * directory scaffolded, is INDEX.md small enough to attach, is the AGENTS.md
+ * Answers the questions a new user otherwise assembles by hand: is memory
+ * initialized, is INDEX.md small enough to attach, is the AGENTS.md
  * protocol block installed, is the memory_write → ask rule declared, is the
  * optional memory-manager agent present, and has idle/compaction capture ever
  * fired. It reads only counters, line/entry counts, and install markers; it
@@ -23,6 +23,7 @@ import {
   readTotals,
   type MemoryHealth,
 } from "./metrics.js";
+import { isInitialized } from "./init.js";
 import { hasMemoryProtocolBlock } from "./templates.js";
 import { toolResult } from "./tools.js";
 
@@ -38,7 +39,7 @@ export const MEMORY_STATUS_COMMAND_DESCRIPTION =
   "Read-only memory plugin status: install checks, budgets, capture activity, and next actions";
 
 export const MEMORY_STATUS_DESCRIPTION =
-  "Read-only install/health report for the memory plugin: scaffold presence, INDEX attachability, AGENTS.md protocol block, memory_write ask rule, optional memory-manager agent, capture activity, and next actions. Use for onboarding, troubleshooting, or after changing memory config. Writes nothing.";
+  "Read-only install/health report for the memory plugin: initialization state, INDEX attachability, AGENTS.md protocol block, memory_write ask rule, optional memory-manager agent, capture activity, and next actions. Use for onboarding, troubleshooting, or after changing memory config. Writes nothing.";
 
 export const MEMORY_STATUS_INPUT = {
   type: "object",
@@ -88,6 +89,7 @@ export interface StatusReport {
   readonly budgets: StatusReportCaps;
   readonly memoryDirExists: boolean;
   readonly indexExists: boolean;
+  readonly initialized: boolean;
   readonly health: MemoryHealth;
   readonly protocol: ProtocolStatus;
   readonly permission: PermissionStatus;
@@ -291,12 +293,8 @@ function deriveActions(report: StatusReportBase): string[] {
       `upgrade or pin OpenCode to the supported 2.0.x range (running ${report.version})`,
     );
   }
-  if (!report.memoryDirExists) {
-    actions.push("restart/reload the plugin to scaffold .opencode/memory");
-  } else if (!report.indexExists) {
-    actions.push(
-      "restore .opencode/memory/INDEX.md (not attached while missing)",
-    );
+  if (!report.initialized) {
+    actions.push("run /memory-init to create .opencode/memory");
   }
   if (report.protocol === "no-file" || report.protocol === "missing") {
     actions.push("install the AGENTS.md protocol block (README install)");
@@ -325,7 +323,10 @@ function deriveActions(report: StatusReportBase): string[] {
       `review ${report.indexStalePointers} stale INDEX.md pointer(s) from a forget; run the row-bound /memory-forget INDEX.md follow-up from the forget result`,
     );
   }
-  if (report.snapshotsWritten + report.compactionCaptures === 0) {
+  if (
+    report.initialized &&
+    report.snapshotsWritten + report.compactionCaptures === 0
+  ) {
     actions.push(
       "no idle/compaction captures observed yet — use the session normally, then re-check",
     );
@@ -366,7 +367,7 @@ export async function collectStatus(
     readTotals(deps.storage, deps.projectID),
     newestHandoffName(deps.memoryRoot),
     pathExists(deps.memoryRoot),
-    pathExists(join(deps.memoryRoot, "INDEX.md")),
+    isInitialized(deps.memoryRoot),
     getNotice(deps.storage, deps.projectID, "indexStale"),
   ]);
 
@@ -388,6 +389,7 @@ export async function collectStatus(
     budgets: deps.caps,
     memoryDirExists: exists,
     indexExists,
+    initialized: indexExists,
     health,
     protocol,
     permission: permission.status,
@@ -480,7 +482,18 @@ export function renderStatusReport(report: StatusReport): string {
   lines.push("| check | result |");
   lines.push("| --- | --- |");
   lines.push(
-    `| memory directory | ${report.memoryDirExists ? "present" : "missing — scaffolds on first run"} |`,
+    `| memory directory | ${
+      !report.memoryDirExists
+        ? "missing — run /memory-init"
+        : report.initialized
+          ? "present"
+          : "present (not initialized)"
+    } |`,
+  );
+  lines.push(
+    `| initialization | ${
+      report.initialized ? "initialized" : "not initialized — run /memory-init"
+    } |`,
   );
   lines.push(`| INDEX.md | ${indexCount}${indexState} |`);
   lines.push(
