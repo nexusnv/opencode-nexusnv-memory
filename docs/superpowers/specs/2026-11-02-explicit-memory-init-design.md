@@ -80,7 +80,7 @@ The command accepts no arguments except `--help`. It posts its output through `p
 | --- | --- |
 | `MEMORY_INIT_COMMAND_NAME`, `MEMORY_INIT_COMMAND_DESCRIPTION`, `MEMORY_INIT_USAGE` | Command identity and help text. |
 | `MEMORY_NOT_INITIALIZED` | One fixed message used by every blocked surface. |
-| `isInitialized(memoryRoot)` | `stat()` the fixed `INDEX.md`; true only for a regular file; any error returns false. Never throws. |
+| `isInitialized(memoryRoot)` | `lstat()` the fixed `INDEX.md`; true only for a regular file (symlinks are not regular files); any error returns false. Never throws. |
 | `initializeMemory(input)` | Idempotent create/repair. Returns `created`, `present`, `failures`, and `firstInit`. |
 | `renderInitResult(result)` | Deterministic summary + checklist on first init; failure text when initialization did not complete. |
 | `registerMemoryInit(ctx)` | Registers `/memory-init` via `ctx.command.transform`. |
@@ -111,7 +111,7 @@ The setup cleanup path is unchanged: abort the one event controller and dispose 
   - Change the memory-directory row from “scaffolds on first run” to the explicit-init state.
   - Replace “restart/reload the plugin to scaffold” with `/memory-init` actions.
   - Suppress capture-activity advice while uninitialized.
-- `src/templates.ts`: rename `firstRunInstallText()` to `initInstallText()` and change the leading line from “first run: scaffolded” to “initialized: scaffolded”.
+- `src/templates.ts`: rename `firstRunInstallText()` to `initInstallText()` and make it the checklist body starting at `Next steps:`; `renderInitResult()` supplies the single outcome line so the command does not print two headings.
 
 ### Deliberately unchanged
 
@@ -135,7 +135,7 @@ The setup cleanup path is unchanged: abort the one event controller and dispose 
 
 ## Error handling
 
-- `isInitialized` treats every `stat` failure as “not initialized” (fail closed: the plugin stays inert).
+- `isInitialized` treats every `lstat` failure as “not initialized” (fail closed: the plugin stays inert).
 - `initializeMemory` catches per-target errors and continues long enough to report them. If `INDEX.md` was absent, any earlier failure prevents INDEX creation.
 - After the write loop, if `INDEX.md` is present but `isInitialized` is still false (for example, `INDEX.md` is a directory or special file), record an `INDEX.md is not a regular readable file` failure and report that initialization did not complete.
 - `/memory-init` never throws. A completed mutation is not reported as an operation failure because output delivery failed.
@@ -147,7 +147,7 @@ The setup cleanup path is unchanged: abort the one event controller and dispose 
 
 ### New `test/init.test.ts`
 
-- `isInitialized`: regular file true; missing false; directory false; `stat` error false.
+- `isInitialized`: regular file true; missing false; directory false; symlink false; `lstat` error false.
 - `initializeMemory`: creates six files + both directories; never overwrites; `INDEX.md` last; first-init flag; partial repair; failure before INDEX leaves the project uninitialized; concurrent calls are safe.
 - `renderInitResult`: first-init checklist; repair summary; failure wording; lost-map warning.
 - `/memory-init`: `--help`; unexpected argument; synthetic failure fallback; never throws.
