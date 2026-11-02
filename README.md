@@ -272,15 +272,15 @@ Preview the redacted selection first, then add `--confirm`:
 /memory-forget architecture.md --match "legacy queue adapter" --confirm
 ```
 
-You can select with `--line N`, `--match TEXT`, or `--all`. On confirmation, each unit gets its own permission prompt. Approved text is archived under `handoffs/archive/` before the active file is rewritten. `decisions.md` is append-only and handoffs are immutable, so both are rejected. This is logical forgetting, not secure erasure: git history, backups, clones, and editor caches may still contain the text. If you are removing an exposed secret, rotate it as well.
+You can select with `--line N`, `--match TEXT`, or `--all`; `--line` also accepts `--expect-hash HASH` to reject the selection if that line no longer has the reported row's hash. On confirmation, each unit gets its own permission prompt. Approved text is archived under `handoffs/archive/` before the active file is rewritten. `decisions.md` is append-only and handoffs are immutable, so both are rejected. This is logical forgetting, not secure erasure: git history, backups, clones, and editor caches may still contain the text. If you are removing an exposed secret, rotate it as well.
 
-After forgetting from `activeContext.md`, `architecture.md`, `style.md`, or `issues.md`, the preview and result also check `INDEX.md` for lines that point at the removed content. Unambiguous pointers are listed with exact line numbers and a separate per-line follow-up:
+After forgetting from `activeContext.md`, `architecture.md`, `style.md`, or `issues.md`, the preview and result also check `INDEX.md` for lines that point at the removed content. Unambiguous pointers are listed with exact line numbers and a separate per-line follow-up bound to the reported row:
 
 ```text
-/memory-forget INDEX.md --line 7 --confirm
+/memory-forget INDEX.md --line 7 --expect-hash <row hash> --confirm
 ```
 
-Nothing is bulk-removed, the source forget never rewrites `INDEX.md`, and file-general pointers are ignored while pointers that are only partly related are reported as ambiguous for you to edit by hand. When several lines match, follow-ups are listed from the highest line number down because each removal shifts the remaining line numbers; re-run the dry-run after any manual edit. A successful forget with candidates leaves a status notice so the follow-up is not lost.
+Nothing is bulk-removed, the source forget never rewrites `INDEX.md`, and file-general pointers are ignored while pointers that are only partly related are reported as ambiguous for you to edit by hand. Every candidate gets a follow-up. The follow-up is rejected if `INDEX.md` changed at that line, so it cannot remove a different row; when several lines match, follow-ups are listed from the highest line number down because each removal shifts the remaining line numbers, and you should re-run the dry-run after any manual edit. A successful forget with candidates leaves a status notice so the follow-up is not lost.
 
 Prune old root handoff snapshots:
 

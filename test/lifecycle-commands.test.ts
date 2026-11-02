@@ -3,7 +3,11 @@ import { mkdtemp, mkdir, readFile, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
-import { registerMemoryForget } from "../src/forget-command.js";
+import {
+  parseForgetArgs,
+  registerMemoryForget,
+} from "../src/forget-command.js";
+import { forgetRowHash } from "../src/forget.js";
 import { registerMemoryGc } from "../src/gc-command.js";
 
 let root: string;
@@ -187,8 +191,54 @@ describe("/memory-forget", () => {
     );
     expect(posts.join("\n")).toContain("INDEX.md candidate cleanup");
     expect(posts.join("\n")).toContain(
-      "/memory-forget INDEX.md --line 1 --confirm",
+      `/memory-forget INDEX.md --line 1 --expect-hash ${forgetRowHash(
+        "- Queue → architecture.md:Queue",
+      )} --confirm`,
     );
+  });
+
+  it("rejects a bound follow-up when the INDEX row changed", async () => {
+    const reported = "- Queue → architecture.md:Queue";
+    const hash = forgetRowHash(reported);
+    expect(
+      parseForgetArgs(
+        `INDEX.md --line 1 --expect-hash ${hash} --confirm`,
+      ),
+    ).toMatchObject({
+      ok: true,
+      file: "INDEX.md",
+      confirm: true,
+      selector: { kind: "line", line: 1, expectHash: hash },
+    });
+    await writeFile(join(memory, "INDEX.md"), "- newer row\n");
+    await registerMemoryForget(ctx());
+    await run(
+      "memory-forget",
+      `INDEX.md --line 1 --expect-hash ${hash} --confirm`,
+    );
+    expect(posts.join("\n")).toContain(
+      "no longer matches the row reported earlier",
+    );
+    expect(permissionCalls).toBe(0);
+    expect(await readFile(join(memory, "INDEX.md"), "utf8")).toBe(
+      "- newer row\n",
+    );
+  });
+
+  it("rejects --expect-hash without --line", async () => {
+    expect(
+      parseForgetArgs(
+        "INDEX.md --match box --expect-hash 0123456789abcdef",
+      ),
+    ).toEqual({
+      error: "--expect-hash requires --line",
+    });
+  });
+
+  it("rejects a malformed --expect-hash", () => {
+    expect(
+      parseForgetArgs("INDEX.md --line 1 --expect-hash not-a-hash"),
+    ).toEqual({ error: "--expect-hash requires 16 hex characters" });
   });
 
   it("does not set the indexStale notice when no INDEX pointer matches", async () => {

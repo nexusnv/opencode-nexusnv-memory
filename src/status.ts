@@ -79,7 +79,7 @@ export async function statusLine(
     const indexStale = await takeNotice(storage, projectID, "indexStale");
     if (indexStale !== undefined) {
       facts.push(
-        `${indexStale} INDEX.md pointer(s) may be stale after a forget; review the forget result and run /memory-forget INDEX.md --line N --confirm`,
+        `${indexStale} INDEX.md pointer(s) may be stale after a forget; review the forget result and run its row-bound /memory-forget INDEX.md follow-up`,
       );
     }
     const pending = await getPending(storage, projectID);

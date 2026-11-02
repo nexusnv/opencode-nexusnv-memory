@@ -322,7 +322,7 @@ function deriveActions(report: StatusReportBase): string[] {
   }
   if (report.indexStalePointers > 0) {
     actions.push(
-      `review ${report.indexStalePointers} stale INDEX.md pointer(s) from a forget; run /memory-forget INDEX.md --line N --confirm with the line numbers from the forget result`,
+      `review ${report.indexStalePointers} stale INDEX.md pointer(s) from a forget; run the row-bound /memory-forget INDEX.md follow-up from the forget result`,
     );
   }
   if (report.snapshotsWritten + report.compactionCaptures === 0) {
