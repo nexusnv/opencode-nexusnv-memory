@@ -12,7 +12,7 @@ import {
   postCommandOutput,
   projectIDOf,
 } from "./command-context.js";
-import { incNotice } from "./capture.js";
+import { incNotice, incNoticeBy } from "./capture.js";
 import { parseMemoryOptions } from "./config.js";
 import {
   applyForget,
@@ -195,11 +195,13 @@ export function registerMemoryForget(
             sessionID,
           });
           try {
-            await incNotice(
-              asLedger(ctx.storage),
-              projectIDOf(ctx),
-              "forgotten",
-            );
+            const ledger = asLedger(ctx.storage);
+            const projectID = projectIDOf(ctx);
+            await incNotice(ledger, projectID, "forgotten");
+            const stale = result.indexPointers.candidates.length;
+            if (stale > 0) {
+              await incNoticeBy(ledger, projectID, "indexStale", stale);
+            }
           } catch (error) {
             // The write already happened; a notice failure must not undo it.
             logDiagnostic(error);

@@ -167,6 +167,47 @@ describe("/memory-forget", () => {
     expect(posts.join("\n")).toMatch(/append-only/);
     expect(await readFile(join(memory, "decisions.md"), "utf8")).toBe("- d\n");
   });
+
+  it("sets the indexStale notice and leaves INDEX.md unchanged when cleanup candidates exist", async () => {
+    await writeFile(
+      join(memory, "architecture.md"),
+      "# Architecture\n## Queue\n- old adapter\n",
+    );
+    await writeFile(
+      join(memory, "INDEX.md"),
+      "- Queue → architecture.md:Queue\n",
+    );
+    await registerMemoryForget(ctx());
+    await run("memory-forget", "architecture.md --line 3 --confirm");
+    expect(permissionCalls).toBe(1);
+    expect(store.get("proj/notice.forgotten")).toBe(1);
+    expect(store.get("proj/notice.indexStale")).toBe(1);
+    expect(await readFile(join(memory, "INDEX.md"), "utf8")).toBe(
+      "- Queue → architecture.md:Queue\n",
+    );
+    expect(posts.join("\n")).toContain("INDEX.md candidate cleanup");
+    expect(posts.join("\n")).toContain(
+      "/memory-forget INDEX.md --line 1 --confirm",
+    );
+  });
+
+  it("does not set the indexStale notice when no INDEX pointer matches", async () => {
+    await writeFile(
+      join(memory, "architecture.md"),
+      "# Architecture\n- keep\n- drop\n",
+    );
+    await writeFile(
+      join(memory, "INDEX.md"),
+      "- architecture: contracts, sibling implementations\n",
+    );
+    await registerMemoryForget(ctx());
+    await run("memory-forget", "architecture.md --line 3 --confirm");
+    expect(store.get("proj/notice.forgotten")).toBe(1);
+    expect(store.get("proj/notice.indexStale")).toBeUndefined();
+    expect(await readFile(join(memory, "INDEX.md"), "utf8")).toBe(
+      "- architecture: contracts, sibling implementations\n",
+    );
+  });
 });
 
 describe("/memory-gc", () => {

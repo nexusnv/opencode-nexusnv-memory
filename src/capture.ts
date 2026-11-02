@@ -317,7 +317,11 @@ export async function takeRotated(
 }
 
 /** Transient status notices (numbers only, cleared after reporting). */
-export type NoticeKind = "indexOverCap" | "captureFailed" | "forgotten";
+export type NoticeKind =
+  | "indexOverCap"
+  | "captureFailed"
+  | "forgotten"
+  | "indexStale";
 
 /** `<projectID>/notice.<kind>` → transient notice value (positive int). */
 export function noticeKey(projectID: string, kind: NoticeKind): string {
@@ -351,17 +355,30 @@ export async function setNotice(
   });
 }
 
-/** Increment a notice counter (read-modify-write under the mutex). */
-export async function incNotice(
+/** Increment a notice counter by a positive delta under the mutex. */
+export async function incNoticeBy(
+  storage: LedgerStorage,
+  projectID: string,
+  kind: NoticeKind,
+  delta: number,
+): Promise<number> {
+  if (!Number.isInteger(delta) || delta <= 0) {
+    throw new Error("[memory] ledger notice delta must be a positive int");
+  }
+  return withWriteLock(async () => {
+    const next = asCount(await storage.get(noticeKey(projectID, kind))) + delta;
+    await storage.set(noticeKey(projectID, kind), next);
+    return next;
+  });
+}
+
+/** Increment a notice counter by one under the mutex. */
+export function incNotice(
   storage: LedgerStorage,
   projectID: string,
   kind: NoticeKind,
 ): Promise<number> {
-  return withWriteLock(async () => {
-    const next = asCount(await storage.get(noticeKey(projectID, kind))) + 1;
-    await storage.set(noticeKey(projectID, kind), next);
-    return next;
-  });
+  return incNoticeBy(storage, projectID, kind, 1);
 }
 
 /**
