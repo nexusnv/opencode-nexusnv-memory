@@ -47,6 +47,7 @@ export interface MemoryInitResult {
   readonly lostMapWarning: boolean;
 }
 
+/** True only for an existing regular file; symlinks and probe errors are false. */
 async function isRegularFile(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isFile();
@@ -60,6 +61,7 @@ export async function isInitialized(memoryRoot: string): Promise<boolean> {
   return isRegularFile(join(resolve(memoryRoot), "INDEX.md"));
 }
 
+/** One bounded, single-line error message for command output. */
 function errorLine(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
@@ -68,6 +70,7 @@ function errorLine(error: unknown): string {
 /** Per-process chain: overlapping init calls must not observe each other's fresh templates. */
 let initChain: Promise<void> = Promise.resolve();
 
+/** Serialize init bodies; a rejected body must not break the chain. */
 function withInitMutex<T>(fn: () => Promise<T>): Promise<T> {
   const run = initChain.then(fn, fn);
   initChain = run.then(
@@ -88,6 +91,7 @@ export function initializeMemory(
   return withInitMutex(() => initializeMemoryUnlocked(input));
 }
 
+/** Mutex-held body of {@link initializeMemory}; see that function's contract. */
 async function initializeMemoryUnlocked(
   input: MemoryInitInput,
 ): Promise<MemoryInitResult> {

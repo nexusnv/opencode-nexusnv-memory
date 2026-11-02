@@ -182,7 +182,7 @@ Most people do not need this. `/memory-review` works in the current session.
 
 Run it the first time to create `.opencode/memory/`. It is also the repair command: run it again after deleting a template (or after an init that failed partway) and it recreates only what is missing. It never overwrites an existing file. `INDEX.md` is written last, so a failed repair leaves the project uninitialized rather than half-active.
 
-Before initialization, every other memory command and tool is blocked and returns `[memory] not initialized; run /memory-init to create .opencode/memory`. Only `/memory-init`, `/memory-status`, and `memory_status` work.
+Before initialization, every other memory command and tool is blocked and returns `[memory] not initialized; run /memory-init to create .opencode/memory` for any actual operation. Only `/memory-init`, `/memory-status`, and `memory_status` work; commands with a help path still render `--help`/`-h` usage.
 
 ### Let it do its thing
 

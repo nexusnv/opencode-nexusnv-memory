@@ -25,7 +25,7 @@ Initialization is one user-invoked command: `/memory-init`.
 3. **`/memory-init` is the only init affordance.** It is a plugin command, user-invoked, and never exposed as a model-facing tool.
 4. **`/memory-init` is idempotent repair.** It creates only missing directories and templates and never overwrites existing files.
 5. **Pre-init discovery is `/memory-status` and the docs only.** `setup()` prints no warning, no checklist, and no AGENTS.md nudge while the project is uninitialized. There is no prompt-tail notice and no setup console message.
-6. **Pre-init surface is minimal.** Only `/memory-init`, `/memory-status`, and the `memory_status` tool work. Every other memory command/tool returns one fixed message: `[memory] not initialized; run /memory-init to create .opencode/memory`. Blocked commands may still render `--help` usage; no operation runs.
+6. **Pre-init surface is minimal.** Only `/memory-init`, `/memory-status`, and the `memory_status` tool work. Every other memory command/tool returns one fixed message for any actual operation: `[memory] not initialized; run /memory-init to create .opencode/memory`. Blocked commands may still render `--help`/`-h` usage; no operation runs.
 7. **Pre-init `remember:` is silently ignored.** No write, no notice, no staging buffer. The AGENTS.md protocol block is not installed until the first-init checklist is printed, so the plugin has not promised automatic recording.
 8. **First init prints the consolidated checklist.** A repair run prints only a created/already-present summary. A failure before `INDEX.md` is created leaves the project uninitialized and says so.
 9. **Status stays a full doctor.** `/memory-status` and `memory_status` always render the existing report plus an explicit initialization row and a `/memory-init` next action.
@@ -49,7 +49,7 @@ Initialization is one user-invoked command: `/memory-init`.
 | `execute.after` hook | Returns before failure capture. |
 | Event loop | Drops events before `dispatchEvent`; no idle snapshots or compaction captures. |
 | `memory_recall`, `memory_search`, `memory_apply`, `memory_metrics` | Return the fixed pre-init message before any read, write, or metric. |
-| `/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics` | `--help` renders usage; any actual operation returns the fixed pre-init message before its normal work. |
+| `/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics` | `--help`/`-h` renders usage; any actual operation returns the fixed pre-init message before its normal work. |
 | `/memory-status`, `memory_status` | Work normally and report `not initialized`. They may read file counts/health but never write or inject. |
 | Metrics | No counter is bumped, including `hook.*`. |
 
@@ -64,7 +64,7 @@ Initialization is one user-invoked command: `/memory-init`.
 7. If `INDEX.md` was absent and any earlier file or directory failed, do not create `INDEX.md`. Report the failure and state that the project remains uninitialized.
 8. If `INDEX.md` was absent at the start but any of the other five templates already existed (reported as `present`), warn that the newly created INDEX is the default map and does not reconstruct a lost custom map. Existing files are untouched.
 
-The command accepts no arguments except `--help`. It posts its output through `postCommandOutput(..., required = true)`, so a synthetic-post failure falls back to the existing prompt pattern. It never throws.
+The command accepts no arguments except `--help`/`-h`. It posts its output through `postCommandOutput(..., required = true)`, so a synthetic-post failure falls back to the existing prompt pattern. It never throws.
 
 ### After initialization
 
@@ -101,7 +101,7 @@ The setup cleanup path is unchanged: abort the one event controller and dispose 
 
 - `src/tools.ts`: guard all four tools at the start of each executor.
 - `src/review.ts`: guard before the `review.invoked` metric and before the review prompt.
-- `src/forget-command.ts`, `src/gc-command.ts`: guard after `--help` handling and before reads/plans/approvals.
+- `src/review.ts`, `src/metrics.ts`, `src/forget-command.ts`, `src/gc-command.ts`: guard after `--help`/`-h` handling and before reads, resets, model calls, or plans.
 - `src/metrics.ts`: guard the command before reset/read/render; the `memory_metrics` tool is guarded in `src/tools.ts`.
 - `src/status-report.ts`:
   - Add `initialized: boolean` to `StatusReport`.
@@ -150,14 +150,14 @@ The setup cleanup path is unchanged: abort the one event controller and dispose 
 - `isInitialized`: regular file true; missing false; directory false; symlink false; `lstat` error false.
 - `initializeMemory`: creates six files + both directories; never overwrites; `INDEX.md` last; first-init flag; partial repair; failure before INDEX leaves the project uninitialized; concurrent calls are safe.
 - `renderInitResult`: first-init checklist; repair summary; failure wording; lost-map warning.
-- `/memory-init`: `--help`; unexpected argument; synthetic failure fallback; never throws.
+- `/memory-init`: `--help`/`-h`; unexpected argument; synthetic failure fallback; never throws.
 
 ### Pre-init gate matrix
 
 - Setup creates no `.opencode/memory` files and prints no warning.
 - All four hooks leave events unchanged and write no files or metrics.
 - The event loop writes no handoffs or captures.
-- Every blocked tool/command returns the fixed message.
+- Every blocked tool/command returns the fixed message for any actual operation; commands with a help path still render `--help`/`-h` usage.
 - `/memory-status` and `memory_status` work and report `not initialized`.
 - No metric counter changes.
 
@@ -200,7 +200,7 @@ No new option, metric name, storage key, or model-facing tool is documented.
 ## Acceptance criteria
 
 - [ ] A fresh project: setup, hooks, event loop, tools, and commands create no `.opencode/memory` files and bump no metrics before init.
-- [ ] Before init, only `/memory-init`, `/memory-status`, and `memory_status` work; every other surface returns the fixed message.
+- [ ] Before init, only `/memory-init`, `/memory-status`, and `memory_status` work; every other surface returns the fixed message for any actual operation, while commands with a help path still render `--help`/`-h` usage.
 - [ ] `/memory-init` creates the six templates plus `handoffs/` and `handoffs/archive/`, with `INDEX.md` last, and prints the consolidated checklist on first init.
 - [ ] `/memory-init` is idempotent, never overwrites, and reports partial failures without publishing INDEX.
 - [ ] An existing regular `INDEX.md` activates the plugin without running init.

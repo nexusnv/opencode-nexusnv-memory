@@ -43,6 +43,13 @@ export const MEMORY_REVIEW_COMMAND_NAME = "memory-review";
 export const MEMORY_REVIEW_DESCRIPTION =
   "Promote scratchpad notes into durable memory (human-approved)";
 
+/** Usage text for `--help`/`-h`; it performs no review and bumps no counter. */
+export const MEMORY_REVIEW_USAGE = [
+  "Usage: /memory-review [scope]",
+  "Asks the agent to propose provenance-tagged memory promotions.",
+  "Writes nothing; approve specific lines afterwards with memory_apply.",
+].join("\n");
+
 /**
  * Normative review ask (spec §5.5): untrusted-data directive, INDEX +
  * activeContext read, proposal-table-only output with provenance + flags,
@@ -70,13 +77,19 @@ export function registerMemoryReview(
       description: MEMORY_REVIEW_DESCRIPTION,
       execute: async (invocation) => {
         const { sessionID, prompt, delivery } = invocation;
+        const raw = typeof prompt?.text === "string" ? prompt.text : "";
+        const arg = raw.trim();
+        // Help precedes the gate: usage is safe pre-init and performs no
+        // review, model call, or counter bump.
+        if (arg === "--help" || arg === "-h") {
+          await postCommandOutput(ctx, invocation, MEMORY_REVIEW_USAGE, true);
+          return;
+        }
         if (!(await isInitialized(memoryRootOf(ctx)))) {
           await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
           return;
         }
-        const base =
-          typeof prompt?.text === "string" ? prompt.text : "";
-        const ask = buildReviewAsk(base);
+        const ask = buildReviewAsk(raw);
         // §5.12 tap: the invocation is counted exactly when it happened —
         // after the ask is built, before it is sent (the invocation is a
         // fact regardless of the ask's send outcome). Fire-and-forget with

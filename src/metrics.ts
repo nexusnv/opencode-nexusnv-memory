@@ -1057,6 +1057,13 @@ export const MEMORY_METRICS_COMMAND_NAME = "memory-metrics";
 export const MEMORY_METRICS_COMMAND_DESCRIPTION =
   "Local usage metrics dashboard for the memory plugin (stays on this machine)";
 
+/** Usage text for `--help`/`-h`; it performs no read, reset, or bump. */
+export const MEMORY_METRICS_USAGE = [
+  "Usage: /memory-metrics [reset | reset confirm]",
+  "Without arguments, renders the local count-only usage dashboard.",
+  "`reset` shows the confirmation notice; `reset confirm` wipes all local metrics.",
+].join("\n");
+
 /**
  * Fallback ask (spec §5.12 command row): the synthetic post rejected, so the
  * dashboard degrades to one cheap model turn — the agent calls the read-only
@@ -1143,6 +1150,19 @@ export function registerMetricsCommand(
       description: MEMORY_METRICS_COMMAND_DESCRIPTION,
       execute: async (invocation) => {
         const { sessionID, prompt, delivery } = invocation;
+        // One argument: the (trimmed, case-insensitive, whitespace-
+        // normalized) reset token. Bare `reset` asks for confirmation;
+        // only `reset confirm` wipes. Anything else renders the plain
+        // dashboard, except help, which precedes the gate: usage is safe
+        // pre-init and performs no read, reset, model call, or bump.
+        const arg =
+          typeof prompt?.text === "string"
+            ? prompt.text.trim().toLowerCase().replace(/\s+/g, " ")
+            : "";
+        if (arg === "--help" || arg === "-h") {
+          await postCommandOutput(ctx, invocation, MEMORY_METRICS_USAGE, true);
+          return;
+        }
         if (!(await isInitialized(memoryRootOf(ctx)))) {
           await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
           return;
@@ -1152,14 +1172,6 @@ export function registerMetricsCommand(
           // All deps for THIS call resolve from the live context (P22).
           const ledger = ledgerOf(ctx);
           const projectID = projectIDOf(ctx);
-          // One argument: the (trimmed, case-insensitive, whitespace-
-          // normalized) reset token. Bare `reset` asks for confirmation;
-          // only `reset confirm` wipes. Anything else renders the plain
-          // dashboard.
-          const arg =
-            typeof prompt?.text === "string"
-              ? prompt.text.trim().toLowerCase().replace(/\s+/g, " ")
-              : "";
           const confirmReset = arg === METRICS_RESET_CONFIRM_ARG;
           const resetRequested = arg === "reset";
           if (confirmReset) {

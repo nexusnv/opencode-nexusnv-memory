@@ -15,6 +15,7 @@ import {
   MEMORY_REVIEW_ASK,
   MEMORY_REVIEW_COMMAND_NAME,
   MEMORY_REVIEW_DESCRIPTION,
+  MEMORY_REVIEW_USAGE,
   buildReviewAsk,
   registerMemoryReview,
 } from "../src/review.js";
@@ -381,23 +382,60 @@ describe("proposes_table_and_writes_nothing", () => {
 });
 
 describe("initialization gate", () => {
-  it("returns the fixed pre-init message and bumps no counter", async () => {
+  it("renders help and returns the fixed pre-init message without bumping a counter", async () => {
     await rm(join(memoryRoot, "INDEX.md"));
-    const { added, prompted, synthetics, fakeCtx } = fakeForCommand();
+    const { added, prompted, synthetics, fakeCtx } = fakeForCommand({
+      storage,
+      location: {
+        directory: projectRoot,
+        project: {
+          id: PROJECT,
+          directory: projectRoot,
+          canonical: projectRoot,
+        },
+      },
+    });
     await registerMemoryReview(fakeCtx as never);
+
+    // Help precedes the gate: usage renders pre-init, with no review and
+    // no counter write.
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "--help", files: [], agents: [], skills: [] },
+      delivery: "steer",
+    });
+    expect((synthetics[0] as { text: string }).text).toBe(
+      MEMORY_REVIEW_USAGE,
+    );
+    expect(prompted).toHaveLength(0);
+    expect(await getPending(storage, PROJECT)).toBe(0);
+    expect(storage.data.size).toBe(0);
+
+    // Any actual operation still returns the fixed message.
     await added[0]!.execute({
       sessionID: SESSION,
       prompt: { text: "review", files: [], agents: [], skills: [] },
       delivery: "steer",
     });
-    expect((synthetics[0] as { text: string }).text).toBe(
+    expect((synthetics[1] as { text: string }).text).toBe(
       MEMORY_NOT_INITIALIZED,
     );
+    expect(prompted).toHaveLength(0);
     expect(await getPending(storage, PROJECT)).toBe(0);
 
     // The same registered executor re-probes per call: creating INDEX
     // activates the command without re-registering or restarting.
     await writeFile(join(memoryRoot, "INDEX.md"), "# INDEX\n", "utf8");
+    await added[0]!.execute({
+      sessionID: SESSION,
+      prompt: { text: "-h", files: [], agents: [], skills: [] },
+      delivery: "steer",
+    });
+    expect((synthetics[2] as { text: string }).text).toBe(
+      MEMORY_REVIEW_USAGE,
+    );
+    expect(prompted).toHaveLength(0);
+
     await added[0]!.execute({
       sessionID: SESSION,
       prompt: { text: "review", files: [], agents: [], skills: [] },

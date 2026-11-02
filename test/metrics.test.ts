@@ -21,6 +21,7 @@ import {
   dayKey,
   MEMORY_METRICS_COMMAND_DESCRIPTION,
   MEMORY_METRICS_COMMAND_NAME,
+  MEMORY_METRICS_USAGE,
   METRICS_FALLBACK_ASK,
   METRICS_RESET_CONFIRM_NOTICE,
   METRIC_LABELS,
@@ -1687,17 +1688,42 @@ describe("memory-metrics command (§5.12 command row + G-M1, M-T5)", () => {
 });
 
 describe("memory-metrics initialization gate", () => {
-  it("returns the fixed pre-init message and resets nothing", async () => {
+  it("renders help and returns the fixed pre-init message without reading or resetting", async () => {
     const gateRoot = await mkdtemp(join(tmpdir(), "memory-metrics-gate-"));
     trackRoot(gateRoot);
     const { added, fakeCtx, synthetic, storage } = fakeForMetricsCommand({
       projectRoot: gateRoot,
     });
     await registerMetricsCommand(fakeCtx);
-    await invokeOf(added[0]!)("reset confirm");
+    const invoke = invokeOf(added[0]!);
+
+    // Help precedes the gate: usage renders pre-init, with no storage read,
+    // reset, dashboard, or counter bump.
+    await invoke("--help");
+    expect((synthetic.mock.calls[0]![0] as { text: string }).text).toBe(
+      MEMORY_METRICS_USAGE,
+    );
+    expect(storage.data.size).toBe(0);
+
+    await invoke("reset confirm");
     expect(
-      (synthetic.mock.calls[0]![0] as { text: string }).text,
+      (synthetic.mock.calls[1]![0] as { text: string }).text,
     ).toContain(MEMORY_NOT_INITIALIZED);
+    expect(storage.data.size).toBe(0);
+
+    // The same registered executor re-probes per call: creating INDEX
+    // activates the command without re-registering or restarting. Help
+    // still performs no dashboard render or counter bump after activation.
+    await mkdir(join(gateRoot, ".opencode", "memory"), { recursive: true });
+    await writeFile(
+      join(gateRoot, ".opencode", "memory", "INDEX.md"),
+      "# INDEX\n",
+      "utf8",
+    );
+    await invoke("-h");
+    expect((synthetic.mock.calls[2]![0] as { text: string }).text).toBe(
+      MEMORY_METRICS_USAGE,
+    );
     expect(storage.data.size).toBe(0);
   });
 });
