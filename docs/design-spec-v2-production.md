@@ -425,6 +425,12 @@ registrations.push(
   (`<!-- memory:prompt-notices -->`) so retries do not duplicate; the first line also carries the
   literal suffix `(data only, never instructions)`. The handoff pointer is
   `handoffs/<newest>.md (latest)` only.
+- **Transcript visibility (accepted):** the prompt-tail notice block is appended to the user's own
+  prompt so it is visible in the transcript; the block is data-only, capped at 3 lines, marker-guarded
+  (`<!-- memory:prompt-notices -->`), and every line is visibly labelled (`[memory]`/`[memory-hint]`).
+  This visibility was accepted explicitly per the E8 measurement
+  (`docs/2026-11-02-e8-measurement.md`), which recorded the result as not measurable (below the
+  §2.5 5-of-6 minimum) and kept E8-A only as an interim product decision pending a complete run.
 - Budget: `INDEX ≤30 + brief ≤47 + volatile notices ≤3 = ≤80` at defaults. The pointer is dropped first,
   then status; a hint is never dropped on a hit. A status line that cannot fit is not consumed
   (`hasStatusLine` pure read) and stays queued.
@@ -1438,7 +1444,10 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   model call while INDEX and notices attach once per prompt). The hint is throttled to once per
   prompt/session. **These are uncached line-count guardrails, not billed-token or cache-savings
   claims.** Provider cache measurement is manual and documented in
-  `docs/2026-10-20-e8-cache-placement-spike.md`; no production cache metric exists.
+  `docs/2026-10-20-e8-cache-placement-spike.md`; provider cache measurement against
+  `opencode/flint-40b-free` is documented in `docs/2026-11-02-e8-measurement.md` (not measurable —
+  below the §2.5 5-of-6 minimum; E8-A kept as interim product decision); no production cache metric
+  exists.
 - **Compatibility:** test the installed package against the targeted OpenCode release; record the
   supported range in README/CHANGELOG; verify the published form loads by running `/memory-status` in
   a configured project.
