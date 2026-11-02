@@ -1010,6 +1010,16 @@ describe("statusLine", () => {
     expect(await hasStatusLine(storage, PROJECT)).toBe(false);
   });
 
+  it("reports stale INDEX pointers from a forget once, then clears the notice", async () => {
+    await setNotice(storage, PROJECT, "indexStale", 2);
+    expect(await hasStatusLine(storage, PROJECT)).toBe(true);
+    const line = await statusLine(storage, PROJECT);
+    expect(line).toContain("2 INDEX.md pointer(s) may be stale after a forget");
+    expect(line).toContain("/memory-forget INDEX.md --line N --confirm");
+    expect(await statusLine(storage, PROJECT)).toBeUndefined();
+    expect(await hasStatusLine(storage, PROJECT)).toBe(false);
+  });
+
   it("reports skipped failure captures once, then clears the notice", async () => {
     await setNotice(storage, PROJECT, "captureFailed", 2);
     const line = await statusLine(storage, PROJECT);

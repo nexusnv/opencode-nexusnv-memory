@@ -3,7 +3,7 @@
  *
  * `statusLine` resolves to at most one `[memory]` line or `undefined`,
  * reading only counters/markers in `ctx.storage` (never the filesystem).
- * Five fixed-threshold facts share the line, joined with `; `: the
+ * Six fixed-threshold facts share the line, joined with `; `: the
  * over-cap INDEX notice (re-set on prompt admission while the condition
  * persists; the `<projectID>/notice.indexOverCap` marker is consumed
  * atomically when reported), the rotation notice
@@ -11,6 +11,7 @@
  * the skipped-capture notice (count only — the
  * `<projectID>/notice.captureFailed` marker is consumed atomically when
  * reported), the forget notice (count only, consumed atomically) and the
+ * stale-INDEX-pointer notice (count only, consumed atomically), and the
  * review-due nudge (while scratchpad-only
  * `<projectID>/curation.pending` is ≥5). The line is generated from ledger
  * counters and appended to the canonical prompt by the **prompt** hook as a
@@ -75,6 +76,12 @@ export async function statusLine(
         `${forgotten} forget operation(s) applied; removed lines are archived under handoffs/archive/ (recallable; git history may retain them) — review INDEX.md pointers`,
       );
     }
+    const indexStale = await takeNotice(storage, projectID, "indexStale");
+    if (indexStale !== undefined) {
+      facts.push(
+        `${indexStale} INDEX.md pointer(s) may be stale after a forget; review the forget result and run /memory-forget INDEX.md --line N --confirm`,
+      );
+    }
     const pending = await getPending(storage, projectID);
     if (pending >= REVIEW_DUE_PENDING) {
       facts.push(
@@ -110,6 +117,9 @@ export async function hasStatusLine(
       return true;
     }
     if ((await getNotice(storage, projectID, "forgotten")) !== undefined) {
+      return true;
+    }
+    if ((await getNotice(storage, projectID, "indexStale")) !== undefined) {
       return true;
     }
     return (await getPending(storage, projectID)) >= REVIEW_DUE_PENDING;
