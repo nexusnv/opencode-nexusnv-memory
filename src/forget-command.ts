@@ -27,7 +27,7 @@ export const MEMORY_FORGET_DESCRIPTION =
   "Forget active memory lines (dry-run; --confirm archives first)";
 
 export const MEMORY_FORGET_USAGE = [
-  "Usage: /memory-forget <file> (--line N | --match TEXT | --all) [--confirm] [--reason TEXT]",
+  "Usage: /memory-forget <file> (--line N [--expect-hash HASH] | --match TEXT | --all) [--confirm] [--reason TEXT]",
   `Files: ${FORGETTABLE_FILES.join(", ")}`,
   "Without --confirm this prints a dry-run. --confirm asks once per line/block.",
   "decisions.md and handoffs are immutable; use /memory-gc for root handoff snapshots.",
@@ -51,6 +51,7 @@ export function parseForgetArgs(text: string): ParseResult {
   const tokens = tokenized.tokens;
   let file: string | undefined;
   let line: number | undefined;
+  let expectHash: string | undefined;
   let match: string | undefined;
   let all = false;
   let confirm = false;
@@ -79,6 +80,16 @@ export function parseForgetArgs(text: string): ParseResult {
         return { error: "--line requires a positive integer" };
       }
       line = value;
+      continue;
+    }
+    if (token === "--expect-hash" || token.startsWith("--expect-hash=")) {
+      const parsed = commandFlagValue(token, "--expect-hash", tokens, i);
+      if (parsed.error) return { error: parsed.error };
+      i = parsed.index;
+      if (!/^[0-9a-f]{16}$/i.test(parsed.value ?? "")) {
+        return { error: "--expect-hash requires 16 hex characters" };
+      }
+      expectHash = parsed.value!.toLowerCase();
       continue;
     }
     if (token === "--match" || token.startsWith("--match=")) {
@@ -120,6 +131,9 @@ export function parseForgetArgs(text: string): ParseResult {
     }
     return { error: `not a forgettable file: ${file}` };
   }
+  if (expectHash !== undefined && line === undefined) {
+    return { error: "--expect-hash requires --line" };
+  }
   const selectorCount = [line !== undefined, match !== undefined, all].filter(
     Boolean,
   ).length;
@@ -130,7 +144,9 @@ export function parseForgetArgs(text: string): ParseResult {
   }
   const selector: ForgetSelector =
     line !== undefined
-      ? { kind: "line", line }
+      ? expectHash !== undefined
+        ? { kind: "line", line, expectHash }
+        : { kind: "line", line }
       : match !== undefined
         ? { kind: "match", text: match }
         : { kind: "all" };

@@ -1015,7 +1015,7 @@ describe("statusLine", () => {
     expect(await hasStatusLine(storage, PROJECT)).toBe(true);
     const line = await statusLine(storage, PROJECT);
     expect(line).toContain("2 INDEX.md pointer(s) may be stale after a forget");
-    expect(line).toContain("/memory-forget INDEX.md --line N --confirm");
+    expect(line).toContain("row-bound /memory-forget INDEX.md follow-up");
     expect(await statusLine(storage, PROJECT)).toBeUndefined();
     expect(await hasStatusLine(storage, PROJECT)).toBe(false);
   });

@@ -738,7 +738,7 @@ registrations.push(
   - **Tier-3 amendment (2026-11-02, INDEX cleanup):** a successful `/memory-forget` that produced
     unambiguous INDEX cleanup candidates adds their count to `<projectID>/notice.indexStale`;
     `statusLine()` emits
-    `[memory] <n> INDEX.md pointer(s) may be stale after a forget; review the forget result and run /memory-forget INDEX.md --line N --confirm`
+    `[memory] <n> INDEX.md pointer(s) may be stale after a forget; review the forget result and run its row-bound /memory-forget INDEX.md follow-up`
     and consumes it atomically. Count-only transient storage, not a metric; the source forget never rewrites INDEX.
 
 #### 5.7.1 Cross-process write safety and atomic publish (E14)
@@ -1121,13 +1121,14 @@ Overflow → `archive/`, snapshots → `handoffs/` root, never the prompt.
 
 **Lifecycle commands (E13, ADR-0009).**
 
-| Command          | Target                                                                     | Selectors                                                    | Gates                                                                                                                     | Never                                                             |
-| ---------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `/memory-forget` | `INDEX.md`, `activeContext.md`, `architecture.md`, `style.md`, `issues.md` | `--line N`, literal case-insensitive `--match TEXT`, `--all` | dry-run default; `--confirm`; one `memory_write` assert per unit; archive copy before rewrite; re-plan/compare under lock | `decisions.md` (append-only), handoffs (immutable), archive purge |
-| `/memory-gc`     | root `handoffs/*.md` only                                                  | `--older-than DAYS` and/or `--keep N` (both = intersection)  | dry-run default; `--confirm`; one batch approval; strict re-list + re-plan under lock                                     | `handoffs/archive/`, automatic sweep/TTL, background job          |
+| Command          | Target                                                                     | Selectors                                                                                 | Gates                                                                                                                     | Never                                                             |
+| ---------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `/memory-forget` | `INDEX.md`, `activeContext.md`, `architecture.md`, `style.md`, `issues.md` | `--line N` (optionally `--expect-hash HASH`), literal case-insensitive `--match TEXT`, `--all` | dry-run default; `--confirm`; one `memory_write` assert per unit; archive copy before rewrite; re-plan/compare under lock | `decisions.md` (append-only), handoffs (immutable), archive purge |
+| `/memory-gc`     | root `handoffs/*.md` only                                                  | `--older-than DAYS` and/or `--keep N` (both = intersection)                               | dry-run default; `--confirm`; one batch approval; strict re-list + re-plan under lock                                     | `handoffs/archive/`, automatic sweep/TTL, background job          |
 
 INDEX cleanup is a second explicit step: the source forget lists unambiguous candidate lines with
-exact numbers and a per-line `/memory-forget INDEX.md --line N --confirm`; ambiguous pointers stay
+exact numbers and a per-line `/memory-forget INDEX.md --line N --expect-hash HASH --confirm`;
+the hash guard rejects a row that changed under the listed line number, and ambiguous pointers stay
 manual. The source forget never rewrites INDEX and never bulk-removes rows.
 
 **Logical forgetting, stated honestly:** this is not physical secure erasure. Git history, backups,
@@ -1182,8 +1183,8 @@ their preview/result output; `/memory-forget` adds the persistent `notice.forgot
 8. **Forget/GC (explicit, user-invoked):** `/memory-forget` previews by default; `--confirm` requires
    per-unit approval and archives removed text before rewriting. A structural-file forget also detects
    INDEX pointers that the selection made stale, lists unambiguous candidates with exact line numbers,
-   and offers a separate per-line `/memory-forget INDEX.md --line N --confirm`; ambiguous pointers
-   remain a manual edit. `/memory-gc` previews root handoffs; `--confirm` takes one batch approval and
+   and offers a separate per-line `/memory-forget INDEX.md --line N --expect-hash HASH --confirm`;
+   ambiguous pointers remain a manual edit. `/memory-gc` previews root handoffs; `--confirm` takes one batch approval and
    re-plans under the lock. `decisions.md` and handoffs are rejected by forget; archive is never purged.
    No model-facing delete tool and no sixth option (ADR-0009).
 9. **Invalidation:** auto-memory lives only in `.opencode/memory/`, never in nested `AGENTS.md`
@@ -1295,8 +1296,8 @@ unavailable)`; a rejecting/absent agent registry degrades to `unknown`, never a 
 **Tier-3 amendment (2026-11-02, stale INDEX pointers).** `collectStatus` also reads the transient
 `<projectID>/notice.indexStale` count with `getNotice` (it does not consume it). When > 0, the Activity
 table renders `| stale INDEX pointers | <n> |` and the next actions include
-"review <n> stale INDEX.md pointer(s) from a forget; run /memory-forget INDEX.md --line N --confirm
-with the line numbers from the forget result." This is read-only: the notice remains queued for the
+"review <n> stale INDEX.md pointer(s) from a forget; run the row-bound /memory-forget INDEX.md
+follow-up from the forget result." This is read-only: the notice remains queued for the
 prompt status line, and no counter or storage key is written.
 
 **Renderer contract.** `renderStatusReport` is pure and deterministic: fixed strings, allowlisted

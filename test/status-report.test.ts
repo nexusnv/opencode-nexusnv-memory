@@ -523,7 +523,7 @@ describe("collectStatus + renderStatusReport", () => {
     expect(report.indexStalePointers).toBe(2);
     expect(text).toContain("| stale INDEX pointers | 2 |");
     expect(text).toContain("review 2 stale INDEX.md pointer(s)");
-    expect(text).toContain("/memory-forget INDEX.md --line N --confirm");
+    expect(text).toContain("row-bound /memory-forget INDEX.md follow-up");
     expect(await storage.get(`${PROJECT}/notice.indexStale`)).toBe(2);
   });
 });

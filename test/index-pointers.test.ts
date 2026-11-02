@@ -325,4 +325,205 @@ describe("detectIndexPointers", () => {
     });
     expect(result.candidates).toEqual([]);
   });
+
+  it("does not flag a pointer embedded inside a larger word", () => {
+    const result = report({
+      index: "- configuration → architecture.md\n",
+      current: "# Architecture\n- reconfiguration happened\n",
+      next: "# Architecture\n",
+      removed: [{ lineNumbers: [2], text: "- reconfiguration happened" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("does not match a pointer across separately approved units", () => {
+    const result = report({
+      index: "- alpha beta → architecture.md\n",
+      current: "# Architecture\n- alpha\nbeta gamma\n",
+      next: "# Architecture\n",
+      removed: [
+        { lineNumbers: [2], text: "- alpha" },
+        { lineNumbers: [3], text: "beta gamma" },
+      ],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("ignores a file-general row whose descriptor was removed", () => {
+    const result = report({
+      index: "- architecture: legacy queue adapter\n",
+      current: "# Architecture\n- legacy queue adapter\n",
+      next: "# Architecture\n",
+      removed: [{ lineNumbers: [2], text: "- legacy queue adapter" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("reports a topic-only pointer whose removed heading kept content", () => {
+    const result = report({
+      index: "- Queue → architecture.md\n",
+      current: "# Architecture\n## Queue\n- keep me\n",
+      next: "# Architecture\n- keep me\n",
+      removed: [{ lineNumbers: [2], text: "## Queue" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md",
+        reason:
+          'topic "queue" matched a heading that was removed but its content remains in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("reports an already-empty section whose heading was removed", () => {
+    const result = report({
+      index: "- Empty → architecture.md:Empty\n",
+      current: "# Architecture\n## Empty\n## Keep\n- keep\n",
+      next: "# Architecture\n## Keep\n- keep\n",
+      removed: [{ lineNumbers: [2], text: "## Empty" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- Empty → architecture.md:Empty",
+        reason:
+          'heading "empty" was removed but its section was already empty in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("reports an empty section when the topic survives elsewhere", () => {
+    const result = report({
+      index: "- legacy queue adapter → architecture.md:Queue\n",
+      current: [
+        "# Architecture",
+        "## Queue",
+        "- legacy queue adapter",
+        "## Other",
+        "- legacy queue adapter remains",
+      ].join("\n"),
+      next: [
+        "# Architecture",
+        "## Queue",
+        "## Other",
+        "- legacy queue adapter remains",
+      ].join("\n"),
+      removed: [{ lineNumbers: [3], text: "- legacy queue adapter" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- legacy queue adapter → architecture.md:Queue",
+        reason:
+          'section "queue" is now empty but the topic still appears in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("reports a short missing section before literal matching", () => {
+    const result = report({
+      index: "- Queue → architecture.md:Q\n",
+      current: "# Architecture\n- keep\n",
+      next: "# Architecture\n",
+      removed: [{ lineNumbers: [2], text: "- keep" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Q",
+        reason:
+          'section "q" was not found in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("uses the destination after the arrow, not a filename in the topic", () => {
+    const result = report({
+      index: "- style.md notes → architecture.md:Queue\n",
+      current: "# Architecture\n## Queue\n- old adapter\n",
+      next: "# Architecture\n## Queue\n",
+      removed: [{ lineNumbers: [3], text: "- old adapter" }],
+    });
+    expect(result.candidates).toEqual([
+      {
+        line: 1,
+        text: "- style.md notes → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+  });
+
+  it("does not close a backtick fence on a different marker family", () => {
+    const current = [
+      "# Architecture",
+      "```md",
+      "~~~",
+      "## Queue",
+      "~~~",
+      "```",
+      "## Queue",
+      "- old adapter",
+    ].join("\n");
+    const result = report({
+      index: "- Queue → architecture.md:Queue\n",
+      current,
+      next: [
+        "# Architecture",
+        "```md",
+        "~~~",
+        "## Queue",
+        "~~~",
+        "```",
+        "## Queue",
+      ].join("\n"),
+      removed: [{ lineNumbers: [8], text: "- old adapter" }],
+    });
+    expect(result.candidates).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+  });
+
+  it("does not close a backtick fence on a shorter or annotated run", () => {
+    const current = [
+      "# Architecture",
+      "````md",
+      "```js",
+      "## Queue",
+      "````",
+      "## Queue",
+      "- old adapter",
+    ].join("\n");
+    const result = report({
+      index: "- Queue → architecture.md:Queue\n",
+      current,
+      next: [
+        "# Architecture",
+        "````md",
+        "```js",
+        "## Queue",
+        "````",
+        "## Queue",
+      ].join("\n"),
+      removed: [{ lineNumbers: [7], text: "- old adapter" }],
+    });
+    expect(result.candidates).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+  });
 });
