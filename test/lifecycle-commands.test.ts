@@ -321,6 +321,9 @@ describe("initialization gate", () => {
     expect(posts.at(-1)).toBe(MEMORY_NOT_INITIALIZED);
 
     await registerMemoryGc(ctx());
+    await run("memory-gc", "--help");
+    expect(posts.at(-1)).toContain("Usage: /memory-gc");
+
     await run("memory-gc", "--keep 1");
     expect(posts.at(-1)).toBe(MEMORY_NOT_INITIALIZED);
   });

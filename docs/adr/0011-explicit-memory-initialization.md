@@ -18,16 +18,19 @@ A project should be inert until the user explicitly initializes it.
   and stays silent for an uninitialized project. It keeps the existing
   `memory_write → ask` warning and AGENTS.md nudge only after initialization.
 - `/memory-init` is the only init affordance. It is plugin-registered,
-  user-invoked, accepts no arguments except `--help`, and never appears as a
-  model-facing tool.
+  user-invoked, accepts no arguments except `--help`/`-h`, and never appears as
+  a model-facing tool.
 - `/memory-init` is idempotent repair: create only missing directories and
   templates, never overwrite, create `INDEX.md` last. If INDEX was absent and
   any earlier target failed, INDEX is not created and the project remains
   uninitialized.
 - Before initialization, only `/memory-init`, `/memory-status`, and
   `memory_status` work. Every other memory tool/command returns
-  `[memory] not initialized; run /memory-init to create .opencode/memory`.
-  No hook injects, captures, snapshots, remembers, or bumps a metric.
+  `[memory] not initialized; run /memory-init to create .opencode/memory`
+  for any actual operation. Commands with a help path (`/memory-review`,
+  `/memory-forget`, `/memory-gc`, `/memory-metrics`) still render
+  `--help`/`-h` usage; no operation runs. No hook injects, captures,
+  snapshots, remembers, or bumps a metric.
 - `/memory-status` always renders the full doctor, including an
   `initialization` row and a `/memory-init` next action.
 - Pre-init `remember:` is silently ignored. The AGENTS.md protocol block is

@@ -622,7 +622,8 @@ registrations.push(
 ```
 
 - Spread `prompt` so `files`/`agents`/`skills` survive (P7). `PromptInput.Prompt` carries only `{text,files?,agents?,skills?}` — there is no `metadata` to preserve; `delivery` comes from the invocation.
-- Invocation `/memory-review [scope]`. **The read+propose phase writes no memory and proposes only** —
+- Invocation `/memory-review [scope]` (optional `--help`/`-h` renders usage and performs no review).
+  **The read+propose phase writes no memory and proposes only** —
   its sole output is a proposal table; nothing memory-related is applied until a human approves line by
   line (ADR-0007). Its only durable side effect is the §5.12 `review.invoked` metrics counter, which
   carries no content and writes no memory file.
@@ -697,8 +698,10 @@ existing installs activate without migration and deleting INDEX de-inerts the pl
 restart. Before initialization, the prompt/context/compaction/execute.after hooks and the event-loop
 callback return before any read, write, snapshot, remember, or metrics bump; `memory_recall`,
 `memory_apply`, `memory_metrics`, `memory_search`, `/memory-review`, `/memory-forget`, `/memory-gc`,
-and `/memory-metrics` return one fixed message. Only `/memory-init`, `/memory-status`, and
-`memory_status` remain available. `/memory-init` is idempotent repair: it creates only missing
+and `/memory-metrics` return one fixed message for any actual operation. Commands with a help path
+(`/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`) still render `--help`/`-h`
+usage; no operation runs. Only `/memory-init`, `/memory-status`, and `memory_status` remain
+available. `/memory-init` is idempotent repair: it creates only missing
 directories/templates, never overwrites, and creates INDEX last, so a partial scaffold never
 activates the plugin.
 
@@ -1072,7 +1075,8 @@ registrations.push(
   `pending`, `seen` set size (scan), decisions tail size — counts only, obtained by `readFile` + line
   counting, never by rendering file bodies.
 - **Command (normative):** `ctx.command.transform` registers `memory-metrics` (invocation
-  `/memory-metrics [reset | reset confirm]`):
+  `/memory-metrics [reset | reset confirm]`; optional `--help`/`-h` renders usage and performs no
+  read, reset, or bump):
   - bare `reset` (case-insensitive, whitespace-normalized): **never wipes**. It renders the intact
     table prefixed with the fixed confirmation notice
     (``> Reset not applied. Re-run `/memory-metrics reset confirm` to wipe all local metrics.``) and

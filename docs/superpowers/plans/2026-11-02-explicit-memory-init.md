@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the memory plugin inert for a project until the user explicitly runs `/memory-init`. A project is initialized when `.opencode/memory/INDEX.md` exists as a regular file. Before that, setup creates nothing, hooks inject and capture nothing, no metrics counter is bumped, and every memory tool/command except `/memory-init`, `/memory-status`, and `memory_status` returns one fixed message. `/memory-init` is idempotent repair: it creates only missing directories/templates, never overwrites, and creates `INDEX.md` last so a partial scaffold never activates the plugin.
+**Goal:** Make the memory plugin inert for a project until the user explicitly runs `/memory-init`. A project is initialized when `.opencode/memory/INDEX.md` exists as a regular file. Before that, setup creates nothing, hooks inject and capture nothing, no metrics counter is bumped, and every memory tool/command except `/memory-init`, `/memory-status`, and `memory_status` returns one fixed message for any actual operation (commands with a help path still render `--help`/`-h` usage). `/memory-init` is idempotent repair: it creates only missing directories/templates, never overwrites, and creates `INDEX.md` last so a partial scaffold never activates the plugin.
 
 **Architecture:** A new `src/init.ts` owns the `isInitialized()` probe, the idempotent `initializeMemory()` repair, the deterministic `renderInitResult()`, and the `/memory-init` command registration. `src/index.ts` stops scaffolding, registers the init command, and guards every hook and the event loop before any metric bump or event mutation. `src/tools.ts`, `src/review.ts`, `src/forget-command.ts`, `src/gc-command.ts`, and `src/metrics.ts` guard at their executors; `src/status-report.ts` stays available and reports the initialization state. `src/files.ts` and `src/capture.ts` are deliberately unchanged: the gate lives at the production surfaces, not the writers.
 
@@ -24,7 +24,7 @@ Do not re-litigate these during implementation.
    [memory] not initialized; run /memory-init to create .opencode/memory
    ```
 
-   Blocked commands may still render `--help` usage; no operation runs.
+   Blocked commands may still render `--help`/`-h` usage; no operation runs.
 4. **`/memory-init` is the only init affordance.** Plugin-registered, user-invoked, never a model-facing tool, never a file-based command stub.
 5. **`/memory-init` is idempotent repair.** It creates only missing directories/files and never overwrites. `INDEX.md` is created last. If `INDEX.md` was absent and any earlier target failed, `INDEX.md` is not created and the project stays uninitialized.
 6. **First init prints the consolidated checklist.** A repair run prints only a created/already-present summary. If `INDEX.md` was absent while other templates existed, warn that the new INDEX is the default map and does not reconstruct a lost custom map.
@@ -53,11 +53,11 @@ Do not re-litigate these during implementation.
 | `src/index.ts` | Remove `scaffoldMemoryDir()`; register `/memory-init`; guard four hooks and the event loop; print setup messages only when initialized. |
 | `src/status-report.ts` | `initialized` field; `initialization` row; explicit-init directory/INDEX wording; `/memory-init` actions; suppress capture advice pre-init. |
 | `src/tools.ts` | Gate all four tool executors. |
-| `src/review.ts` | Gate `/memory-review` after no help path exists (it has none); fixed message via `postCommandOutput`. |
-| `src/forget-command.ts` | Gate after `--help`, before parse errors/reads/writes. |
-| `src/gc-command.ts` | Gate after `--help`, before parse errors/reads/writes. |
-| `src/metrics.ts` | Gate `/memory-metrics` before bump/reset/render. |
-| `commands/memory-review.md` | Preflight: missing INDEX → stop and ask for `/memory-init`. |
+| `src/review.ts` | Gate `/memory-review` after its `--help`/`-h` path; fixed message via `postCommandOutput`. |
+| `src/forget-command.ts` | Gate after `--help`/`-h`, before parse errors/reads/writes. |
+| `src/gc-command.ts` | Gate after `--help`/`-h`, before parse errors/reads/writes. |
+| `src/metrics.ts` | Gate `/memory-metrics` after its `--help`/`-h` path, before bump/reset/render. |
+| `commands/memory-review.md` | Preflight: missing or non-regular INDEX → stop and ask for `/memory-init`. |
 | `agents/memory-manager.md` | Same preflight. |
 | `test/scaffold.test.ts` | Setup no longer scaffolds; `memory-init` registered; `initInstallText()` checklist. |
 | `test/hooks.test.ts` | Seed scaffold in `beforeEach`; adjust missing-INDEX capture expectation. |
@@ -1202,16 +1202,22 @@ import { memoryRootOf, postCommandOutput } from "./command-context.js";
 import { MEMORY_NOT_INITIALIZED, isInitialized } from "./init.js";
 ```
 
-Change the executor signature from destructuring to the invocation, then guard before the `review.invoked` bump:
+Change the executor signature from destructuring to the invocation, then add a help branch and guard before the `review.invoked` bump:
 
 ```ts
 execute: async (invocation) => {
   const { sessionID, prompt, delivery } = invocation;
+  const raw = typeof prompt?.text === "string" ? prompt.text : "";
+  const arg = raw.trim();
+  if (arg === "--help" || arg === "-h") {
+    await postCommandOutput(ctx, invocation, MEMORY_REVIEW_USAGE, true);
+    return;
+  }
   if (!(await isInitialized(memoryRootOf(ctx)))) {
     await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
     return;
   }
-  const base = typeof prompt?.text === "string" ? prompt.text : "";
+  const base = raw;
   // ... existing body unchanged
 },
 ```
@@ -1243,6 +1249,14 @@ Use the file’s existing local `memoryRootOf(ctx)` (defined near `projectIDOf`)
 ```ts
 execute: async (invocation) => {
   const { sessionID, prompt, delivery } = invocation;
+  const arg =
+    typeof prompt?.text === "string"
+      ? prompt.text.trim().toLowerCase().replace(/\s+/g, " ")
+      : "";
+  if (arg === "--help" || arg === "-h") {
+    await postCommandOutput(ctx, invocation, MEMORY_METRICS_USAGE, true);
+    return;
+  }
   if (!(await isInitialized(memoryRootOf(ctx)))) {
     await postCommandOutput(ctx, invocation, MEMORY_NOT_INITIALIZED, true);
     return;
@@ -1652,16 +1666,19 @@ A project should be inert until the user explicitly initializes it.
   and stays silent for an uninitialized project. It keeps the existing
   `memory_write → ask` warning and AGENTS.md nudge only after initialization.
 - `/memory-init` is the only init affordance. It is plugin-registered,
-  user-invoked, accepts no arguments except `--help`, and never appears as a
-  model-facing tool.
+  user-invoked, accepts no arguments except `--help`/`-h`, and never appears as
+  a model-facing tool.
 - `/memory-init` is idempotent repair: create only missing directories and
   templates, never overwrite, create `INDEX.md` last. If INDEX was absent and
   any earlier target failed, INDEX is not created and the project remains
   uninitialized.
 - Before initialization, only `/memory-init`, `/memory-status`, and
   `memory_status` work. Every other memory tool/command returns
-  `[memory] not initialized; run /memory-init to create .opencode/memory`.
-  No hook injects, captures, snapshots, remembers, or bumps a metric.
+  `[memory] not initialized; run /memory-init to create .opencode/memory`
+  for any actual operation. Commands with a help path (`/memory-review`,
+  `/memory-forget`, `/memory-gc`, `/memory-metrics`) still render
+  `--help`/`-h` usage; no operation runs. No hook injects, captures,
+  snapshots, remembers, or bumps a metric.
 - `/memory-status` always renders the full doctor, including an
   `initialization` row and a `/memory-init` next action.
 - Pre-init `remember:` is silently ignored. The AGENTS.md protocol block is
@@ -1743,7 +1760,7 @@ In US-30, replace “scaffold presence” with “initialization state” and ad
 
 - `CONTRIBUTING.md`: change the `index.ts` layout comment to “entrypoint: setup, hook guards, cleanup”; add `src/init.ts  # explicit init gate + /memory-init`; change “It scaffolds memory files” to “`/memory-init` creates memory files”; update the manual P0 step to say hand-create the six files or run `/memory-init`.
 - `docs/c4-03-components.md`: add an init row (`isInitialized`, `initializeMemory`, `/memory-init`) and update the status row to “initialization state”.
-- `docs/c4-04-interfaces.md`: add the pre-init fixed message to the tool/command contract; update the status output line to include `initialization`.
+- `docs/c4-04-interfaces.md`: add the pre-init fixed message (with the `--help`/`-h` exception) to the tool/command contract; update the status output line to include `initialization`.
 - `docs/c4-06-code.md`: add `src/init.ts` to the tree; replace the first-run scaffold invariant with the `/memory-init` guarantee.
 
 - [ ] **Step 7: Update CHANGELOG**
@@ -1751,7 +1768,7 @@ In US-30, replace “scaffold presence” with “initialization state” and ad
 Add under `## Unreleased`:
 
 ```md
-- Explicit initialization (E15, issue #20): the plugin no longer scaffolds `.opencode/memory/` during setup. A project is inert until `/memory-init` creates `INDEX.md` (last, after the five other templates and both handoff directories); the command is idempotent, never overwrites, and prints the consolidated install checklist on first init. Before initialization, only `/memory-init`, `/memory-status`, and `memory_status` work; every other memory tool/command returns one fixed message, and no hook injects, captures, snapshots, remembers, or bumps a metric. Existing installs with a regular `INDEX.md` activate automatically. `/memory-status` gains an `initialization` row and `/memory-init` actions. No new option, metric name, storage key, or model-facing tool.
+- Explicit initialization (E15, issue #20): the plugin no longer scaffolds `.opencode/memory/` during setup. A project is inert until `/memory-init` creates `INDEX.md` (last, after the five other templates and both handoff directories); the command is idempotent, never overwrites, and prints the consolidated install checklist on first init. Before initialization, only `/memory-init`, `/memory-status`, and `memory_status` work; every other memory tool/command returns one fixed message for any actual operation (commands with a help path still render `--help`/`-h` usage), and no hook injects, captures, snapshots, remembers, or bumps a metric. Existing installs with a regular `INDEX.md` activate automatically. `/memory-status` gains an `initialization` row and `/memory-init` actions. No new option, metric name, storage key, or model-facing tool.
 ```
 
 - [ ] **Step 8: Check for stale first-run wording**
@@ -1829,7 +1846,7 @@ If there is nothing to commit, skip this step.
 ## Acceptance checklist
 
 - [ ] A fresh project: setup, hooks, event loop, tools, and commands create no `.opencode/memory` files and bump no metrics before init.
-- [ ] Before init, only `/memory-init`, `/memory-status`, and `memory_status` work; every other surface returns the fixed message.
+- [ ] Before init, only `/memory-init`, `/memory-status`, and `memory_status` work; every other surface returns the fixed message for any actual operation, while commands with a help path still render `--help`/`-h` usage.
 - [ ] `/memory-init` creates the six templates plus `handoffs/` and `handoffs/archive/`, with `INDEX.md` last, and prints the consolidated checklist on first init.
 - [ ] `/memory-init` is idempotent, never overwrites, and reports partial failures without publishing INDEX.
 - [ ] An existing regular `INDEX.md` activates the plugin without running init.
