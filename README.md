@@ -280,7 +280,7 @@ After forgetting from `activeContext.md`, `architecture.md`, `style.md`, or `iss
 /memory-forget INDEX.md --line 7 --confirm
 ```
 
-Nothing is bulk-removed, the source forget never rewrites `INDEX.md`, and pointers that are file-general or only partly related are reported as ambiguous for you to edit by hand. A successful forget with candidates leaves a status notice so the follow-up is not lost.
+Nothing is bulk-removed, the source forget never rewrites `INDEX.md`, and file-general pointers are ignored while pointers that are only partly related are reported as ambiguous for you to edit by hand. When several lines match, follow-ups are listed from the highest line number down because each removal shifts the remaining line numbers; re-run the dry-run after any manual edit. A successful forget with candidates leaves a status notice so the follow-up is not lost.
 
 Prune old root handoff snapshots:
 
