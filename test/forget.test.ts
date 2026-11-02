@@ -447,6 +447,35 @@ describe("forget archive and application", () => {
     );
   });
 
+  it("orders multi-candidate follow-ups from the highest line down", () => {
+    const plan = planForget("architecture.md", "- keep\n", {
+      kind: "line",
+      line: 1,
+    });
+    const preview = renderForgetPreview(plan, "cleanup", undefined, {
+      status: "inspected",
+      candidates: [
+        {
+          line: 3,
+          text: "- first → architecture.md:First",
+          reason: "literal",
+        },
+        {
+          line: 7,
+          text: "- second → architecture.md:Second",
+          reason: "literal",
+        },
+      ],
+      ambiguous: [],
+    });
+    const high = preview.indexOf("/memory-forget INDEX.md --line 7 --confirm");
+    const low = preview.indexOf("/memory-forget INDEX.md --line 3 --confirm");
+    expect(high).toBeGreaterThan(-1);
+    expect(low).toBeGreaterThan(high);
+    expect(preview).toContain("highest line number down");
+    expect(preview).toContain("shifts the remaining line numbers");
+  });
+
   it("reports no INDEX pointer when the map line is file-general", async () => {
     await writeFile(
       join(root, "architecture.md"),

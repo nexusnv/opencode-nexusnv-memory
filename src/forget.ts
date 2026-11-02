@@ -338,10 +338,13 @@ function renderIndexPointerSection(
     return lines;
   }
   if (report.candidates.length > 0) {
+    const ordered = [...report.candidates].sort(
+      (left, right) => right.line - left.line,
+    );
     lines.push(
       "INDEX.md candidate cleanup (not applied; exact line numbers):",
     );
-    for (const candidate of report.candidates.slice(0, 10)) {
+    for (const candidate of ordered.slice(0, 10)) {
       lines.push(
         `- INDEX.md line ${candidate.line} — ${pointerReasonLabel(candidate.reason)}: ${clip(candidate.text)}`,
       );
@@ -349,9 +352,14 @@ function renderIndexPointerSection(
         `  follow-up: /memory-forget INDEX.md --line ${candidate.line} --confirm`,
       );
     }
-    if (report.candidates.length > 10) {
+    if (ordered.length > 10) {
       lines.push(
-        `- … ${report.candidates.length - 10} more candidate line(s); re-run the dry-run after editing INDEX.md`,
+        `- … ${ordered.length - 10} more candidate line(s); re-run the dry-run after editing INDEX.md`,
+      );
+    }
+    if (ordered.length > 1) {
+      lines.push(
+        "Follow-ups are listed from the highest line number down; run them in this order because each removal shifts the remaining line numbers, and re-run the dry-run after any manual edit.",
       );
     }
     lines.push(

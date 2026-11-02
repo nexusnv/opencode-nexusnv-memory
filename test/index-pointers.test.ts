@@ -99,6 +99,71 @@ describe("detectIndexPointers", () => {
     expect(result.ambiguous).toEqual([]);
   });
 
+  it("does not flag a section that was already empty before the forget", () => {
+    const current = [
+      "# Architecture",
+      "## Empty",
+      "## Keep",
+      "- remove me",
+    ].join("\n");
+    const result = report({
+      index: "- Empty → architecture.md:Empty\n",
+      current,
+      next: "# Architecture\n## Empty\n## Keep\n",
+      removed: [{ lineNumbers: [4], text: "- remove me" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("flags a section pointer when the heading and its content are removed", () => {
+    const current = [
+      "# Architecture",
+      "## Queue",
+      "- old adapter",
+    ].join("\n");
+    const result = report({
+      index: "- Queue → architecture.md:Queue\n",
+      current,
+      next: "# Architecture\n",
+      removed: [
+        { lineNumbers: [2], text: "## Queue" },
+        { lineNumbers: [3], text: "- old adapter" },
+      ],
+    });
+    expect(result.candidates).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("reports a removed heading with remaining content as ambiguous", () => {
+    const current = [
+      "# Architecture",
+      "## Queue",
+      "- keep me",
+    ].join("\n");
+    const result = report({
+      index: "- Queue → architecture.md:Queue\n",
+      current,
+      next: "# Architecture\n- keep me\n",
+      removed: [{ lineNumbers: [2], text: "## Queue" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason:
+          'section heading "queue" was removed but content remains in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
   it("flags a topic pointer whose section still has content as ambiguous", () => {
     const current = [
       "# Architecture",
@@ -157,6 +222,75 @@ describe("detectIndexPointers", () => {
     expect(result.ambiguous[0]!.reason).toContain(
       'matches more than one heading',
     );
+  });
+
+  it("reports a missing section when the topic also disappeared", () => {
+    const current = "# Architecture\n- legacy queue adapter\n";
+    const result = report({
+      index: "- legacy queue adapter → architecture.md:Missing section\n",
+      current,
+      next: "# Architecture\n",
+      removed: [{ lineNumbers: [2], text: "- legacy queue adapter" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- legacy queue adapter → architecture.md:Missing section",
+        reason:
+          'section "missing section" was not found in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("reports duplicate headings when the topic also disappeared", () => {
+    const current = [
+      "# Architecture",
+      "## Integrations",
+      "- legacy queue adapter",
+      "## Integrations",
+      "- retry",
+    ].join("\n");
+    const result = report({
+      index: "- legacy queue adapter → architecture.md:Integrations\n",
+      current,
+      next: "# Architecture\n## Integrations\n## Integrations\n- retry",
+      removed: [{ lineNumbers: [3], text: "- legacy queue adapter" }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toEqual([
+      {
+        line: 1,
+        text: "- legacy queue adapter → architecture.md:Integrations",
+        reason:
+          'section "integrations" matches more than one heading in architecture.md; edit INDEX.md manually',
+      },
+    ]);
+  });
+
+  it("ignores headings inside fenced code blocks", () => {
+    const current = [
+      "# Architecture",
+      "```md",
+      "## Queue",
+      "```",
+      "## Queue",
+      "- old adapter",
+    ].join("\n");
+    const result = report({
+      index: "- Queue → architecture.md:Queue\n",
+      current,
+      next: "# Architecture\n```md\n## Queue\n```\n## Queue\n",
+      removed: [{ lineNumbers: [6], text: "- old adapter" }],
+    });
+    expect(result.candidates).toEqual([
+      {
+        line: 1,
+        text: "- Queue → architecture.md:Queue",
+        reason: "empty-section",
+      },
+    ]);
+    expect(result.ambiguous).toEqual([]);
   });
 
   it("ignores pointers to other files", () => {

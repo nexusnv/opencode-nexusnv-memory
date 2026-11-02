@@ -7,12 +7,13 @@
  *
  * A pointer is a candidate only when the evidence is unambiguous:
  *   - an exact literal topic/section phrase disappears with the selection, or
- *   - a `file:section` pointer's section loses every remaining non-blank line.
+ *   - a `file:section` pointer's section loses all remaining non-blank content
+ *     because the selection removed content from it (or removed its heading).
  *
- * File-general scaffold lines are ignored. An unresolvable explicit section,
- * a duplicate heading match, or a line whose topic names removed content while
- * the referenced section still has content is reported as ambiguous and left
- * for manual editing.
+ * File-general scaffold lines are ignored. An unresolvable explicit section, a
+ * duplicate heading match, a removed heading whose content remains, or a line
+ * whose topic names removed content while the referenced section still has
+ * content is reported as ambiguous and left for manual editing.
  */
 
 /** Minimum normalized pointer length for literal matching. */
@@ -60,6 +61,8 @@ const FILE_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*\#*\s*$/;
+/** Same fence toggle heuristic as provenance's visible-line scan. */
+const FENCE_TOGGLE = /^\s*(`{3,}|~{3,})/;
 
 export interface RemovedUnit {
   readonly lineNumbers: readonly number[];
@@ -188,8 +191,15 @@ function parseIndexLine(line: string): ParsedIndexLine | undefined {
 
 function parseHeadings(lines: readonly string[]): Heading[] {
   const headings: Heading[] = [];
+  let inFence = false;
   for (let i = 0; i < lines.length; i += 1) {
-    const match = HEADING_RE.exec(lines[i]!);
+    const line = lines[i]!;
+    if (FENCE_TOGGLE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const match = HEADING_RE.exec(line);
     if (match === null) continue;
     const text = normalizePointerText(match[2]!);
     if (text.length === 0) continue;
@@ -217,20 +227,46 @@ function resolveSection(
   return { heading, end };
 }
 
-/** True when no non-blank line remains in the section except removed lines. */
-function sectionLosesAllContent(
+interface SectionEffect {
+  readonly headingRemoved: boolean;
+  readonly removedContent: boolean;
+  readonly remainingContent: boolean;
+}
+
+/** What the selection did to one uniquely resolved section. */
+function inspectSection(
   lines: readonly string[],
   start: number,
   end: number,
   removed: ReadonlySet<number>,
-): boolean {
-  if (removed.has(start)) return true;
+): SectionEffect {
+  let removedContent = false;
+  let remainingContent = false;
   for (let i = start + 1; i < end; i += 1) {
-    if (removed.has(i)) continue;
-    if (lines[i]!.trim() === "") continue;
-    return false;
+    const line = lines[i]!;
+    if (line.trim() === "") continue;
+    if (removed.has(i)) removedContent = true;
+    else remainingContent = true;
   }
-  return true;
+  return {
+    headingRemoved: removed.has(start),
+    removedContent,
+    remainingContent,
+  };
+}
+
+function sectionResolutionReason(
+  resolution: SectionResolution,
+  section: string,
+  file: string,
+): string | undefined {
+  if (resolution === "ambiguous") {
+    return `section "${section}" matches more than one heading in ${file}; edit INDEX.md manually`;
+  }
+  if (resolution === "missing") {
+    return `section "${section}" was not found in ${file}; edit INDEX.md manually`;
+  }
+  return undefined;
 }
 
 function isSpecificPointer(pointer: string, file: string): boolean {
@@ -279,15 +315,24 @@ export function detectIndexPointers(input: {
     if (pointer.length === 0) continue;
 
     const resolution = resolveSection(headings, pointer, fileLines.length);
+    const sectionEffect =
+      resolution !== "missing" && resolution !== "ambiguous"
+        ? inspectSection(
+            fileLines,
+            resolution.heading.index,
+            resolution.end,
+            removed,
+          )
+        : undefined;
     const sectionEmpty =
-      resolution !== "missing" &&
-      resolution !== "ambiguous" &&
-      sectionLosesAllContent(
-        fileLines,
-        resolution.heading.index,
-        resolution.end,
-        removed,
-      );
+      sectionEffect !== undefined &&
+      !sectionEffect.remainingContent &&
+      (sectionEffect.headingRemoved || sectionEffect.removedContent);
+    const sectionHeadingRemovedWithContent =
+      sectionEffect !== undefined &&
+      section.length > 0 &&
+      sectionEffect.headingRemoved &&
+      sectionEffect.remainingContent;
     const pointerGone =
       isSpecificPointer(pointer, input.forgottenFile) &&
       removedText.includes(pointer) &&
@@ -302,9 +347,36 @@ export function detectIndexPointers(input: {
       candidates.push({ line: i + 1, text: raw, reason: "empty-section" });
       continue;
     }
+    if (sectionHeadingRemovedWithContent) {
+      ambiguous.push({
+        line: i + 1,
+        text: raw,
+        reason: `section heading "${section}" was removed but content remains in ${input.forgottenFile}; edit INDEX.md manually`,
+      });
+      continue;
+    }
     if (pointerGone) {
       candidates.push({ line: i + 1, text: raw, reason: "literal" });
       continue;
+    }
+    if (section.length > 0 && topic.length > 0) {
+      const resolutionReason = sectionResolutionReason(
+        resolution,
+        section,
+        input.forgottenFile,
+      );
+      if (
+        resolutionReason !== undefined &&
+        (resolution === "ambiguous" ||
+          isSpecificPointer(section, input.forgottenFile))
+      ) {
+        ambiguous.push({
+          line: i + 1,
+          text: raw,
+          reason: resolutionReason,
+        });
+        continue;
+      }
     }
     if (topicGone) {
       // section.length === 0 is unreachable here: pointer === topic, and
@@ -314,30 +386,16 @@ export function detectIndexPointers(input: {
         line: i + 1,
         text: raw,
         reason:
-          "names removed content but the referenced section still has content; edit the line rather than remove it",
+          sectionResolutionReason(
+            resolution,
+            section,
+            input.forgottenFile,
+          ) ??
+          (sectionEffect?.remainingContent === false
+            ? "names removed content but the referenced section has no remaining content; edit the line rather than remove it"
+            : "names removed content but the referenced section still has content; edit the line rather than remove it"),
       });
       continue;
-    }
-    if (section.length > 0 && topic.length > 0) {
-      if (resolution === "ambiguous") {
-        ambiguous.push({
-          line: i + 1,
-          text: raw,
-          reason: `section "${section}" matches more than one heading in ${input.forgottenFile}; edit INDEX.md manually`,
-        });
-        continue;
-      }
-      if (
-        resolution === "missing" &&
-        isSpecificPointer(section, input.forgottenFile)
-      ) {
-        ambiguous.push({
-          line: i + 1,
-          text: raw,
-          reason: `section "${section}" was not found in ${input.forgottenFile}; edit INDEX.md manually`,
-        });
-        continue;
-      }
     }
     // A file-general line, or a section that still has content, is not stale.
   }
