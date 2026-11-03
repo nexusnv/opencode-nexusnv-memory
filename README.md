@@ -258,17 +258,17 @@ This is a read-only health report. It covers the initialization state, `INDEX.md
 
 The TUI sidebar shows one passive memory line in its footer:
 
-| Line                          | Meaning                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `○ memory · run /memory-init` | This project has no `.opencode/memory/INDEX.md` yet.                                                                      |
-| `● memory · healthy`          | Initialized, INDEX within its cap and inspectable, no pending captures, and no actionable notice.                         |
-| `◐ memory · {n} pending`      | `{n}` scratchpad captures are waiting for review.                                                                         |
-| `▲ memory · needs attention`  | INDEX is missing, unreadable, or over its cap, or an over-cap, stale-INDEX-pointer, or skipped-capture notice is waiting. |
+| Line                          | Meaning                                                                                                                                                              |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `○ memory · run /memory-init` | This project has no `.opencode/memory/INDEX.md` yet.                                                                                                                 |
+| `● memory · healthy`          | Initialized, INDEX within its cap and inspectable, no pending captures, and no actionable notice.                                                                    |
+| `◐ memory · {n} pending`      | `{n}` scratchpad captures are waiting for review.                                                                                                                    |
+| `▲ memory · needs attention`  | INDEX is unreadable or over its cap, or an over-cap, stale-INDEX-pointer, or skipped-capture notice is waiting. (A missing INDEX is reported by the `○` line above.) |
 
 The line is read-only and project-wide. It never consumes the notices that the agent's `[memory]`
 status line reports, so it can return to healthy once the agent relays them. Set `showSidebarStatus:
-false` to hide it completely. If no line appears, the TUI half or the RPC is unavailable;
-`/memory-status` still reports the install.
+false` to hide it completely. If no line appears, the TUI half or the RPC is unavailable, or the last
+snapshot failed; `/memory-status` still reports the install.
 
 ### See what the plugin has been doing
 

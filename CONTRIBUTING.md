@@ -110,9 +110,10 @@ Test the installed package, not only a workspace link.
 - An `execute.after` tool hook that captures failures only, never successes.
 - The `memory_recall`, `memory_apply`, `memory_metrics`, `memory_search`, and `memory_status` tools.
 - The `/memory-init`, `/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`, and `/memory-status` commands.
+- The read-only `nexusnv.memory.sidebarStatus` RPC (`src/sidebar-status.ts`), registered unconditionally and disposed on unload. The package also ships a `memory.tui` part (`./tui`) that renders one additive `sidebar.footer` line (ADR-0012).
 - One event subscription for `session.idle` and `session.compaction.*`, filtered by project location.
 
-Every hook, the event loop, the four gated tools, and the four gated commands check `isInitialized()` before doing anything. `src/index.ts` itself writes no memory files; `/memory-init` owns creation and repair.
+Every hook, the event loop, the four gated tools, and the four gated commands check `isInitialized()` before doing anything. The read-only `nexusnv.memory.sidebarStatus` RPC is the one exception: it answers pre-init (`not-initialized`) without reading storage (ADR-0012). `src/index.ts` itself writes no memory files; `/memory-init` owns creation and repair.
 
 Storage is the plugin-scoped `ctx.storage`, used for the ledger (seen IDs, retry attempts, pending/rotation counters), snapshot hashes, throttles, hint arms, and metrics. The ledger is bounded: `seen` is capped at 500, and aged attempts, hint throttles, and snapshot/throttle stamps are pruned by once-per-UTC-day housekeeping. The ledger is durable JSON, not memory content. Memory content is always Markdown on disk.
 
@@ -152,7 +153,7 @@ With that instruction in place, a fresh session can restore the goal from `INDEX
 The deeper design lives in `docs/`:
 
 - [`docs/design-spec-v2-production.md`](./docs/design-spec-v2-production.md) — the design spec. It is normative on V2 contracts and implementation details: verified API surface, package/options, install/config, component behavior, data model and budgets, lifecycle, deferrals, and release gates.
-- [`docs/adr/0001–0011`](./docs/adr/) — the architecture decision records. They are normative on decision intent. In particular: markdown-only storage, native compaction, the ledger/promotion model, reachability, the fixed memory location, untrusted memory content, local metrics, explicit forget/handoff GC, cross-process write safety, and explicit memory initialization.
+- [`docs/adr/0001–0012`](./docs/adr/) — the architecture decision records. They are normative on decision intent. In particular: markdown-only storage, native compaction, the ledger/promotion model, reachability, the fixed memory location, untrusted memory content, local metrics, explicit forget/handoff GC, cross-process write safety, explicit memory initialization, and the TUI sidebar status.
 - [`docs/c4-01-system-context.md`](./docs/c4-01-system-context.md) through [`docs/c4-06-code.md`](./docs/c4-06-code.md) — C4 context, container, component, and code views, plus supplementary interface and data-model specs.
 - [`docs/user-stories.md`](./docs/user-stories.md) — user, agent, and harness stories with acceptance criteria.
 - [`motivation.md`](./motivation.md) — background synthesis. It is not normative on V2 contracts.
@@ -182,7 +183,7 @@ If you change behavior, update the relevant document and the CHANGELOG. If you c
 - Handoff names route to the correct folder.
 - Foreign events are dropped before any write.
 - The single abort controller and registrations are disposed on unload.
-- Before `/memory-init`, setup/hooks/events/tools/commands create nothing and bump no counter; only init and status respond. `/memory-init` creates templates with INDEX last, never overwrites, and refuses to publish INDEX after an earlier failure. Deleting INDEX re-inerts the plugin without a restart.
+- Before `/memory-init`, setup/hooks/events/tools/commands create nothing and bump no counter; only init, status, and the read-only `sidebarStatus` RPC respond (the RPC without a storage read, write, or metric bump). `/memory-init` creates templates with INDEX last, never overwrites, and refuses to publish INDEX after an earlier failure. Deleting INDEX re-inerts the plugin without a restart.
 - Rotation, the review-due nudge, the reset signal, and the remember near-miss nudge behave as specified.
 - Captured failure bodies do not leak into the brief.
 - The `remember:` detection is fence/quote aware.
