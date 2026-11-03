@@ -10,7 +10,7 @@
 import type { Context } from "@opencode/plugin/tui/context";
 import { Plugin } from "@opencode/plugin/tui";
 import type { RGBA } from "@opentui/core";
-import { Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { MemoryRpc } from "./rpc.js";
 import {
   isSidebarSnapshot,
@@ -38,6 +38,7 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
   const [snapshot, setSnapshot] = createSignal<SidebarSnapshot>();
   let disposed = false;
   let inFlight: AbortController | undefined;
+  let refreshQueued = false;
 
   async function refresh(): Promise<void> {
     if (disposed || inFlight) return;
@@ -45,8 +46,10 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
     inFlight = controller;
     const timeout = setTimeout(() => {
       controller.abort();
+      if (!disposed) setSnapshot(undefined);
       // Recover even if the client never settles the aborted request; a late
-      // result is ignored by the aborted check below.
+      // result is ignored by the aborted check below and must not displace a
+      // newer poll's state.
       if (inFlight === controller) inFlight = undefined;
     }, REQUEST_TIMEOUT_MS);
 
@@ -63,7 +66,19 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
     } finally {
       clearTimeout(timeout);
       if (inFlight === controller) inFlight = undefined;
+      if (refreshQueued && !disposed) {
+        refreshQueued = false;
+        void refresh();
+      }
     }
+  }
+
+  function requestRefresh(): void {
+    if (inFlight) {
+      refreshQueued = true;
+      return;
+    }
+    void refresh();
   }
 
   onMount(() => {
@@ -72,10 +87,10 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
       void refresh();
     }, POLL_INTERVAL_MS);
     const offSynthetic = props.context.data.on("session.synthetic", () => {
-      void refresh();
+      requestRefresh();
     });
     const offIdle = props.context.data.on("session.idle", () => {
-      void refresh();
+      requestRefresh();
     });
 
     onCleanup(() => {
@@ -90,7 +105,7 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
   return (
     <Show when={snapshot()}>
       {(current) => {
-        const label = () => renderSidebarLabel(current());
+        const label = createMemo(() => renderSidebarLabel(current()));
         return (
           <text
             fg={toneColor(props.context, label().tone)}
