@@ -59,7 +59,7 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
       if (disposed || controller.signal.aborted) return;
       setSnapshot(isSidebarSnapshot(result) ? result : undefined);
     } catch {
-      if (!disposed) setSnapshot(undefined);
+      if (!disposed && !controller.signal.aborted) setSnapshot(undefined);
     } finally {
       clearTimeout(timeout);
       if (inFlight === controller) inFlight = undefined;
