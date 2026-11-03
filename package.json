@@ -32,10 +32,32 @@
     "CHANGELOG.md"
   ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts",
+    "./tui": "./src/tui.tsx"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.29"
+  },
+  "peerDependencies": {
+    "@opencode/theme": "2.0.29",
+    "@opentui/core": ">=0.5.17",
+    "@opentui/solid": ">=0.5.17",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/theme": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "overrides": {
     "glob": ">=14.0.2",
@@ -43,9 +65,13 @@
   },
   "devDependencies": {
     "@opencode/schema": "2.0.29",
+    "@opencode/theme": "2.0.29",
+    "@opentui/core": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/node": "^26.6.5",
     "@vitest/coverage-v8": "^5.0.5",
     "prettier": "^3.9.10",
+    "solid-js": "1.9.12",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^5.0.5"

@@ -57,7 +57,17 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     ).toBe(true);
     expect(pkg.type).toBe("module");
     expect(pkg.exports?.["."]).toBe("./src/index.ts");
+    expect(pkg.exports?.["./rpc"]).toBe("./src/rpc.ts");
+    expect(pkg.exports?.["./tui"]).toBe("./src/tui.tsx");
     expect(pkg.dependencies?.["@opencode/plugin"]).toBe("2.0.29");
+    expect(pkg.peerDependencies?.["@opencode/theme"]).toBe("2.0.29");
+    expect(pkg.peerDependencies?.["@opentui/core"]).toBe(">=0.5.17");
+    expect(pkg.peerDependencies?.["@opentui/solid"]).toBe(">=0.5.17");
+    expect(pkg.peerDependencies?.["solid-js"]).toBe(">=1.9.0");
+    expect(pkg.peerDependenciesMeta?.["@opencode/theme"]?.optional).toBe(true);
+    expect(pkg.peerDependenciesMeta?.["@opentui/core"]?.optional).toBe(true);
+    expect(pkg.peerDependenciesMeta?.["@opentui/solid"]?.optional).toBe(true);
+    expect(pkg.peerDependenciesMeta?.["solid-js"]?.optional).toBe(true);
   });
 
   it("tsconfig is strict nodenext es2022 covering src+test", () => {
@@ -70,6 +80,8 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     expect(String(tsconfig.compilerOptions?.target ?? "").toLowerCase()).toBe(
       "es2022",
     );
+    expect(tsconfig.compilerOptions?.jsx).toBe("preserve");
+    expect(tsconfig.compilerOptions?.jsxImportSource).toBe("@opentui/solid");
     expect(tsconfig.include).toContain("src");
     expect(tsconfig.include).toContain("test");
   });
