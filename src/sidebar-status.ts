@@ -16,11 +16,7 @@ import {
   type LedgerStorage,
   type NoticeKind,
 } from "./capture.js";
-import {
-  asLedger,
-  memoryRootOf,
-  projectIDOf,
-} from "./command-context.js";
+import { asLedger, memoryRootOf, projectIDOf } from "./command-context.js";
 import { isInitialized } from "./init.js";
 import { MemoryRpc } from "./rpc.js";
 import { deriveSidebarSnapshot, type SidebarSnapshot } from "./sidebar.js";
@@ -57,6 +53,13 @@ const defaultDeps: SidebarStatusDeps = {
   getNotice,
 };
 
+/**
+ * Collect one project's status without mutating storage.
+ *
+ * Pre-init returns the reminder before any storage read. An initialized
+ * project reads only the existing INDEX line count, pending counter, and
+ * actionable notice markers; the result feeds the pure precedence function.
+ */
 export async function collectSidebarStatus(
   input: SidebarStatusInput,
   deps: SidebarStatusDeps = defaultDeps,
@@ -80,8 +83,7 @@ export async function collectSidebarStatus(
 
   return deriveSidebarSnapshot({
     initialized: true,
-    indexWithinCap:
-      indexCount !== undefined && indexCount <= input.indexLines,
+    indexWithinCap: indexCount !== undefined && indexCount <= input.indexLines,
     overCapNotices: overCapNotices ?? 0,
     stalePointers: stalePointers ?? 0,
     failedCaptures: failedCaptures ?? 0,
@@ -95,15 +97,33 @@ export async function collectSidebarStatus(
  * registration would silently drop the indicator instead of failing the host
  * contract.
  */
-export function registerSidebarRpc(
-  ctx: Plugin.Context,
-  indexLines: number,
-) {
+export function registerSidebarRpc(ctx: Plugin.Context, indexLines: number) {
   const storage = asLedger(ctx.storage);
   const projectID = projectIDOf(ctx);
   const memoryRoot = memoryRootOf(ctx);
+  // Overlapping TUI polls share one collection. A timed-out client request
+  // must not accumulate another INDEX/storage read while the previous read is
+  // still stalled; the snapshot is project-wide and read-only, so sharing it
+  // is safe. Both settle paths clear the slot so the next poll retries.
+  let inFlight: Promise<SidebarSnapshot> | undefined;
   return ctx.rpc.register(MemoryRpc, {
-    sidebarStatus: async () =>
-      collectSidebarStatus({ memoryRoot, storage, projectID, indexLines }),
+    /** Serve the one in-flight collection, starting it when idle. */
+    sidebarStatus: () => {
+      let collection = inFlight;
+      if (collection === undefined) {
+        collection = collectSidebarStatus({
+          memoryRoot,
+          storage,
+          projectID,
+          indexLines,
+        });
+        inFlight = collection;
+        const clear = () => {
+          if (inFlight === collection) inFlight = undefined;
+        };
+        void collection.then(clear, clear);
+      }
+      return collection;
+    },
   });
 }

@@ -91,7 +91,8 @@ integer >= 0 }`; no other fields.
   `getPending`, and unconsumed `getNotice` values for `indexOverCap`, `indexStale`, and
   `captureFailed`.
 - **Guarantees:** read-only; no `set`/`remove`, no `takeNotice`/`takeRotated`, no metric bump, no
-  memory content, no storage key.
+  memory content, no storage key. Overlapping probes share one in-flight collection, clearing it on
+  success or rejection, so a stalled read cannot accumulate one collection per timed-out poll.
 - **Consumer:** `memory.tui` calls it with `{ location, signal }`; the signal aborts on a 4-second
   timeout or component unmount. An invalid, rejected, or timed-out result hides the line.
 

@@ -22,6 +22,9 @@ panel deferred by ADR-0008, and it must not weaken the initialization gate in AD
   survives a storage outage. For an initialized project the collector reads the existing INDEX line
   count, pending counter, and three unconsumed notice markers. It never calls `set`/`remove`, never
   consumes a notice, and never bumps a metric.
+- Overlapping probes coalesce server-side: one in-flight collection serves every caller, so a stalled
+  INDEX/storage read cannot accumulate one collection per timed-out poll. The shared slot clears on
+  success or rejection, so a later probe retries.
 - Four states with fixed precedence: `not-initialized` > `attention` > `pending` > `healthy`.
   `attention` covers an uninspectable or over-cap INDEX and an unconsumed `indexOverCap`,
   `indexStale`, or `captureFailed` notice. `pending` means `pending > 0`; the prompt review-due

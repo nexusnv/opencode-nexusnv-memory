@@ -74,6 +74,18 @@ class ThrowingStorage extends FakeStorage {
   }
 }
 
+class FailOnceStorage extends FakeStorage {
+  private failed = false;
+
+  override async get(key: string): Promise<unknown> {
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("storage down");
+    }
+    return super.get(key);
+  }
+}
+
 async function newProjectRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "memory-sidebar-"));
   tempRoots.push(root);
@@ -285,6 +297,55 @@ describe("registerSidebarRpc", () => {
     // Prove the collector resolved the project's memory root, not the project
     // root, by writing INDEX only under `.opencode/memory`.
     expect(existsSync(join(projectRoot, "INDEX.md"))).toBe(false);
+  });
+
+  it("coalesces overlapping status collections", async () => {
+    const { projectRoot } = await projectWithIndex(1);
+    const storage = new FakeStorage();
+    const fake = fakeRpcCtx(projectRoot, storage);
+
+    const registration = await registerSidebarRpc(
+      fake.ctx as unknown as Plugin.Context,
+      30,
+    );
+    const handler = fake.captured[0]!.handlers["sidebarStatus"] as Handler;
+    const signal = new AbortController().signal;
+
+    await expect(
+      Promise.all([handler({}, { signal }), handler({}, { signal })]),
+    ).resolves.toEqual([
+      { state: "healthy", pending: 0 },
+      { state: "healthy", pending: 0 },
+    ]);
+    // One collector run: four ledger reads, not eight.
+    expect(storage.reads).toBe(4);
+
+    await expect(handler({}, { signal })).resolves.toEqual({
+      state: "healthy",
+      pending: 0,
+    });
+    expect(storage.reads).toBe(8);
+    await registration.dispose();
+  });
+
+  it("retries after a rejected shared collection", async () => {
+    const { projectRoot } = await projectWithIndex(1);
+    const storage = new FailOnceStorage();
+    const fake = fakeRpcCtx(projectRoot, storage);
+
+    const registration = await registerSidebarRpc(
+      fake.ctx as unknown as Plugin.Context,
+      30,
+    );
+    const handler = fake.captured[0]!.handlers["sidebarStatus"] as Handler;
+    const signal = new AbortController().signal;
+
+    await expect(handler({}, { signal })).rejects.toThrow("storage down");
+    await expect(handler({}, { signal })).resolves.toEqual({
+      state: "healthy",
+      pending: 0,
+    });
+    await registration.dispose();
   });
 
   it("registers unconditionally and answers not-initialized before init", async () => {

@@ -62,7 +62,8 @@ test/
   `{ state: "not-initialized", pending: 0 }` without a storage read, then reads only
   `indexLineCount`/`getPending`/`getNotice` and never writes or consumes. `renderSidebarLabel` is
   pure and returns the fixed label plus a tone name; the TUI maps it to
-  `theme.text.feedback.*.base`. `registerSidebarRpc(ctx, indexLines)` registers unconditionally.
+  `theme.text.feedback.*.base`. `registerSidebarRpc(ctx, indexLines)` registers unconditionally and
+  coalesces overlapping probes into one collection; the shared slot clears on success or rejection.
 - `createSidebarPoller({request, onSnapshot})`: host-free TUI poll lifecycle; one in-flight request,
   an immediate fetch plus a 5 s interval, a 4 s abort timeout, one trailing event refresh, and
   disposal that clears the interval/timeouts and aborts the request. Invalid, rejected, or timed-out
@@ -105,9 +106,10 @@ fake still yields the reminder); healthy/pending/attention precedence is exhaust
 uninspectable INDEX both produce attention; `indexOverCap`/`indexStale`/`captureFailed` each produce
 attention while `forgotten`/`rotated` do not; notices and pending remain readable (nothing consumed)
 and the collector performs zero `set`/`remove`; a storage rejection propagates for initialized
-projects; registration is unconditional and its handler returns the same snapshot; the setup cleanup
-disposes the RPC registration; the poller covers immediate/interval polling, timeout recovery,
-trailing event refresh, late-result suppression, and disposal. The `.tsx` adapter is typechecked
+projects; registration is unconditional and its handler returns the same snapshot; overlapping probes
+share one collection and a rejected collection clears for a later retry; the setup cleanup disposes
+the RPC registration; the poller covers immediate/interval polling, timeout recovery, trailing event
+refresh, late-result suppression, and disposal. The `.tsx` adapter is typechecked
 against the host TUI types and verified by the manual smoke check in the spec, not by Vitest.
 
 **P1 gates (design-spec §1.3, type-proven):** deploy-time `event.type` log confirms `session.idle` / `compaction.ended` delivery; G2/G4 proven via types. G5 is retired. **Tier-1 gates:** `memory_search` uses the same traversal/allowlist choke point, finds an old decision beyond the recall tail, redacts before matching, enforces the result/candidate/byte bounds and deterministic order, and writes no keys; `/memory-status` + `memory_status` render deterministically; the command posts via synthetic with the §5.5 fallback and never throws, while the tool returns the report and propagates real collection errors; both write nothing and keep the config scan advisory.
