@@ -277,6 +277,12 @@ async function setupAccHarness(
       },
     },
     storage: store,
+    rpc: {
+      register: async () => ({
+        dispose: async () => undefined,
+        events: { emit: async () => undefined },
+      }),
+    },
     vcs: acceptVcsPort,
     permission: {
       assert: async (input: unknown): Promise<void> => {

@@ -94,6 +94,7 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     expect(src).toMatch(/registrations/);
     expect(src).toMatch(/controller\.abort\(\)/);
     expect(src).toMatch(/dispose\(\)/);
+    expect(src).toMatch(/registerSidebarRpc/);
     // Promise flavor only: no effect() import, no server() dual export
     expect(src).not.toMatch(/from\s+["']@opencode\/plugin\/effect["']/);
     expect(src).not.toMatch(/export\s+(default\s+)?(async\s+function|function|const)\s+server/);
@@ -172,6 +173,8 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     // name → description.
     const commands = new Map<string, string>();
     const tools: string[] = [];
+    const rpcRegistrations: string[] = [];
+    let rpcDisposals = 0;
     const projectRoot = await mkdtemp(join(tmpdir(), "memory-scaffold-"));
     const setup = plugin.setup as unknown as (
       ctx: unknown,
@@ -187,6 +190,17 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
         },
       },
       storage: fakeStorageForSetup,
+      rpc: {
+        register: async (definition: { id: string }) => {
+          rpcRegistrations.push(definition.id);
+          return {
+            dispose: async () => {
+              rpcDisposals += 1;
+            },
+            events: { emit: async () => undefined },
+          };
+        },
+      },
       permission: { assert: async (_input: unknown) => undefined },
       tool: {
         transform: async (
@@ -263,7 +277,12 @@ describe("shows_memory_in_plugin_list_and_scaffolds", () => {
     expect(tools).toContain("memory_search");
     expect(tools).toContain("memory_status");
 
+    // The sidebar RPC is registered unconditionally and disposed with the
+    // other setup registrations, so the TUI probe works before and after init.
+    expect(rpcRegistrations).toEqual(["nexusnv.memory"]);
+
     await cleanup?.();
+    expect(rpcDisposals).toBe(1);
   });
 });
 
@@ -436,6 +455,12 @@ function installCtx(projectRoot: string) {
       project: { id: "nudge", directory: projectRoot, canonical: projectRoot },
     },
     storage: fakeStorageForSetup,
+    rpc: {
+      register: async () => ({
+        dispose: async () => undefined,
+        events: { emit: async () => undefined },
+      }),
+    },
     permission: { assert: async (_input: unknown) => undefined },
     tool: {
       transform: async () => ({ dispose: async () => undefined }),
