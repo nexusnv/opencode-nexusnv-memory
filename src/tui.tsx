@@ -66,7 +66,11 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
     } finally {
       clearTimeout(timeout);
       if (inFlight === controller) inFlight = undefined;
-      if (refreshQueued && !disposed) {
+      // Only the poll that owns (or owned) the in-flight slot may drain the
+      // queue; if another poll owns it, leave the flag set for that poll's
+      // own finally. This avoids stealing the flag in a late-settling aborted
+      // poll and dropping a queued refresh.
+      if (refreshQueued && !disposed && !inFlight) {
         refreshQueued = false;
         void refresh();
       }
