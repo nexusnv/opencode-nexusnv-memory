@@ -30,9 +30,10 @@ src/ (or .opencode/plugins/memory/)
 ├── search.ts       # literal full-allowlist search core + deterministic renderer (spec §5.14)
 ├── status-report.ts # read-only status collectors + pure renderer + /memory-status + memory_status (spec §5.13)
 ├── rpc.ts          # shared RPC contract: nexusnv.memory.sidebarStatus (ADR-0012)
-├── sidebar.ts      # pure sidebar state/options/label/validator (no fs/storage)
+├── sidebar.ts      # pure sidebar state/label/validator (no fs/storage)
+├── sidebar-poll.ts # testable poll/timeout/trailing-refresh state machine
 ├── sidebar-status.ts # read-only collector + unconditional RPC registration
-├── tui.tsx         # memory.tui: sidebar.footer claim, 4 s-timeout poll, events, cleanup (ADR-0012)
+├── tui.tsx         # memory.tui: sidebar.footer claim + poller wiring (ADR-0012)
 ├── redact.ts       # secrets blocklist + <private> stripping (bounded URL-credential regex for linear-time full-file reads)
 ├── metrics.ts      # count-only counters (bump via ledger mutex), 90-day prune, METRIC_LABELS renderer, /memory-metrics command with two-step reset (ADR-0008, spec §5.12)
 ├── config.ts       # ≤5 options, defaults, validation (ctx.options)
@@ -40,9 +41,11 @@ src/ (or .opencode/plugins/memory/)
 commands/
 └── memory-status.md # optional file-based status stub (plugin-registered command is normative)
 test/
+├── rpc.test.ts           # RPC contract shape (E16)
 ├── search.test.ts       # search core + renderer (E7)
 ├── status-report.test.ts # collectors + renderer + command/tool (E2)
-├── sidebar.test.ts       # parser + precedence + label + validator (E16)
+├── sidebar.test.ts       # precedence + label + validator (E16)
+├── sidebar-poll.test.ts  # poll/timeout/queue/cleanup state machine (E16)
 └── sidebar-status.test.ts # collector + read-only + registration (E16)
 ```
 
@@ -60,6 +63,10 @@ test/
   `indexLineCount`/`getPending`/`getNotice` and never writes or consumes. `renderSidebarLabel` is
   pure and returns the fixed label plus a tone name; the TUI maps it to
   `theme.text.feedback.*.base`. `registerSidebarRpc(ctx, indexLines)` registers unconditionally.
+- `createSidebarPoller({request, onSnapshot})`: host-free TUI poll lifecycle; one in-flight request,
+  an immediate fetch plus a 5 s interval, a 4 s abort timeout, one trailing event refresh, and
+  disposal that clears the interval/timeouts and aborts the request. Invalid, rejected, or timed-out
+  results publish `undefined`.
 - `writeCapped(file, text)`: allowlisted paths only; enforces `indexLines`/`fileLines` on every **plugin** write; redacts; serialized through the per-process mutex **and** the root `.write.lock` (ADR-0010); publishes via same-directory temp + `rename` (existing target mode preserved) and throws on violation for a capped rule file (never silently truncates a durable file), while `activeContext.md` rotates the oldest Known-Errors block to `handoffs/archive/` at the cap instead. New/archived handoffs use temp + `link` (exclusive); archives are mode 0600. Over-cap **hand-edits** bypass this function and are validated (not overwritten) by `/memory-review`. A crash can leave a `.tmp-*`; it is never allowlisted/injected and is not automatically swept (another process may own it).
 - `planForget(file, current, selector)` / `applyForget(input)`: pure planner + two-phase application. The planner uses the same `known-errors.ts` parser as the brief, so a `source:tool` selection expands to its whole detail block even when the heading is missing or orphaned outside the heading region; it rejects `decisions.md`/handoffs and the bare column-0 `## Known errors` heading, and preflights the post-forget cap. Application plans under a short lock, releases for per-unit approval, then re-locks/re-plans/compares, writes the redacted archive (0600) before rewriting the active file. A stale plan aborts; no mutation survives a denial.
 - `planHandoffGc` / `applyHandoffGc`: root `handoffs/*.md` regular files only, `older-than` and `keep` intersection, strict list/re-plan under the lock after one batch approval, contained deletes, and a per-result deleted/missing/failed report. Archive is never a candidate; dry-run is lock-free/read-only.
@@ -99,7 +106,8 @@ uninspectable INDEX both produce attention; `indexOverCap`/`indexStale`/`capture
 attention while `forgotten`/`rotated` do not; notices and pending remain readable (nothing consumed)
 and the collector performs zero `set`/`remove`; a storage rejection propagates for initialized
 projects; registration is unconditional and its handler returns the same snapshot; the setup cleanup
-disposes the RPC registration. The `.tsx` adapter is typechecked against the host TUI types and
-verified by the manual smoke check in the spec, not by Vitest.
+disposes the RPC registration; the poller covers immediate/interval polling, timeout recovery,
+trailing event refresh, late-result suppression, and disposal. The `.tsx` adapter is typechecked
+against the host TUI types and verified by the manual smoke check in the spec, not by Vitest.
 
 **P1 gates (design-spec §1.3, type-proven):** deploy-time `event.type` log confirms `session.idle` / `compaction.ended` delivery; G2/G4 proven via types. G5 is retired. **Tier-1 gates:** `memory_search` uses the same traversal/allowlist choke point, finds an old decision beyond the recall tail, redacts before matching, enforces the result/candidate/byte bounds and deterministic order, and writes no keys; `/memory-status` + `memory_status` render deterministically; the command posts via synthetic with the §5.5 fallback and never throws, while the tool returns the report and propagates real collection errors; both write nothing and keep the config scan advisory.

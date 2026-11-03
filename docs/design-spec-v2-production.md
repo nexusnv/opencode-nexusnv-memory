@@ -157,7 +157,8 @@ opencode-nexusnv-memory/
 ├── src/
 │   ├── index.ts                       # Plugin.define({id:"memory", setup}) — wiring only
 │   ├── rpc.ts                         # Rpc.define: nexusnv.memory.sidebarStatus (ADR-0012)
-│   ├── sidebar.ts                     # pure sidebar state/options/label/validator (no fs/storage)
+│   ├── sidebar.ts                     # pure sidebar state/label/validator (no fs/storage)
+│   ├── sidebar-poll.ts                # testable TUI poll/timeout/refresh state machine
 │   ├── sidebar-status.ts              # read-only collector + unconditional RPC registration
 │   ├── tui.tsx                        # memory.tui: sidebar.footer status line (ADR-0012)
 │   ├── brief.ts                       # loadBrief, loadPriors (injection caps)

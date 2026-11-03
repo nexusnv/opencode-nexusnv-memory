@@ -204,9 +204,10 @@ with:
 | Module | Responsibility |
 | --- | --- |
 | `src/rpc.ts` | `Rpc.define` contract for `nexusnv.memory.sidebarStatus`. Shared by server and TUI. |
-| `src/sidebar.ts` | Pure state types, `deriveSidebarSnapshot`, `parseSidebarOptions`, `resetSidebarOptionsWarnings`, `renderSidebarLabel`, and `isSidebarSnapshot`. No fs/storage imports. |
+| `src/sidebar.ts` | Pure state types, `deriveSidebarSnapshot`, `renderSidebarLabel`, and `isSidebarSnapshot`. No fs/storage imports. |
+| `src/sidebar-poll.ts` | Testable polling state machine for the TUI status line: immediate/5-second polls, 4-second abort timeout, trailing event refresh, and cleanup. No Solid, fs, or storage imports. |
 | `src/sidebar-status.ts` | Server collector (`collectSidebarStatus`) and RPC registration (`registerSidebarRpc`). Imports the existing init, brief, and ledger helpers. |
-| `src/tui.tsx` | TUI plugin definition, visibility check, footer slot, Solid status-line component, polling, event refreshes, and cleanup. |
+| `src/tui.tsx` | TUI plugin definition, footer slot, Solid status-line component, poller wiring, and cleanup. |
 
 ### RPC contract
 
@@ -326,7 +327,8 @@ TUI setup
 - Late responses after unmount are ignored.
 - The server handler never writes, never consumes notices, and never bumps
   metrics.
-- A hidden indicator never starts a poll or an event subscription.
+- A disposed indicator clears its interval and timers, aborts the in-flight
+  request, and ignores late responses.
 
 ## Test plan
 
@@ -334,15 +336,23 @@ TUI setup
 
 `test/sidebar.test.ts`:
 
-- `parseSidebarOptions`: missing/true/false/unknown keys, invalid types warn
-  once and default to visible, non-object input defaults to visible. The
-  warn-once cases call `resetSidebarOptionsWarnings()` in the setup hook, the
-  same seam `resetMemoryOptionsWarnings` provides for the server parser.
 - `deriveSidebarSnapshot`: every precedence combination, including
   initialization beating pending, over-cap beating pending, notices beating
   pending, and pending beating healthy.
 - `renderSidebarLabel`: exact text and tone for all four states; pending count
   is rendered only for `pending`.
+- `isSidebarSnapshot`: exactly the four states with a non-negative integer
+  `pending`; malformed payloads are rejected.
+
+`test/sidebar-poll.test.ts`:
+
+- Valid payloads publish; invalid payloads clear the snapshot.
+- Start is idempotent; the first fetch is immediate and the interval follows.
+- A stalled request hides the line at the timeout, releases the in-flight
+  guard, and recovers on a later poll.
+- Event refreshes during an in-flight request coalesce into one trailing poll.
+- A late result from an aborted request cannot overwrite a newer snapshot.
+- Disposal clears timers, aborts the request, and ignores late results.
 
 `test/sidebar-status.test.ts`:
 
@@ -364,8 +374,9 @@ TUI setup
 ### TUI verification
 
 Vitest does not host the OpenTUI renderer faithfully. The TUI adapter stays
-thin; its pure visibility and label logic is unit-tested, and the slot/RPC
-wiring is covered by typecheck plus a local smoke check:
+thin; its pure label/validator logic and its polling state machine are
+unit-tested, and the slot/RPC wiring is covered by typecheck plus a local smoke
+check:
 
 1. Fresh project → `○ memory · run /memory-init`.
 2. Run `/memory-init` → `● memory · healthy` without a long delay.
