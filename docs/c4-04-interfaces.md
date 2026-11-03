@@ -2,10 +2,10 @@
 
 **Status:** proposed. **Sources:** Synthesized Report §4.6; V2 docs `/v2/docs/build/plugins/` (tool/command/hook shapes). **Normative on V2 contracts:** `design-spec-v2-production.md` §5. (Numbered `c4-04` for sequence; not a C4 core level — see `c4-06-code.md` note.)
 
-## Initialization gate (all tools, commands, and hooks)
+## Initialization gate (all tools, commands, hooks, and RPCs)
 
 - Initialized means `.opencode/memory/INDEX.md` exists as a regular file (`lstat().isFile()`; symlinks, directories, and special files do not count). Probes fail closed. An existing install activates with no migration; deleting INDEX re-inerts the plugin without a restart.
-- Pre-init allowlist: only `/memory-init`, `/memory-status`, and `memory_status` run. Every other memory tool and command returns exactly `[memory] not initialized; run /memory-init to create .opencode/memory` for any actual operation. Commands with a help path (`/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`) may still render `--help`/`-h` usage; no operation runs.
+- Pre-init allowlist: only `/memory-init`, `/memory-status`, `memory_status`, and the read-only `nexusnv.memory.sidebarStatus` RPC run. The RPC is a status probe: it returns `{ state: "not-initialized", pending: 0 }` without a storage read, write, injection, or metric bump. Every other memory tool and command returns exactly `[memory] not initialized; run /memory-init to create .opencode/memory` for any actual operation. Commands with a help path (`/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`) may still render `--help`/`-h` usage; no operation runs.
 - Pre-init, every hook and the event-loop callback return before injecting, capturing, snapshotting, remembering, or bumping a metric. Pre-init `remember:` is silently ignored. Setup creates nothing and prints no permission warning or AGENTS.md nudge.
 - `/memory-init` accepts no arguments except `--help`/`-h`. It creates only missing directories/templates (`handoffs/`, `handoffs/archive/`, the six structural files), never overwrites, and creates `INDEX.md` last. If INDEX was absent and any earlier target failed, INDEX is not created and the result says the project remains uninitialized.
 
@@ -79,6 +79,22 @@
 - Dry-run is default and read-only (no lock, no root creation). `--confirm` takes one batch `memory_write` permission for the candidate list, then re-lists strictly and re-plans under the lock; a changed set aborts. Deletion is irreversible on this machine; untracked snapshots cannot be restored from git, and the output says so.
 - Strict listing fails closed on aliased/off-root directories; containment is checked before delete. There is no automatic sweep, TTL, or background job (ADR-0009).
 
+## `nexusnv.memory.sidebarStatus` RPC
+
+- **Owner:** server part, registered unconditionally during `setup` and disposed with the other
+  registrations (`Registration.dispose()`).
+- **Input:** `{}` (`type: "object"`, no properties, `additionalProperties: false`).
+- **Output:** exactly `{ state: "not-initialized" | "healthy" | "pending" | "attention", pending:
+integer >= 0 }`; no other fields.
+- **Read path:** `isInitialized()` first; when false, return `not-initialized` without reading storage.
+  When true, read `indexLineCount` (missing/unreadable → attention; `indexLines + 1` means over cap),
+  `getPending`, and unconsumed `getNotice` values for `indexOverCap`, `indexStale`, and
+  `captureFailed`.
+- **Guarantees:** read-only; no `set`/`remove`, no `takeNotice`/`takeRotated`, no metric bump, no
+  memory content, no storage key.
+- **Consumer:** `memory.tui` calls it with `{ location, signal }`; the signal aborts on a 4-second
+  timeout or component unmount. An invalid, rejected, or timed-out result hides the line.
+
 ## Hook contracts
 
 All four hooks (and the event-loop callback) probe `isInitialized()` first and return before any injection, capture, or metric bump when `.opencode/memory/INDEX.md` is not a regular file.
@@ -104,5 +120,9 @@ See `c4-05-data-model.md` for field schemas. Universal rules: UTF-8 markdown, ca
 
 - Plugins: `plugins: ["./plugins/memory"]` (`.opencode/opencode.jsonc`) or `["./.opencode/plugins/memory"]` (repo-root), or drop-in discovery, or `{ package, options }`.
 - Agents: ship `memory-manager.md` (`mode: subagent`; **read-only — `* → deny` first, then `read/glob/grep → allow` only**, ADR-0007; the last matching rule wins, so any future `allow` must come after a broad `deny`). The **default/primary agent needs a `subagent` allow for `memory-manager` only if the optional delegation path is enabled**; the default review runs in-session and writes no memory (only the ADR-0008/§5.12 `review.invoked` counter bumps), so there is no permission lock to configure (retired G5).
-- Options (≤5): `{ indexLines, fileLines, injectBudgetLines, captureFailures, snapshotThrottleMinutes }`, read via `ctx.options`; the memory directory is fixed at `.opencode/memory` (ADR-0006).
+- Options (≤5 server): `{ indexLines, fileLines, injectBudgetLines, captureFailures,
+snapshotThrottleMinutes }`, read via `ctx.options`; the memory directory is fixed at
+  `.opencode/memory` (ADR-0006). The TUI part additionally reads the presentation-only
+  `showSidebarStatus` (default `true`) from the same object; the server parser ignores it, so the
+  five-option behavior contract is unchanged (ADR-0012).
 - **No `references` entry** (ADR-0006): references attach directories and are client-initiated; the earlier file-level `references.memory → INDEX.md` form was invalid and is removed.
