@@ -40,6 +40,19 @@ describe("parseMemoryOptions coherence warnings", () => {
     expect(messages).toHaveLength(0);
   });
 
+  it("ignores the TUI-only showSidebarStatus key", () => {
+    const { messages, warn } = collector();
+    const opts = parseMemoryOptions({ showSidebarStatus: false }, warn);
+    expect(opts).toEqual({
+      indexLines: 30,
+      fileLines: 60,
+      injectBudgetLines: 80,
+      captureFailures: true,
+      snapshotThrottleMinutes: 10,
+    });
+    expect(messages).toHaveLength(0);
+  });
+
   it("keeps invalid-value warnings unchanged", () => {
     const { messages, warn } = collector();
     const opts = parseMemoryOptions({ indexLines: "nope" }, warn);

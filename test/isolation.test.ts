@@ -758,6 +758,12 @@ describe("setup wiring: single controller + dispose()", () => {
         },
       },
       storage,
+      rpc: {
+        register: async () => ({
+          dispose: async () => undefined,
+          events: { emit: async () => undefined },
+        }),
+      },
       vcs: new FakeVcs({ current: "wired-branch", files: [] }),
       event: {
         subscribe: async function* (options?: { signal?: AbortSignal }) {
@@ -870,6 +876,12 @@ describe("setup wiring: single controller + dispose()", () => {
         },
       },
       storage,
+      rpc: {
+        register: async () => ({
+          dispose: async () => undefined,
+          events: { emit: async () => undefined },
+        }),
+      },
       vcs: new FakeVcs({ current: "gated-branch", files: [] }),
       event: {
         subscribe: async function* () {

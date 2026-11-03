@@ -187,6 +187,12 @@ function setupHooks(
       },
     },
     storage: store,
+    rpc: {
+      register: async () => ({
+        dispose: async () => undefined,
+        events: { emit: async () => undefined },
+      }),
+    },
     permission: {
       assert: async (_input: unknown): Promise<void> => undefined,
     },

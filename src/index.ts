@@ -47,6 +47,7 @@ import {
   registerStatusCommand,
   registerStatusTool,
 } from "./status-report.js";
+import { registerSidebarRpc } from "./sidebar-status.js";
 import { createBump, registerMetricsCommand, setArm } from "./metrics.js";
 import {
   hasMemoryProtocolBlock,
@@ -395,6 +396,12 @@ export default Plugin.define({
     // is frozen).
     registrations.push(await registerStatusCommand(ctx));
     registrations.push(await registerStatusTool(ctx));
+    // Read-only TUI sidebar status probe: registered unconditionally so the
+    // pre-init `/memory-init` reminder works and the TUI (a separate plugin
+    // part) can call it. The handler reads only init state, INDEX line count,
+    // pending, and unconsumed notices; it never writes, consumes, or bumps
+    // (ADR-0012).
+    registrations.push(await registerSidebarRpc(ctx, options.indexLines));
 
     // Event subscriber: idle/compaction capture + sampled diagnostics
     // (spec §§5.7, 5.9). Fire-and-forget on the ONE setup controller: the
