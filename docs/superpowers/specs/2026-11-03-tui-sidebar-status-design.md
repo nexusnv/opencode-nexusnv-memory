@@ -2,7 +2,7 @@
 
 **Status:** approved design, 2026-11-03
 **Issue:** #29 — OpenCode TUI minimal status
-**Related:** ADR-0008 (rich metrics panel deferred), ADR-0011 (explicit initialization gate)
+**Related:** ADR-0008 (rich metrics panel deferred), ADR-0011 (explicit initialization gate; its pre-init surface list is amended by this design)
 
 ## Goal
 
@@ -43,7 +43,8 @@ line can hide it entirely.
    initialization state, line counts, notices, and the pending counter. It
    never calls `set`, `remove`, `takeNotice`, `takeRotated`, or a metric bump.
 7. **Fail closed visually.** If the snapshot cannot be obtained or validated,
-   the line is hidden. The TUI never shows a stale `healthy` claim.
+   or the request stalls past its timeout, the line is hidden. The TUI never
+   shows a stale `healthy` claim.
 8. **Pending means `pending > 0`.** The existing prompt review-due nudge at
    `pending >= 5` is unchanged; the sidebar does not add a second threshold.
 
@@ -61,21 +62,28 @@ within one project shows the same state.
 
 | State | Condition | Label | Theme tone |
 | --- | --- | --- | --- |
-| `not-initialized` | `.opencode/memory/INDEX.md` is not an existing regular file. | `○ memory · run /memory-init` | `text.feedback.warning` |
-| `attention` | Initialized, and at least one actionable problem exists (see below). | `▲ memory · needs attention` | `text.feedback.error` |
-| `pending` | Initialized, no attention state, and `curation.pending > 0`. | `◐ memory · {n} pending` | `text.feedback.warning` |
-| `healthy` | Initialized, INDEX is within cap and inspectable, no actionable notice, pending is zero. | `● memory · healthy` | `text.feedback.success` |
+| `not-initialized` | `.opencode/memory/INDEX.md` is not an existing regular file. | `○ memory · run /memory-init` | `text.feedback.warning.base` |
+| `attention` | Initialized, and at least one actionable problem exists (see below). | `▲ memory · needs attention` | `text.feedback.error.base` |
+| `pending` | Initialized, no attention state, and `curation.pending > 0`. | `◐ memory · {n} pending` | `text.feedback.warning.base` |
+| `healthy` | Initialized, INDEX is within cap and inspectable, no actionable notice, pending is zero. | `● memory · healthy` | `text.feedback.success.base` |
 
 `{n}` is the decimal pending count. The line uses one `<text>` element with
 `wrapMode: "none"` and is clipped by the host if the footer is narrower than
 the label. The prefix `memory` is fixed.
 
+Theme tones name the `.base` RGBA tokens on `context.theme`; for example,
+`context.theme.text.feedback.warning.base`. The TUI passes that color to
+`<text fg={...}>`. The bare token object is not a color value.
+
 ### Actionable attention signals
 
 `attention` wins over `pending` when any of these is true:
 
-- `INDEX.md` line count is greater than the configured `indexLines`, or the
-  file exists but cannot be line-counted (unreadable or too large to inspect).
+- `INDEX.md` cannot be line-counted (missing after initialization or
+  unreadable), or its line count is greater than the configured `indexLines`.
+  A too-large file is reported by `indexLineCount` as `indexLines + 1` and
+  therefore also counts as over-cap.
+- The unconsumed `indexOverCap` notice count is greater than zero.
 - The unconsumed `indexStale` notice count is greater than zero.
 - The unconsumed `captureFailed` notice count is greater than zero.
 
@@ -116,15 +124,20 @@ Configuration example:
 The server collector gathers existing facts and applies one pure precedence
 function. It never derives state from prose or file contents.
 
+The collector checks `isInitialized` first. When it is false, the collector
+returns `{ state: "not-initialized", pending: 0 }` without reading storage;
+every storage-backed fact below is gathered only after initialization.
+
 | Fact | Source | Notes |
 | --- | --- | --- |
 | initialized | `isInitialized(memoryRoot)` | Existing regular-file probe for `INDEX.md`. Never throws. |
-| index line count | `indexLineCount(join(memoryRoot, "INDEX.md"), memoryRoot, indexLines)` | Returns `undefined` for missing/unreadable/too-large files. Initialization is checked first. |
+| index line count | `indexLineCount(join(memoryRoot, "INDEX.md"), memoryRoot, indexLines)` | Returns `undefined` for missing/unreadable files and `indexLines + 1` when the line or byte cap is hit (treated as over-cap). |
 | pending | `getPending(storage, projectID)` | Existing counter; invalid values coerce to `0`. |
+| over-cap notices | `getNotice(storage, projectID, "indexOverCap")` | Read only; not consumed. |
 | stale pointers | `getNotice(storage, projectID, "indexStale")` | Read only; not consumed. |
 | failed captures | `getNotice(storage, projectID, "captureFailed")` | Read only; not consumed. |
 
-The pure state function:
+The pure snapshot function:
 
 ```ts
 type SidebarState =
@@ -135,8 +148,13 @@ type SidebarState =
 
 interface SidebarFacts {
   readonly initialized: boolean;
-  /** True only when INDEX was read and its line count is within the cap. */
+  /**
+   * True only when INDEX was read after initialization and its line count is
+   * within the cap. False for missing, unreadable, over-cap, or too-large
+   * INDEX files.
+   */
   readonly indexWithinCap: boolean;
+  readonly overCapNotices: number;
   readonly stalePointers: number;
   readonly failedCaptures: number;
   readonly pending: number;
@@ -147,21 +165,25 @@ interface SidebarSnapshot {
   readonly pending: number;
 }
 
-function deriveSidebarState(facts: SidebarFacts): SidebarState;
+function deriveSidebarSnapshot(facts: SidebarFacts): SidebarSnapshot;
 ```
 
 Rules, in order:
 
-1. If not initialized, return `{ state: "not-initialized", pending: 0 }`
-   without reading storage.
-2. If the INDEX line count is `undefined` after initialization, or is greater
-   than `indexLines`, return `attention`.
-3. If `indexStale` or `captureFailed` is present, return `attention`.
-4. If `pending > 0`, return `pending` with the count.
-5. Otherwise return `healthy`.
+1. If `initialized` is false, return
+   `{ state: "not-initialized", pending: 0 }`. The collector guarantees this
+   branch is reached without reading storage.
+2. If `indexWithinCap` is false, return
+   `{ state: "attention", pending: facts.pending }`.
+3. If `overCapNotices`, `stalePointers`, or `failedCaptures` is greater than
+   zero, return `{ state: "attention", pending: facts.pending }`.
+4. If `pending > 0`, return `{ state: "pending", pending: facts.pending }`.
+5. Otherwise return `{ state: "healthy", pending: 0 }`.
 
 The snapshot always includes `pending`, even when the state is `attention` or
-`not-initialized`; the label renderer uses it only for `pending`.
+`not-initialized`; the label renderer uses it only for `pending`. The
+`not-initialized` branch reports `0` because it does not read storage; the
+`attention` and `pending` branches carry the observed counter.
 
 ## Architecture
 
@@ -182,6 +204,7 @@ Add a TUI part and a shared RPC contract beside the existing server part:
 The package already ships `src/` via `files`. Add runtime peers for the host's
 TUI stack, aligned with `@opencode/plugin` 2.0.29:
 
+- `@opencode/theme` `2.0.29` (TUI context/theme types; optional, like the host's own peer)
 - `@opentui/core` `>=0.5.17`
 - `@opentui/solid` `>=0.5.17`
 - `solid-js` `>=1.9.0`
@@ -202,7 +225,7 @@ with:
 | Module | Responsibility |
 | --- | --- |
 | `src/rpc.ts` | `Rpc.define` contract for `nexusnv.memory.sidebarStatus`. Shared by server and TUI. |
-| `src/sidebar.ts` | Pure state types, `deriveSidebarState`, `parseSidebarOptions`, and `renderSidebarLabel`. No fs/storage imports. |
+| `src/sidebar.ts` | Pure state types, `deriveSidebarSnapshot`, `parseSidebarOptions`, `resetSidebarOptionsWarnings`, `renderSidebarLabel`, and `isSidebarSnapshot`. No fs/storage imports. |
 | `src/sidebar-status.ts` | Server collector (`collectSidebarStatus`) and RPC registration (`registerSidebarRpc`). Imports the existing init, brief, and ledger helpers. |
 | `src/tui.tsx` | TUI plugin definition, visibility check, footer slot, Solid status-line component, polling, event refreshes, and cleanup. |
 
@@ -246,17 +269,19 @@ registration to the existing `registrations` array so cleanup disposes it.
 The handler closes over the plugin context and the already-parsed
 `indexLines` option. It returns the snapshot or rejects on storage failure.
 
-The TUI calls:
+The TUI calls with a request signal (a short timeout combined with the
+component's unmount signal) so a stalled RPC cannot leave the line stale:
 
 ```ts
-context.client
-  .rpc(MemoryRpc)
-  .sidebarStatus({}, { location: context.location ?? context.data.location.default() });
+context.client.rpc(MemoryRpc).sidebarStatus({}, {
+  location: context.location ?? context.data.location.default(),
+  signal: requestSignal,
+});
 ```
 
-RPC validation failure, transport failure, or a rejected handler all follow the
-same TUI path: clear the rendered snapshot and hide the line until a later
-successful poll.
+RPC validation failure, transport failure, timeout/abort, or a rejected handler
+all follow the same TUI path: clear the rendered snapshot and hide the line
+until a later successful poll.
 
 ### Wiring
 
@@ -284,9 +309,11 @@ The component owns its lifecycle:
 1. Fetch immediately.
 2. Poll every 5 seconds while mounted.
 3. Refresh immediately on `session.synthetic` and `session.idle`.
-4. Guard against overlapping fetches.
-5. Clear the interval, unsubscribe the event listeners, and ignore late
-   results after cleanup.
+4. Guard against overlapping fetches. Each fetch carries a request signal that
+   aborts on a short timeout (4 seconds) or when the component is disposed,
+   and the in-flight guard clears in `finally`.
+5. Clear the interval, abort the in-flight request, unsubscribe the event
+   listeners, and ignore late results after cleanup.
 
 Each mounted footer line owns its own poll. The snapshot is project-wide, so
 multiple sessions or TUI instances cannot corrupt each other.
@@ -299,8 +326,10 @@ TUI setup
   -> hidden? stop
   -> register sidebar.footer
   -> component mounts
-  -> RPC nexusnv.memory.sidebarStatus(location)
-  -> server collector reads INDEX state, line count, pending, notices
+  -> RPC nexusnv.memory.sidebarStatus(location, signal)
+  -> server collector checks initialization first
+  -> uninitialized? return not-initialized without storage
+  -> initialized? read INDEX state, line count, pending, notices
   -> { state, pending }
   -> TUI renders one line
   -> poll / session.synthetic / session.idle refresh
@@ -308,9 +337,16 @@ TUI setup
 
 ### Error handling
 
+- The collector checks `isInitialized` first; an uninitialized project returns
+  `not-initialized` without reading storage, so the pre-init reminder survives
+  a storage outage.
 - `isInitialized` and `indexLineCount` already fail closed and never throw.
-- `getPending` / `getNotice` rejections propagate through the RPC handler.
-- The TUI catches every rejection, clears the snapshot, and renders nothing.
+- `getPending` / `getNotice` rejections propagate through the RPC handler for
+  initialized projects.
+- The TUI catches every rejection and timeout/abort, clears the snapshot, and
+  renders nothing.
+- Each fetch has a timeout and unmount abort; the in-flight guard clears in
+  `finally`, so a stalled request cannot disable later polls.
 - Late responses after unmount are ignored.
 - The server handler never writes, never consumes notices, and never bumps
   metrics.
@@ -323,8 +359,10 @@ TUI setup
 `test/sidebar.test.ts`:
 
 - `parseSidebarOptions`: missing/true/false/unknown keys, invalid types warn
-  once and default to visible, non-object input defaults to visible.
-- `deriveSidebarState`: every precedence combination, including
+  once and default to visible, non-object input defaults to visible. The
+  warn-once cases call `resetSidebarOptionsWarnings()` in the setup hook, the
+  same seam `resetMemoryOptionsWarnings` provides for the server parser.
+- `deriveSidebarSnapshot`: every precedence combination, including
   initialization beating pending, over-cap beating pending, notices beating
   pending, and pending beating healthy.
 - `renderSidebarLabel`: exact text and tone for all four states; pending count
@@ -333,12 +371,14 @@ TUI setup
 `test/sidebar-status.test.ts`:
 
 - Temp memory root + fake `LedgerStorage`.
-- Not-initialized wins even when pending is set.
+- Not-initialized returns `{ state: "not-initialized", pending: 0 }` without
+  reading storage. A fake whose reads reject still yields the pre-init
+  reminder, proving the storage short-circuit.
 - Healthy when INDEX is within cap, pending is zero, and no actionable notice
   exists.
 - Pending count is returned unchanged.
-- Over-cap INDEX, unreadable INDEX, stale-pointer notice, and failed-capture
-  notice each produce attention.
+- Over-cap INDEX, unreadable INDEX, `indexOverCap`, stale-pointer, and
+  failed-capture inputs each produce attention.
 - Rotated and forgotten notices are ignored.
 - Notices remain readable after collection (not consumed).
 - The collector performs no `set` or `remove`.
@@ -353,15 +393,33 @@ wiring is covered by typecheck plus a local smoke check:
 
 1. Fresh project → `○ memory · run /memory-init`.
 2. Run `/memory-init` → `● memory · healthy` without a long delay.
-3. Trigger a failure capture → `◐ memory · 1 pending`.
+3. Capture a failing shell/build/test output → `◐ memory · 1 pending`.
 4. Push `INDEX.md` over its cap → `▲ memory · needs attention`.
 5. `showSidebarStatus: false` → no line and no blank footer space.
 6. Invalid `showSidebarStatus` → visible with one warning.
 7. Two projects open → each footer follows its own location.
 8. Stop/unload the server plugin → the line hides rather than showing a stale
    state.
+9. Stall or block the RPC → the line hides after the timeout, then returns on a
+   later successful poll rather than staying disabled.
 
 ### Existing suites
+
+`setup()` registers the sidebar RPC unconditionally, because the method must
+work before and after initialization and the TUI is a separate plugin. Every
+existing setup fake therefore needs an `rpc.register` stub whose result has
+the full registration surface (`dispose` and `events.emit`), or a narrow cast
+at the fake boundary. The known fakes are:
+
+- `test/hooks.test.ts` (`setupHooks`)
+- `test/review.test.ts` (`fakeForSetup`)
+- `test/scaffold.test.ts` (inline setup contexts)
+- `test/isolation.test.ts` (wiring and gated-event fakes)
+- `test/acceptance-metrics.test.ts`
+
+`npm test` is the gate that proves none were missed. Do not make registration
+conditional on `ctx.rpc` being present; a missing RPC would silently drop the
+indicator instead of failing the host contract.
 
 - `npm run typecheck`
 - `npm test`
@@ -373,7 +431,12 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 
 ## Documentation updates
 
-- New ADR `docs/adr/0012-tui-sidebar-status.md`.
+- New ADR `docs/adr/0012-tui-sidebar-status.md`, recording the precondition,
+  fail-closed rules, and the read-only RPC exception.
+- Amend ADR-0011's pre-init surface list: add the read-only
+  `nexusnv.memory.sidebarStatus` RPC and state that it returns
+  `not-initialized` without storage reads, writes, or injection. This is a
+  status probe, not an operation, so it does not weaken the init gate.
 - This spec.
 - `docs/design-spec-v2-production.md`:
   - Add a concise sidebar-status contract.
@@ -396,6 +459,7 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 | RPC location routing sends the wrong project state. | Always pass `context.location`; verify with two open projects. |
 | Attention is transient because the prompt status line consumes notices. | Document that the sidebar is a read-only mirror; the status line remains the actionable report. |
 | Polling cost or leaked intervals. | One 5-second read-only call per mounted line; cleanup clears the timer and subscriptions; hidden mode does no work. |
+| RPC hangs or never settles. | Each call aborts after 4 seconds; the in-flight guard clears in `finally` so the next poll can recover. |
 | Scope creep into a dashboard. | The line is passive, single-state, and bounded to `{ state, pending }`; the rich panel stays deferred. |
 
 ## Acceptance criteria
@@ -403,15 +467,22 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 - `sidebar.footer` shows exactly one of the four fixed lines after a successful
   snapshot.
 - State precedence is deterministic and matches the table above.
+- An unconsumed `indexOverCap` notice produces `attention`, like the stale and
+  failed-capture notices.
 - `/memory-init` makes the line move from not-initialized to healthy/pending
   without restarting the TUI.
+- Pre-init collection performs no storage reads; a storage outage cannot hide
+  the `/memory-init` reminder.
+- A stalled or failed RPC hides the line, and a timed-out request does not
+  disable later polls.
 - `showSidebarStatus: false` removes the line and produces no polling or RPC
   traffic.
 - The server still accepts exactly the five existing behavior options; the TUI
   option is ignored by server parsing.
 - No memory file, ledger key, metric, or notice is written or consumed by the
   indicator.
-- The full test suite, typecheck, and coverage gates pass.
+- The full test suite, typecheck, and coverage gates pass, including the
+  updated setup fakes.
 
 ## Alternatives considered
 
