@@ -17,7 +17,16 @@ if (!tarball) {
   console.error("usage: node scripts/assert-pack.mjs <tarball.tgz>");
   process.exit(2);
 }
-const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+const pkgPath = new URL("../package.json", import.meta.url);
+let pkg;
+try {
+  pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+} catch (error) {
+  console.error(
+    `pack gate error: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(1);
+}
 const rawExports = pkg?.exports;
 const describe = (value) =>
   value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
@@ -63,9 +72,17 @@ if (!targets.some((entry) => entry.name === ".")) {
   console.error('package.json exports must define "." with a non-empty string target');
   process.exit(1);
 }
-const files = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" })
-  .split("\n")
-  .filter((l) => l.length > 0);
+let files;
+try {
+  files = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" })
+    .split("\n")
+    .filter((l) => l.length > 0);
+} catch (error) {
+  console.error(
+    `pack gate error: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(1);
+}
 for (const { name, target } of targets) {
   const want = `package/${target.replace(/^\.\//, "")}`;
   if (!files.includes(want)) {

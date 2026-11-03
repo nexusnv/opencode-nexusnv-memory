@@ -1415,8 +1415,10 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
     inFlight = controller;
     const timeout = setTimeout(() => {
       controller.abort();
+      if (!disposed) setSnapshot(undefined);
       // Recover even if the client never settles the aborted request; a late
-      // result is ignored by the aborted check below.
+      // result is ignored by the aborted check below and must not displace a
+      // newer poll's state.
       if (inFlight === controller) inFlight = undefined;
     }, REQUEST_TIMEOUT_MS);
 
