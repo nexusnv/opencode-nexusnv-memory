@@ -24,13 +24,18 @@ A project should be inert until the user explicitly initializes it.
   templates, never overwrite, create `INDEX.md` last. If INDEX was absent and
   any earlier target failed, INDEX is not created and the project remains
   uninitialized.
-- Before initialization, only `/memory-init`, `/memory-status`, and
-  `memory_status` work. Every other memory tool/command returns
+- Before initialization, only `/memory-init`, `/memory-status`,
+  `memory_status`, and the read-only `nexusnv.memory.sidebarStatus` RPC work.
+  Every other memory tool/command returns
   `[memory] not initialized; run /memory-init to create .opencode/memory`
   for any actual operation. Commands with a help path (`/memory-review`,
   `/memory-forget`, `/memory-gc`, `/memory-metrics`) still render
   `--help`/`-h` usage; no operation runs. No hook injects, captures,
   snapshots, remembers, or bumps a metric.
+- The sidebar RPC is a status probe, not an operation: when INDEX is absent it
+  returns `{ state: "not-initialized", pending: 0 }` without a storage read,
+  write, or injection, and the TUI renders `○ memory · run /memory-init`
+  (ADR-0012). It does not weaken the init gate.
 - `/memory-status` always renders the full doctor, including an
   `initialization` row and a `/memory-init` next action.
 - Pre-init `remember:` is silently ignored. The AGENTS.md protocol block is
