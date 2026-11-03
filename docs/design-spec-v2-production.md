@@ -55,7 +55,7 @@ types decide; a runtime log remains a sanity check, not a blocker.
 | Events                    | `ctx.event.subscribe({signal})` → async iterable of typed events; abort on cleanup. OpenAPI carries `V2EventEncoded` as an opaque string, but `@opencode/schema` enumerates the catalogue: `session.idle` (ephemeral, `data:{sessionID}`, optional `location`), `session.compaction.started/delta/ended/failed` (`ended.data:{reason,model?,providerState?,providerContext?,text,recent,cost?,tokens?,sessionID}`)                                                                                                                                                                                                                                                                                        | idle/compaction capture, diagnostics                                                                                                                                               |
 | Config keys               | `plugins` (plural), `agents`, `permissions`, `default_agent`, `references`, `instructions`, `compaction`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | install                                                                                                                                                                            |
 | Discovery                 | `.opencode/plugins/` loads direct `.ts`/`.js` files and immediate package directories; arrays merge global → project → `.opencode`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | install                                                                                                                                                                            |
-| Publish manifest          | `package.json` `type:module`, `exports["."]`, optional `"./rpc"`, dep `@opencode/plugin`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | distribution                                                                                                                                                                       |
+| Publish manifest          | `package.json` `type:module`, `exports["."]`, `"./rpc"`, `"./tui"`, optional TUI peers, dep `@opencode/plugin`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | distribution                                                                                                                                                                       |
 | Agents                    | Markdown frontmatter accepts the same fields as an `agents` entry: `description`, `mode: primary\|subagent\|all`, `model`, `permissions` (ordered `{action,resource,effect}`), etc. Body = `system` prompt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `memory-manager`                                                                                                                                                                   |
 | Permission evaluation     | **"The last matching rule wins"** (permissions guide; global rules append before agent rules). Subagents use their own permissions, not a subset of the parent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `memory-manager`                                                                                                                                                                   |
 | References                | `references` entries attach **directories** (`path`) or Git repos (`repository`/`branch`); attachment is a non-recursive root listing and is client-initiated. Designed for directories **outside** the project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | not used (§4.3)                                                                                                                                                                    |
@@ -156,6 +156,10 @@ opencode-nexusnv-memory/
 ├── package.json                       # type:module, exports, dep @opencode/plugin (pinned)
 ├── src/
 │   ├── index.ts                       # Plugin.define({id:"memory", setup}) — wiring only
+│   ├── rpc.ts                         # Rpc.define: nexusnv.memory.sidebarStatus (ADR-0012)
+│   ├── sidebar.ts                     # pure sidebar state/options/label/validator (no fs/storage)
+│   ├── sidebar-status.ts              # read-only collector + unconditional RPC registration
+│   ├── tui.tsx                        # memory.tui: sidebar.footer status line (ADR-0012)
 │   ├── brief.ts                       # loadBrief, loadPriors (injection caps)
 │   ├── hints.ts                       # matchIndex (exact match + once-per-prompt throttle)
 │   ├── status.ts                      # statusLine (over-cap INDEX + rotation + skipped-capture + forgotten + review-due)
@@ -189,7 +193,11 @@ not as separate plugins. Test the **installed package**, not only a workspace li
   "name": "opencode-nexusnv-memory",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts",
+    "./tui": "./src/tui.tsx"
+  },
   "dependencies": { "@opencode/plugin": "2.0.29" },
 }
 ```
@@ -198,7 +206,9 @@ not as separate plugins. Test the **installed package**, not only a workspace li
   a newer API contract, and re-run §9 gates.
 - A bundled `dist/` build is optional; loading TypeScript directly is the documented pattern. If a
   build is added, point `exports["."]` at `./dist/index.js` and add the build script + config.
-- Optional `"./rpc"` export only if a shared RPC contract is published (not needed here).
+- `"./rpc"` publishes the shared `nexusnv.memory.sidebarStatus` contract and `"./tui"` publishes the
+  `memory.tui` part. The TUI peers (`@opencode/theme`, `@opentui/core`, `@opentui/solid`, `solid-js`)
+  are optional, so a server-only host installs no client stack (ADR-0012, §5.15).
 - V1+V2 dual support is out of scope; `server()` is not exported.
 
 ---
@@ -1245,12 +1255,12 @@ renders a confirmation notice and changes nothing, while `/memory-metrics reset 
   deny the user's own tools in that session. The review's only output is a proposal, and every write
   needs per-line human approval (§5.11), so it needs no sandbox. The read-only `memory-manager` subagent
   remains available as an optional isolated venue. No runtime gate.
-- **D-G — rich TUI metrics panel.** _Deferred by decision_ (ADR-0008): a client-side
-  `@opencode/plugin/tui` plugin (SolidJS + `@opentui`; live pages via `ui.router.register`, slot
-  claims, dialogs, durable TUI `storage.store`) could render a real-time metrics page, but it is a
-  second plugin type with a heavier client-side install path for no fidelity gain over the markdown
-  dashboard. _Shipped:_ the deterministic markdown dashboard via `memory_metrics` +
-  `/memory-metrics` (§5.12). _Exit:_ only on real demand for a persistent panel.
+- **D-G — rich TUI metrics panel.** _Deferred by decision_ (ADR-0008): a full live page via
+  `ui.router.register`, richer slot claims, dialogs, and durable TUI `storage.store` would add a
+  heavier client-side surface for no fidelity gain over the markdown dashboard. _Shipped:_ the
+  deterministic markdown dashboard via `memory_metrics` + `/memory-metrics` (§5.12), and the minimal
+  read-only `sidebar.footer` status line (§5.15, ADR-0012) — one line, four states, no page.
+  _Exit:_ only on real demand for a persistent metrics panel.
 
 **Shipped rather than deferred (Tier 3):** E8 stable-prefix placement with prompt-tail notices,
 E13 explicit forget + opt-in handoff GC (ADR-0009), and E14 same-host cross-process writes
@@ -1379,6 +1389,53 @@ including a scheme-bounded URL-credential pattern (userinfo/password fail closed
 generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-key pattern (a lone
 `BEGIN` redacts to EOF).
 
+### 5.15 TUI sidebar status indicator (US-33, HS-15, ADR-0012)
+
+**Purpose.** One passive, project-scoped line in `sidebar.footer` answers "is memory installed,
+healthy, waiting for review, or in need of attention?" without invoking a command. It is **not** the
+deferred rich metrics panel (§8 D-G, ADR-0008): it has four fixed states, no page, no router, no
+interaction, and no metrics.
+
+**Surface.** A second plugin part (`./tui`, id `memory.tui`) claims `sidebar.footer` with one additive
+line. The server part registers one read-only RPC, `nexusnv.memory.sidebarStatus`, unconditionally so
+it answers before and after initialization. The RPC accepts no input and returns exactly
+`{ state: "not-initialized" | "healthy" | "pending" | "attention", pending: integer >= 0 }`.
+
+**States and precedence.** `not-initialized` > `attention` > `pending` > `healthy`.
+
+| State | Condition | Label | Theme token |
+| --- | --- | --- | --- |
+| `not-initialized` | `.opencode/memory/INDEX.md` is not an existing regular file. | `○ memory · run /memory-init` | `text.feedback.warning.base` |
+| `attention` | Initialized, and INDEX is uninspectable/over-cap or an unconsumed `indexOverCap`, `indexStale`, or `captureFailed` notice is positive. | `▲ memory · needs attention` | `text.feedback.error.base` |
+| `pending` | Initialized, no attention condition, and `curation.pending > 0`. | `◐ memory · {n} pending` | `text.feedback.warning.base` |
+| `healthy` | Initialized, INDEX within cap and inspectable, no actionable notice, pending zero. | `● memory · healthy` | `text.feedback.success.base` |
+
+`forgotten` and `rotated` notices are informational and do not produce `attention`. The prompt
+review-due nudge stays at `pending >= 5`; the sidebar adds no second threshold.
+
+**Read path and pre-init short-circuit.** The collector checks `isInitialized()` first. When false it
+returns `not-initialized` with pending `0` **without reading storage**, so a storage outage cannot hide
+the `/memory-init` reminder. For an initialized project it reads the existing `indexLineCount` result
+(`undefined` for missing/unreadable; `indexLines + 1` when the line or byte cap is hit), `getPending`,
+and three unconsumed `getNotice` values. A missing/unreadable INDEX or a count above `indexLines` is
+`attention`.
+
+**Side-effect guarantees.** The collector never calls `set`/`remove`, never calls
+`takeNotice`/`takeRotated`, never bumps a metric, never writes a memory file, and never consumes a
+notice. It adds no storage key, file, metric name, model-facing tool, or server behavior option. The
+prompt status line remains the actionable report; the sidebar is a read-only mirror, so `attention`
+can clear once the model reports the same condition.
+
+**Visibility.** `showSidebarStatus` defaults to `true` and is parsed only by the TUI part. `false`
+registers no slot, starts no polling, and makes no RPC call. Any other value warns once and stays
+visible. The server still parses exactly the five behavior options; `parseMemoryOptions` ignores this
+unknown key.
+
+**Failure behavior.** A rejected handler, transport failure, invalid payload, or request exceeding a
+4-second timeout clears the rendered snapshot and hides the line. The in-flight guard clears in
+`finally` and on timeout, so a stalled request cannot disable later polls; late responses after
+unmount are ignored. The TUI never shows a stale `healthy` claim.
+
 ---
 
 ## 9. Build, test, release
@@ -1413,6 +1470,12 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
     write-rejected failure captures (cleared after reporting); the review-due nudge appears at ≥5
     uncurated scratchpad captures and disappears after `memory_apply` resets the counter; the status
     line is dropped before the hint under budget pressure;
+  - **TUI sidebar status (§5.15, ADR-0012):** the collector returns `not-initialized` without a
+    storage read; `attention` covers an uninspectable/over-cap INDEX and unconsumed
+    `indexOverCap`/`indexStale`/`captureFailed` notices; `pending` is `> 0`; notices and pending are
+    never consumed; the RPC handler performs no `set`/`remove`/metric bump; `showSidebarStatus: false`
+    registers no slot and starts no poll/RPC; a rejected, invalid, or timed-out snapshot hides the
+    line and a later poll recovers;
   - **Tier-3 placement (E8):** the `context` payload contains only the stable brief; prompt-tail
     notices are capped at 3, marker-guarded, pointer/status/hint order, pointer dropped first, a queued
     status not consumed on a no-fit turn, and the handoff pointer contains a path only; budget evals
@@ -1524,5 +1587,6 @@ generic-key patterns, a clamped `<private>` tag scan, and a fail-closed private-
   atomic publish (ADR-0010). **E15 explicit initialization gate (2026-11-02):** setup no longer
   scaffolds; `/memory-init` owns creation (INDEX last) and pre-init surfaces are inert (ADR-0011).
   Still deferred/out of scope: FTS/embeddings, TTL/decay as automatic aging, archive
-  purge/physical erasure, and the rich TUI panel. A TUI sidebar initialization indicator remains a
-  separate future issue, not part of E15.
+  purge/physical erasure, and the rich TUI panel. **E16 minimal TUI sidebar status (2026-11-03):**
+  one read-only `sidebar.footer` line backed by `nexusnv.memory.sidebarStatus` (§5.15, ADR-0012);
+  it is not the deferred rich panel.
