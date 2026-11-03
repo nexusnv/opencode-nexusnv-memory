@@ -29,6 +29,16 @@ export interface SidebarPoller {
 export const SIDEBAR_POLL_INTERVAL_MS = 5_000;
 export const SIDEBAR_REQUEST_TIMEOUT_MS = 4_000;
 
+/**
+ * Create the polling lifecycle for one mounted sidebar line.
+ *
+ * The first fetch starts with {@link SidebarPoller.start}; event callers use
+ * {@link SidebarPoller.requestRefresh}. One request is in flight at a time;
+ * an event during it queues exactly one trailing refresh. A timeout hides the
+ * line and releases the slot even when the client never settles the aborted
+ * request. Disposal clears all timers, aborts the request, and ignores late
+ * results.
+ */
 export function createSidebarPoller(
   options: SidebarPollerOptions,
 ): SidebarPoller {
@@ -39,6 +49,7 @@ export function createSidebarPoller(
   let refreshQueued = false;
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
 
+  /** Run one guarded request and publish a validated snapshot or `undefined`. */
   async function refresh(): Promise<void> {
     if (disposed || inFlight) return;
     const controller = new AbortController();
@@ -76,6 +87,7 @@ export function createSidebarPoller(
     }
   }
 
+  /** Refresh now, or queue one trailing refresh while a request is active. */
   function requestRefresh(): void {
     if (disposed) return;
     if (inFlight) {
@@ -85,6 +97,7 @@ export function createSidebarPoller(
     void refresh();
   }
 
+  /** Begin the immediate fetch and the 5-second interval exactly once. */
   function start(): void {
     if (disposed || started) return;
     started = true;
@@ -94,6 +107,7 @@ export function createSidebarPoller(
     }, SIDEBAR_POLL_INTERVAL_MS);
   }
 
+  /** Stop timers, abort the current request, and ignore its late result. */
   function dispose(): void {
     disposed = true;
     refreshQueued = false;

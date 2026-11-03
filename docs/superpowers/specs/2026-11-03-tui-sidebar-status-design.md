@@ -324,6 +324,9 @@ TUI setup
   renders nothing.
 - Each fetch has a timeout and unmount abort; the in-flight guard clears in
   `finally`, so a stalled request cannot disable later polls.
+- Overlapping probes share one server-side collection; a stalled read cannot
+  accumulate another collection per timed-out poll. The shared slot clears on
+  success or rejection so a later probe retries.
 - Late responses after unmount are ignored.
 - The server handler never writes, never consumes notices, and never bumps
   metrics.
@@ -370,6 +373,8 @@ TUI setup
 - The collector performs no `set` or `remove`.
 - Storage rejection propagates.
 - RPC registration wires the handler and returns the same snapshot.
+- Overlapping calls share one collection; a rejected collection clears for the
+  next call to retry.
 
 ### TUI verification
 

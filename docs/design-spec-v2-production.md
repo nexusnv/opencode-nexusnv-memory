@@ -1439,7 +1439,9 @@ exactly the five behavior options.
 **Failure behavior.** A rejected handler, transport failure, invalid payload, or request exceeding a
 4-second timeout clears the rendered snapshot and hides the line. The in-flight guard clears in
 `finally` and on timeout, so a stalled request cannot disable later polls; late responses after
-unmount are ignored. The TUI never shows a stale `healthy` claim.
+unmount are ignored. Overlapping RPC probes share one server-side collection, so a timed-out poll
+cannot accumulate a second INDEX/storage read while the previous one is stalled; the shared slot
+clears on success or rejection so a later poll retries. The TUI never shows a stale `healthy` claim.
 
 ---
 

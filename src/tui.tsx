@@ -19,6 +19,7 @@ import {
   type SidebarTone,
 } from "./sidebar.js";
 
+/** Map a status tone name to the theme's concrete RGBA token. */
 function toneColor(context: Context, tone: SidebarTone): RGBA {
   switch (tone) {
     case "error":
@@ -30,6 +31,13 @@ function toneColor(context: Context, tone: SidebarTone): RGBA {
   }
 }
 
+/**
+ * One sidebar line backed by the server's read-only status RPC.
+ *
+ * Owns the Solid signal only; the poller owns timing, overlap suppression,
+ * failure clearing, and cleanup. The rendered label is derived purely from the
+ * validated snapshot.
+ */
 export function MemoryStatusLine(props: { readonly context: Context }) {
   const [snapshot, setSnapshot] = createSignal<SidebarSnapshot>();
 
@@ -79,6 +87,7 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
 
 export default Plugin.define({
   id: "memory.tui",
+  /** Claim one additive footer line; the host owns the returned cleanup. */
   setup(context) {
     const unregister = context.ui.slot({
       append: "sidebar.footer",
