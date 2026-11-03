@@ -1429,10 +1429,11 @@ notice. It adds no storage key, file, metric name, model-facing tool, or server 
 prompt status line remains the actionable report; the sidebar is a read-only mirror, so `attention`
 can clear once the model reports the same condition.
 
-**Visibility.** `showSidebarStatus` defaults to `true` and is parsed only by the TUI part. `false`
-registers no slot, starts no polling, and makes no RPC call. Any other value warns once and stays
-visible. The server still parses exactly the five behavior options; `parseMemoryOptions` ignores this
-unknown key.
+**Visibility.** The line is always shown while the plugin is installed. A TUI-only visibility option
+was considered and removed after live verification on OpenCode 2.2.5: package `options` are
+delivered to the server part but arrive as `{}` for TUI plugin parts, so the flag could never take
+effect. Hiding the line requires removing the plugin from your config. The server still parses
+exactly the five behavior options.
 
 **Failure behavior.** A rejected handler, transport failure, invalid payload, or request exceeding a
 4-second timeout clears the rendered snapshot and hides the line. The in-flight guard clears in
@@ -1476,9 +1477,8 @@ unmount are ignored. The TUI never shows a stale `healthy` claim.
   - **TUI sidebar status (§5.15, ADR-0012):** the collector returns `not-initialized` without a
     storage read; `attention` covers an uninspectable/over-cap INDEX and unconsumed
     `indexOverCap`/`indexStale`/`captureFailed` notices; `pending` is `> 0`; notices and pending are
-    never consumed; the RPC handler performs no `set`/`remove`/metric bump; `showSidebarStatus: false`
-    registers no slot and starts no poll/RPC; a rejected, invalid, or timed-out snapshot hides the
-    line and a later poll recovers;
+    never consumed; the RPC handler performs no `set`/`remove`/metric bump; the line hides only on
+    an invalid/rejected/timed-out snapshot or by removing the plugin; a later poll recovers;
   - **Tier-3 placement (E8):** the `context` payload contains only the stable brief; prompt-tail
     notices are capped at 3, marker-guarded, pointer/status/hint order, pointer dropped first, a queued
     status not consumed on a no-fit turn, and the handoff pointer contains a path only; budget evals

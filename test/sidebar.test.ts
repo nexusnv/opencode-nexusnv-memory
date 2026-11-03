@@ -1,20 +1,12 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SIDEBAR_OPTIONS,
   deriveSidebarSnapshot,
   isSidebarSnapshot,
-  parseSidebarOptions,
   renderSidebarLabel,
-  resetSidebarOptionsWarnings,
   type SidebarFacts,
   type SidebarState,
   type SidebarTone,
 } from "../src/sidebar.js";
-
-function collector(): { messages: string[]; warn: (m: string) => void } {
-  const messages: string[] = [];
-  return { messages, warn: (m: string) => messages.push(m) };
-}
 
 function facts(overrides: Partial<SidebarFacts> = {}): SidebarFacts {
   return {
@@ -27,54 +19,6 @@ function facts(overrides: Partial<SidebarFacts> = {}): SidebarFacts {
     ...overrides,
   };
 }
-
-describe("parseSidebarOptions", () => {
-  beforeEach(() => resetSidebarOptionsWarnings());
-
-  it("defaults to visible when the key is missing", () => {
-    expect(parseSidebarOptions(undefined)).toEqual(DEFAULT_SIDEBAR_OPTIONS);
-    expect(parseSidebarOptions({})).toEqual({ showSidebarStatus: true });
-  });
-
-  it("honors an explicit false", () => {
-    expect(parseSidebarOptions({ showSidebarStatus: false })).toEqual({
-      showSidebarStatus: false,
-    });
-  });
-
-  it("warns once and stays visible for an invalid value", () => {
-    const first = collector();
-    expect(parseSidebarOptions({ showSidebarStatus: "yes" }, first.warn)).toEqual(
-      { showSidebarStatus: true },
-    );
-    expect(first.messages).toHaveLength(1);
-    expect(first.messages[0]).toContain("showSidebarStatus");
-    expect(first.messages[0]).toContain('"yes"');
-
-    const second = collector();
-    parseSidebarOptions({ showSidebarStatus: "yes" }, second.warn);
-    expect(second.messages).toHaveLength(0);
-  });
-
-  it("defaults to visible for non-object input without a duplicate warning", () => {
-    const messages = collector();
-    expect(parseSidebarOptions("bad", messages.warn)).toEqual({
-      showSidebarStatus: true,
-    });
-    expect(messages.messages).toHaveLength(0);
-  });
-
-  it("ignores unrelated keys, including the five server options", () => {
-    const messages = collector();
-    expect(
-      parseSidebarOptions(
-        { indexLines: 30, fileLines: 60, captureFailures: false },
-        messages.warn,
-      ),
-    ).toEqual({ showSidebarStatus: true });
-    expect(messages.messages).toHaveLength(0);
-  });
-});
 
 describe("deriveSidebarSnapshot", () => {
   it("not-initialized wins over every other fact and reports zero pending", () => {
@@ -104,9 +48,9 @@ describe("deriveSidebarSnapshot", () => {
       { stalePointers: 1 },
       { failedCaptures: 1 },
     ] as const) {
-      expect(
-        deriveSidebarSnapshot(facts({ ...override, pending: 2 })),
-      ).toEqual({ state: "attention", pending: 2 });
+      expect(deriveSidebarSnapshot(facts({ ...override, pending: 2 }))).toEqual(
+        { state: "attention", pending: 2 },
+      );
     }
   });
 

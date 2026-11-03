@@ -1,6 +1,6 @@
 # ADR-0012 — TUI sidebar status indicator
 
-**Status:** accepted. **Date:** 2026-11-03. **Related:** ADR-0008 (rich TUI panel deferred), ADR-0011 (explicit initialization gate); design-spec §5.15.
+**Status:** accepted. **Date:** 2026-11-03. **Related:** ADR-0008 (rich TUI panel deferred), ADR-0011 (explicit initialization gate); design-spec §5.15. **Amended:** 2026-11-03 — the TUI-only visibility option was removed before release (see Decision).
 
 ## Context
 
@@ -26,8 +26,10 @@ panel deferred by ADR-0008, and it must not weaken the initialization gate in AD
   `attention` covers an uninspectable or over-cap INDEX and an unconsumed `indexOverCap`,
   `indexStale`, or `captureFailed` notice. `pending` means `pending > 0`; the prompt review-due
   threshold stays at 5.
-- Visibility is a TUI-only option, `showSidebarStatus` (default `true`). `false` registers no slot,
-  starts no poll, and makes no RPC call. An invalid value warns once and stays visible.
+- No visibility option: the line renders while the plugin is installed. (A TUI-only
+  `showSidebarStatus` flag was specified originally and removed after live-host verification:
+  OpenCode 2.2.5 delivers package `options` to the server part but passes `{}` to TUI plugin parts,
+  so the flag could never take effect. Hiding the line means removing the plugin.)
 - Fail closed: a rejected, invalid, transport-failed, or timed-out (4 s) snapshot clears the line.
   Polling resumes on a later successful call; the in-flight guard clears in `finally` and on timeout.
   A late response after unmount is ignored.
@@ -41,5 +43,7 @@ panel deferred by ADR-0008, and it must not weaken the initialization gate in AD
 - Negative: one read-only RPC per mounted footer every 5 seconds, and the line is project-wide rather
   than per-session. Notices remain consumable by the prompt status line, so `attention` can clear when
   the model reports the same condition; the sidebar is a read-only mirror, not the actionable report.
-- The rich metrics panel stays deferred (ADR-0008). The server option contract stays at exactly five;
-  only the TUI parser reads `showSidebarStatus`.
+- The line cannot be hidden while the plugin is installed (a visibility option requires working TUI
+  plugin options, which this host does not deliver). Users who do not want the line remove the
+  plugin. The rich metrics panel stays deferred (ADR-0008). The server option contract stays at
+  exactly five.

@@ -40,7 +40,7 @@ describe("parseMemoryOptions coherence warnings", () => {
     expect(messages).toHaveLength(0);
   });
 
-  it("ignores the TUI-only showSidebarStatus key", () => {
+  it("ignores unknown keys, e.g. showSidebarStatus", () => {
     const { messages, warn } = collector();
     const opts = parseMemoryOptions({ showSidebarStatus: false }, warn);
     expect(opts).toEqual({

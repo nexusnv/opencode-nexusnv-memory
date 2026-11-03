@@ -266,9 +266,9 @@ The TUI sidebar shows one passive memory line in its footer:
 | `▲ memory · needs attention`  | INDEX is unreadable or over its cap, or an over-cap, stale-INDEX-pointer, or skipped-capture notice is waiting. (A missing INDEX is reported by the `○` line above.) |
 
 The line is read-only and project-wide. It never consumes the notices that the agent's `[memory]`
-status line reports, so it can return to healthy once the agent relays them. Set `showSidebarStatus:
-false` to hide it completely. If no line appears, the TUI half or the RPC is unavailable, or the last
-snapshot failed; `/memory-status` still reports the install.
+status line reports, so it can return to healthy once the agent relays them. If no line appears, the
+TUI half or the RPC is unavailable, or the last snapshot failed; `/memory-status` still reports the
+install.
 
 ### See what the plugin has been doing
 
@@ -365,7 +365,6 @@ All options are optional. If you use the plain string form (`"plugins": ["openco
         "injectBudgetLines": 80,
         "captureFailures": true,
         "snapshotThrottleMinutes": 10,
-        "showSidebarStatus": true,
       },
     },
   ],
@@ -379,10 +378,6 @@ All options are optional. If you use the plain string form (`"plugins": ["openco
 | `injectBudgetLines`       | `80`    | Total auto-injected budget per request: `INDEX.md` + brief + prompt notices. Keep this above `indexLines`, or there is no room left for the brief.                                                                 |
 | `captureFailures`         | `true`  | Record failed shell/build/test output. The brief shows only a short summary per error; the detail stays in the file for recall. Set to `false` if command output may contain sensitive data.                       |
 | `snapshotThrottleMinutes` | `10`    | Minimum minutes between fallback handoff snapshots from the context hook in a session. Idle and compaction snapshots are handled separately.                                                                       |
-
-The TUI also reads one presentation-only key, `showSidebarStatus` (default `true`). The server parser
-ignores it, so the five behavior options above are unchanged. Set it to `false` to remove the sidebar
-line and its polling.
 
 A few notes:
 
@@ -409,7 +404,7 @@ A few notes:
 | The agent does not seem to know the project.                   | Run `/memory-status`. If it reports `not initialized`, run `/memory-init`; otherwise fix its next actions. Make sure the protocol block is in the root `AGENTS.md`. If `/memory-status` is unavailable, the plugin did not load: check the package install and config path, then restart OpenCode. Memory also has to be written before it can be recalled. |
 | The permission prompt never appears when applying memory.      | Add the `memory_write → ask` rule at the end of your `permissions` list and restart OpenCode. Check that no later wildcard rule overrides it.                                                                                                                                                                                                               |
 | The agent mentions a `[memory]` status line.                   | It is reporting something real: the INDEX is over its cap, blocks were rotated, a capture was skipped, a forget completed, or a review is due. Trim the file, run `/memory-review`, or check the file permissions.                                                                                                                                          |
-| The sidebar has no memory line.                                | The line is hidden when the TUI part or RPC is unavailable, when `showSidebarStatus` is `false`, or when the last snapshot failed. Check the plugin options and restart OpenCode; `/memory-status` still reports the install.                                                                                                                               |
+| The sidebar has no memory line.                                | The line is hidden when the TUI part or RPC is unavailable, or when the last snapshot failed. It is always shown while the plugin is installed; to remove it, remove the plugin from your config and restart OpenCode. `/memory-status` still reports the install.                                                                                          |
 | `/memory-review` shows a table but nothing is saved.           | That is the design. Proposals are not writes. Approve the lines you want; each approved line prompts for permission before it is appended.                                                                                                                                                                                                                  |
 | The agent forgot the start of a long session after compaction. | Compaction replaces detail with a summary. The plugin saves a handoff and injects prior context, but it is not a transcript. Read the newest handoff or the decision log for the details.                                                                                                                                                                   |
 | Memory is not updating.                                        | Run `/memory-status` and check the file sizes against the caps. `INDEX.md` over its cap is not attached, and over-cap files reject writes. Run `/memory-review` to see what is blocked.                                                                                                                                                                     |

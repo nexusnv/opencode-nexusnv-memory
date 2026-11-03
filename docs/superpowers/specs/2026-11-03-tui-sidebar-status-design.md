@@ -10,7 +10,7 @@ Show a minimal, read-only memory status line in the OpenCode TUI sidebar so a
 user can see at a glance whether this project's memory is installed, healthy,
 waiting for review, or needs attention. Before initialization, the line is the
 persistent in-TUI reminder to run `/memory-init`. Users who do not want the
-line can hide it entirely.
+line can remove the plugin from their config.
 
 ## Non-goals
 
@@ -32,13 +32,12 @@ line can hide it entirely.
 3. **Read-only RPC snapshot.** The TUI asks the server part for a bounded
    `{ state, pending }` snapshot through a typed RPC method. The TUI does not
    read memory files or the ledger directly.
-4. **TUI-only visibility option.** `showSidebarStatus` defaults to `true` and
-   is parsed only by the TUI part. The server keeps exactly five behavior
-   options (`indexLines`, `fileLines`, `injectBudgetLines`, `captureFailures`,
-   `snapshotThrottleMinutes`).
-5. **Hidden means absent.** `showSidebarStatus: false` registers no slot,
-   starts no polling, and makes no RPC calls. No blank row or placeholder
-   remains.
+4. **No visibility option.** The line renders whenever the plugin is installed.
+   (A TUI-only `showSidebarStatus` option was specified originally and removed
+   after live-host verification: OpenCode 2.2.5 does not deliver package
+   `options` to TUI plugin parts, so the flag could never take effect.)
+5. **Hidden means absent.** When the plugin is not installed, no slot exists —
+   no polling, no RPC calls, no blank row or placeholder.
 6. **No writes and no new vocabulary.** The RPC handler reads existing
    initialization state, line counts, notices, and the pending counter. It
    never calls `set`, `remove`, `takeNotice`, `takeRotated`, or a metric bump.
@@ -90,34 +89,14 @@ Theme tones name the `.base` RGBA tokens on `context.theme`; for example,
 The `forgotten` and `rotated` notices are informational and do not produce
 `attention`.
 
-### Visibility option
+### Visibility
 
-The TUI part reads `context.options.showSidebarStatus`:
-
-| Value | Behavior |
-| --- | --- |
-| missing or `true` | Register the footer slot. |
-| `false` | Register nothing: no slot, no polling, no RPC calls. |
-| any other value | Warn once and fall back to `true`. |
-
-The option is only read by the TUI part. The server's `parseMemoryOptions`
-continues to ignore unknown keys, so the same `options` object can carry both
-surfaces without expanding the five-option contract.
-
-Configuration example:
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "opencode-nexusnv-memory",
-      "options": {
-        "showSidebarStatus": false
-      }
-    }
-  ]
-}
-```
+The line is always shown while the plugin is installed. No visibility flag
+exists: live verification on OpenCode 2.2.5 shows package `options` are
+delivered to the server part but arrive as `{}` for TUI plugin parts, so a
+TUI-only option could never take effect (see ADR-0012). To hide the line,
+remove the plugin from your config. The server's `parseMemoryOptions` continues
+to ignore unknown keys, so the five-option contract is unchanged.
 
 ## State derivation
 
@@ -294,7 +273,6 @@ until a later successful poll.
 export default Plugin.define({
   id: "memory.tui",
   setup(context) {
-    if (!parseSidebarOptions(context.options).showSidebarStatus) return;
     const unregister = context.ui.slot({
       append: "sidebar.footer",
       render: () => <MemoryStatusLine context={context} />,
@@ -322,8 +300,6 @@ multiple sessions or TUI instances cannot corrupt each other.
 
 ```text
 TUI setup
-  -> read showSidebarStatus
-  -> hidden? stop
   -> register sidebar.footer
   -> component mounts
   -> RPC nexusnv.memory.sidebarStatus(location, signal)
@@ -395,8 +371,10 @@ wiring is covered by typecheck plus a local smoke check:
 2. Run `/memory-init` → `● memory · healthy` without a long delay.
 3. Capture a failing shell/build/test output → `◐ memory · 1 pending`.
 4. Push `INDEX.md` over its cap → `▲ memory · needs attention`.
-5. `showSidebarStatus: false` → no line and no blank footer space.
-6. Invalid `showSidebarStatus` → visible with one warning.
+5. Plugin removed from the config → no line and no blank footer space.
+6. No visibility flag exists by design: the line is never hidden except on
+   failure (fail closed), and no option-based toggle can be provided while
+   package options do not reach TUI plugin parts.
 7. Two projects open → each footer follows its own location.
 8. Stop/unload the server plugin → the line hides rather than showing a stale
    state.
@@ -445,8 +423,8 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 - `docs/c4-03-components.md`, `docs/c4-04-interfaces.md`, and
   `docs/c4-06-code.md`: add the TUI part, RPC method, slot claim, and new
   source modules.
-- `README.md`: indicator states, `showSidebarStatus`, and troubleshooting
-  (missing line means the TUI part or RPC is unavailable).
+- `README.md`: indicator states and troubleshooting (missing line means the
+  TUI part or RPC is unavailable).
 - `CHANGELOG.md`: unreleased entry.
 - `docs/user-stories.md`: one user story and one harness story.
 
@@ -454,11 +432,11 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 
 | Risk | Mitigation |
 | --- | --- |
-| `context.options` is not delivered through some TUI load path. | The fallback is visible-by-default. The local smoke test must prove the hidden path before release. |
+| `context.options` is not delivered through some TUI load path. | Confirmed on OpenCode 2.2.5: package options reach the server part but not the TUI part, so the visibility option was removed and the line is always shown; fail-closed visuals cover hide-on-failure. Hiding is achieved by removing the plugin. |
 | OpenTUI peer drift. | Declare the peer ranges, typecheck against the host versions, and smoke-test the published package shape. |
 | RPC location routing sends the wrong project state. | Always pass `context.location`; verify with two open projects. |
 | Attention is transient because the prompt status line consumes notices. | Document that the sidebar is a read-only mirror; the status line remains the actionable report. |
-| Polling cost or leaked intervals. | One 5-second read-only call per mounted line; cleanup clears the timer and subscriptions; hidden mode does no work. |
+| Polling cost or leaked intervals. | One 5-second read-only call per mounted line; cleanup clears the timer and subscriptions. |
 | RPC hangs or never settles. | Each call aborts after 4 seconds; the in-flight guard clears in `finally` so the next poll can recover. |
 | Scope creep into a dashboard. | The line is passive, single-state, and bounded to `{ state, pending }`; the rich panel stays deferred. |
 
@@ -475,10 +453,10 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
   the `/memory-init` reminder.
 - A stalled or failed RPC hides the line, and a timed-out request does not
   disable later polls.
-- `showSidebarStatus: false` removes the line and produces no polling or RPC
-  traffic.
-- The server still accepts exactly the five existing behavior options; the TUI
-  option is ignored by server parsing.
+- The line hides on an invalid, rejected, or timed-out snapshot, and a later
+  successful poll recovers it.
+- The server still accepts exactly the five existing behavior options; unknown
+  keys are ignored silently.
 - No memory file, ledger key, metric, or notice is written or consumed by the
   indicator.
 - The full test suite, typecheck, and coverage gates pass, including the
@@ -492,9 +470,12 @@ fully unit-tested. The `.tsx` adapter falls outside the existing
 - **RPC push events after every write.** Rejected for this minimal indicator:
   it would instrument init, capture, apply, review, forget, and external edits
   to save at most five seconds of latency.
-- **Adding `showSidebarStatus` to `MemoryPluginOptions`.** Rejected because it
-  would amend the five-option behavior contract for a presentation concern.
-  The TUI parser owns the option instead.
+- **A TUI-only visibility option (`showSidebarStatus`).** Specified originally,
+  removed after live-host verification: OpenCode 2.2.5 delivers package
+  `options` to the server part but not to TUI plugin parts (the TUI receives
+  `{}`), so the flag could never take effect. A toggle that silently does
+  nothing is worse than none. Hiding is instead achieved by removing the
+  plugin; absence means no blank row and no traffic.
 - **Showing a fifth `unavailable` state.** Rejected to keep the line honest
   and minimal: no data means no line, not a new visible state.
 
