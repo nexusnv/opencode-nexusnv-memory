@@ -11,13 +11,13 @@ describe("MemoryRpc", () => {
 
   it("accepts no input and returns only state plus pending", () => {
     const method = MemoryRpc.methods.sidebarStatus;
-    expect(method.input).toMatchObject({
+    expect(method.input).toEqual({
       type: "object",
       properties: {},
       required: [],
       additionalProperties: false,
     });
-    expect(method.output).toMatchObject({
+    expect(method.output).toEqual({
       type: "object",
       properties: {
         state: {
