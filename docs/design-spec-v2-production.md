@@ -710,8 +710,9 @@ callback return before any read, write, snapshot, remember, or metrics bump; `me
 `memory_apply`, `memory_metrics`, `memory_search`, `/memory-review`, `/memory-forget`, `/memory-gc`,
 and `/memory-metrics` return one fixed message for any actual operation. Commands with a help path
 (`/memory-review`, `/memory-forget`, `/memory-gc`, `/memory-metrics`) still render `--help`/`-h`
-usage; no operation runs. Only `/memory-init`, `/memory-status`, and `memory_status` remain
-available. `/memory-init` is idempotent repair: it creates only missing
+usage; no operation runs. Only `/memory-init`, `/memory-status`, `memory_status`, and the
+read-only `nexusnv.memory.sidebarStatus` RPC (§5.15) remain available; the RPC answers without a
+storage read. `/memory-init` is idempotent repair: it creates only missing
 directories/templates, never overwrites, and creates INDEX last, so a partial scaffold never
 activates the plugin.
 
@@ -1170,7 +1171,9 @@ their preview/result output; `/memory-forget` adds the persistent `notice.forgot
    pointer). Setup writes nothing and stays silent pre-init; initialized projects keep the
    unconditional permission warning. Root `AGENTS.md` is hand-edited only (the plugin emits the block
    text). Every hook/tool/command except `/memory-init`, `/memory-status`, and `memory_status` is
-   inert before INDEX exists; gated commands still render `--help`/`-h` usage. Nothing injects
+   inert before INDEX exists; gated commands still render `--help`/`-h` usage. The read-only
+   `nexusnv.memory.sidebarStatus` RPC also answers pre-init without a storage read (§5.15); it is
+   not a hook/tool/command. Nothing injects
    beyond INDEX until content exists.
 1. **Capture (zero-LLM, provenance-tagged):** tool-hook failure path (§5.3) → scratchpad as
    `source:tool` (message-derived summary line + optional recall-only detail, plus advisory injection flags;
@@ -1417,8 +1420,8 @@ review-due nudge stays at `pending >= 5`; the sidebar adds no second threshold.
 returns `not-initialized` with pending `0` **without reading storage**, so a storage outage cannot hide
 the `/memory-init` reminder. For an initialized project it reads the existing `indexLineCount` result
 (`undefined` for missing/unreadable; `indexLines + 1` when the line or byte cap is hit), `getPending`,
-and three unconsumed `getNotice` values. A missing/unreadable INDEX or a count above `indexLines` is
-`attention`.
+and three unconsumed `getNotice` values. An unreadable INDEX — or one deleted after the
+initialization probe — or a count above `indexLines` is `attention`.
 
 **Side-effect guarantees.** The collector never calls `set`/`remove`, never calls
 `takeNotice`/`takeRotated`, never bumps a metric, never writes a memory file, and never consumes a

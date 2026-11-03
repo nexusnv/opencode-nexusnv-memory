@@ -46,8 +46,9 @@ A project should be inert until the user explicitly initializes it.
 - Positive: no writes or model-visible injection before explicit consent; a
   partial scaffold cannot activate the plugin; existing installs need no
   migration; INDEX deletion is a safe deactivation.
-- Negative: a new user must discover `/memory-init` from the README or
-  `/memory-status`; a pre-init `remember:` is lost; deleting INDEX
+- Negative: a new user must discover `/memory-init` from the README,
+  `/memory-status`, or the sidebar line (ADR-0012); a pre-init `remember:` is
+  lost; deleting INDEX
   accidentally deactivates the plugin. These are accepted under the
   fully-inert choice.
 - The five-option contract, metric vocabulary, storage keys, and permission
