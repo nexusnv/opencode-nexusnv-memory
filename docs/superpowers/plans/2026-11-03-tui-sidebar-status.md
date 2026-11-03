@@ -2,6 +2,26 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Amendments applied after the Task 10 smoke run (2026-11-03).** The task bodies below are the
+original instructions and are kept as a historical record; where they mention `showSidebarStatus`,
+this section supersedes them.
+
+- The `showSidebarStatus` TUI-only option was **removed entirely**. Live verification on
+  OpenCode 2.2.5 showed package `options` are delivered to the server part but arrive as `{}` for
+  TUI plugin parts (`SRV {"showSidebarStatus":false}` / `TUI {}`), via every entry point tried
+  (project `opencode.jsonc`, project and global `cli.json`, global `opencode.json`, auto-load).
+  The flag could never take effect, so all shipped references to it were dropped or rewritten:
+  Task 3 options parser and tests, Task 6 setup gate, Task 5 server-regression test name,
+  README/CHANGELOG/ADR-0012/spec §"Visibility", c4-04 Config shapes, and design-spec §5.15.
+  The line is always shown while the plugin is installed; hiding it means removing the plugin.
+- Tasks 7-9 were implemented inline (per request) with review afterwards instead of per-task
+  reviewer loops; commits: Task 7 (aa99862), Task 8 (4fe0cb4), Task 9 (e7590e1), verification
+  fixups (9afa37b, 44fc449), this removal (see git log).
+- Task 10 verification re-run after removal: typecheck clean, suite green, coverage thresholds
+  met, pack gate lists all three exports. Smoke items 1-4, 7-9 pass (see the PR description /
+  smoke results); item 3 needed a host-level `status:"error"` event to trigger capture; items
+  tied to `showSidebarStatus` are obsolete (option removed).
+
 **Goal:** Add a read-only, project-scoped memory status line to the OpenCode TUI `sidebar.footer`, backed by one typed RPC that returns `{ state, pending }` and never writes or consumes anything.
 
 **Architecture:** The existing server plugin gains a pure snapshot module (`src/sidebar.ts`), a read-only collector plus RPC registration (`src/sidebar-status.ts`), and a shared RPC contract (`src/rpc.ts`). A second TUI plugin part (`src/tui.tsx`, exported at `./tui`) parses one presentation-only option, claims `sidebar.footer`, polls the RPC every 5 seconds with a 4-second timeout, and hides the line on any failure. The server keeps its five-option contract and its initialization gate; the collector checks `isInitialized` before any storage read.

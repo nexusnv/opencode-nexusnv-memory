@@ -5,7 +5,7 @@
  * Claims exactly one additive `sidebar.footer` line. The component never reads
  * memory files or `ctx.storage`; it asks the server half for a bounded
  * `{ state, pending }` snapshot through the typed RPC and hides the line on
- * any failure. `showSidebarStatus: false` registers nothing at all.
+ * any failure. The line is always visible while the plugin is installed.
  */
 import type { Context } from "@opencode/plugin/tui/context";
 import { Plugin } from "@opencode/plugin/tui";
@@ -14,7 +14,6 @@ import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { MemoryRpc } from "./rpc.js";
 import {
   isSidebarSnapshot,
-  parseSidebarOptions,
   renderSidebarLabel,
   type SidebarSnapshot,
   type SidebarTone,
@@ -127,7 +126,6 @@ export function MemoryStatusLine(props: { readonly context: Context }) {
 export default Plugin.define({
   id: "memory.tui",
   setup(context) {
-    if (!parseSidebarOptions(context.options).showSidebarStatus) return;
     const unregister = context.ui.slot({
       append: "sidebar.footer",
       render: () => <MemoryStatusLine context={context} />,

@@ -5,13 +5,8 @@
  * component, and the unit tests all share these functions without pulling a
  * runtime into the wrong process.
  */
-import type { WarnFn } from "./config.js";
-
 export type SidebarState =
-  | "not-initialized"
-  | "healthy"
-  | "pending"
-  | "attention";
+  "not-initialized" | "healthy" | "pending" | "attention";
 
 export interface SidebarFacts {
   readonly initialized: boolean;
@@ -32,14 +27,6 @@ export interface SidebarSnapshot {
   readonly pending: number;
 }
 
-export interface SidebarOptions {
-  readonly showSidebarStatus: boolean;
-}
-
-export const DEFAULT_SIDEBAR_OPTIONS: SidebarOptions = {
-  showSidebarStatus: true,
-};
-
 export type SidebarTone = "warning" | "error" | "success";
 
 export interface SidebarLabel {
@@ -53,53 +40,6 @@ const SIDEBAR_STATES: ReadonlySet<string> = new Set([
   "pending",
   "attention",
 ]);
-
-/** Keys already warned about in this process; each invalid key warns once. */
-const warnedKeys = new Set<string>();
-
-/** Test seam: clear warn-once state between assertions. */
-export function resetSidebarOptionsWarnings(): void {
-  warnedKeys.clear();
-}
-
-function warnOnce(key: string, warn: WarnFn, message: string): void {
-  if (warnedKeys.has(key)) return;
-  warnedKeys.add(key);
-  try {
-    warn(message);
-  } catch {
-    // A failing logger must never break TUI load.
-  }
-}
-
-/**
- * Parse the TUI-only visibility option. Never throws. Non-object input is
- * silent because the server parser already warns for the same malformed
- * `ctx.options` value; only `showSidebarStatus` itself warns here.
- */
-export function parseSidebarOptions(
-  raw: unknown,
-  warn: WarnFn = console.warn,
-): SidebarOptions {
-  try {
-    if (typeof raw !== "object" || raw === null) {
-      return { ...DEFAULT_SIDEBAR_OPTIONS };
-    }
-    const value = (raw as Record<string, unknown>)["showSidebarStatus"];
-    if (value === undefined) return { ...DEFAULT_SIDEBAR_OPTIONS };
-    if (typeof value !== "boolean") {
-      warnOnce(
-        "showSidebarStatus",
-        warn,
-        `[memory] invalid option showSidebarStatus=${JSON.stringify(value)}; using default true`,
-      );
-      return { ...DEFAULT_SIDEBAR_OPTIONS };
-    }
-    return { showSidebarStatus: value };
-  } catch {
-    return { ...DEFAULT_SIDEBAR_OPTIONS };
-  }
-}
 
 /**
  * Fixed precedence: not-initialized > attention > pending > healthy.
