@@ -6,7 +6,7 @@
 
 **Architecture:** The existing server plugin gains a pure snapshot module (`src/sidebar.ts`), a read-only collector plus RPC registration (`src/sidebar-status.ts`), and a shared RPC contract (`src/rpc.ts`). A second TUI plugin part (`src/tui.tsx`, exported at `./tui`) parses one presentation-only option, claims `sidebar.footer`, polls the RPC every 5 seconds with a 4-second timeout, and hides the line on any failure. The server keeps its five-option contract and its initialization gate; the collector checks `isInitialized` before any storage read.
 
-**Tech Stack:** TypeScript 5.9 (`strict`, `nodenext`, `es2022`), `@opencode/plugin` 2.0.29 (Promise + TUI flavors), `@opencode/theme` 2.0.29 types, `@opentui/core` 0.5.17, `@opentui/solid` 0.5.17, `solid-js` 1.9.12, Vitest 5, Node 20+.
+**Tech Stack:** TypeScript 5.9 (`strict`, `nodenext`, `es2022`), `@opencode/plugin` 2.0.29 (Promise + TUI flavors), `@opencode/theme` 2.0.29 types, `@opentui/core` 0.5.17, `@opentui/solid` 0.5.17, `solid-js` 1.9.12, Vitest 5, Node 20+ for the server plugin; the TUI part requires Bun ≥1.3 or Node ≥26.4 with --experimental-ffi (@opentui/core 0.5.17 requirement).
 
 **Spec:** `docs/superpowers/specs/2026-11-03-tui-sidebar-status-design.md`
 
@@ -177,7 +177,7 @@ Run: `npx vitest run test/scaffold.test.ts -t "manifest is a bootable memory plu
 
 Expected: PASS.
 
-Run: `npx vitest run test/scaffold.test.ts -t "tsconfig is strict nodenext es2022 covering src+test"`
+Run: `npx vitest run test/scaffold.test.ts -t "tsconfig is strict nodenext"`
 
 Expected: PASS.
 
@@ -2151,7 +2151,7 @@ Expected: exits 0. Do not include `docs/design-spec-v2-production.md` or `docs/c
 
 - [ ] **Step 6: Run the manual TUI smoke checklist**
 
-The Vitest host does not render OpenTUI faithfully. In a disposable project with the local plugin loaded, verify each item and record the result in the PR description:
+The Vitest host does not render OpenTUI faithfully. The smoke checklist must run under Bun ≥1.3 or Node ≥26.4 with --experimental-ffi (@opentui/core 0.5.17 requirement); on older Node the TUI will not start. In a disposable project with the local plugin loaded, verify each item and record the result in the PR description:
 
 1. Fresh project with no `.opencode/memory/INDEX.md` → footer shows `○ memory · run /memory-init`.
 2. Run `/memory-init` → within one poll the line becomes `● memory · healthy` (or `◐ … pending` if captures exist) without restarting the TUI.
