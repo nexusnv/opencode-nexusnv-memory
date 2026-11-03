@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,6 +149,15 @@ describe("collectSidebarStatus", () => {
     ).resolves.toEqual({ state: "attention", pending: 2 });
   });
 
+  it("treats an INDEX exactly at the cap as within cap", async () => {
+    const { memoryRoot } = await projectWithIndex(2);
+    const storage = new FakeStorage();
+
+    await expect(
+      collectSidebarStatus(input(memoryRoot, storage, 2)),
+    ).resolves.toEqual({ state: "healthy", pending: 0 });
+  });
+
   it("treats a missing or unreadable INDEX after initialization as attention", async () => {
     const deps: SidebarStatusDeps = {
       isInitialized: async () => true,
@@ -254,7 +264,7 @@ type Handler = (
 
 describe("registerSidebarRpc", () => {
   it("registers the sidebarStatus handler and returns its snapshot", async () => {
-    const { projectRoot, memoryRoot } = await projectWithIndex(1);
+    const { projectRoot } = await projectWithIndex(1);
     const storage = new FakeStorage();
     const fake = fakeRpcCtx(projectRoot, storage);
 
@@ -274,7 +284,7 @@ describe("registerSidebarRpc", () => {
     expect(fake.disposals()).toBe(1);
     // Prove the collector resolved the project's memory root, not the project
     // root, by writing INDEX only under `.opencode/memory`.
-    expect(memoryRoot.endsWith(join(".opencode", "memory"))).toBe(true);
+    expect(existsSync(join(projectRoot, "INDEX.md"))).toBe(false);
   });
 
   it("registers unconditionally and answers not-initialized before init", async () => {
